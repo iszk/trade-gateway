@@ -1,74 +1,107 @@
-# DB 仕様（MVP）
+# DB 仕様（MVP / Firestore）
 
 ## 目的
 認証トークン管理と webhook 重複防止に必要な最小データモデルを定義する。
 
+## 採用 DB
+- Firestore（Native mode）
+
 ## 方針
-- DB 製品は未確定だが、リレーショナルモデルで表現する
 - すべての日時は UTC で保存する
 - 機密情報（トークン）は暗号化保存を前提とする
+- MVP ではコレクション設計を最小限にし、過剰な正規化は行わない
+- 整合性は Firestore のトランザクションとアプリケーション制御で担保する
 
-## テーブル定義（論理）
+## コレクション定義（論理）
 
 ## 1. `oidc_connections`
 OpenID 連携情報を保持する。
 
-- `id` (string, PK)
-- `provider` (string, not null)
-- `subject` (string, not null)
-- `access_token_encrypted` (string, not null)
-- `refresh_token_encrypted` (string, nullable)
-- `access_token_expires_at` (timestamp, not null)
-- `created_at` (timestamp, not null)
-- `updated_at` (timestamp, not null)
+### ドキュメント ID
+- `provider:subject`
+- 例: `bitflyer:abc123`
 
-制約:
-- Unique: `(provider, subject)`
+### フィールド
+- `provider` (string, required)
+- `subject` (string, required)
+- `access_token_encrypted` (string, required)
+- `refresh_token_encrypted` (string, optional)
+- `access_token_expires_at` (timestamp, required)
+- `created_at` (timestamp, required)
+- `updated_at` (timestamp, required)
+- `expire_at` (timestamp, optional, TTL 用)
+
+### 制約
+- `provider` と `subject` の組み合わせはドキュメント ID で一意にする
 
 ## 2. `webhook_events`
 受信 webhook の受付記録と重複判定に利用する。
 
-- `event_id` (string, PK)
-- `source` (string, not null, default: `tradingview`)
-- `broker` (string, not null, default: `bitflyer`)
-- `symbol` (string, not null)
-- `side` (string, not null)
-- `order_type` (string, not null)
-- `size` (decimal, not null)
-- `occurred_at` (timestamp, not null)
-- `received_at` (timestamp, not null)
-- `status` (string, not null)  
-  `accepted` | `rejected` | `duplicate`
-- `rejection_reason` (string, nullable)
+### ドキュメント ID
+- `event_id`
 
-制約:
-- Unique: `event_id`
+### フィールド
+- `event_id` (string, required)
+- `source` (string, required, default: `tradingview`)
+- `broker` (string, required, default: `bitflyer`)
+- `symbol` (string, required)
+- `side` (string, required)
+- `order_type` (string, required)
+- `size` (number, required)
+- `occurred_at` (timestamp, required)
+- `received_at` (timestamp, required)
+- `status` (string, required)
+  - `accepted` | `rejected`
+- `rejection_reason` (string, optional)
+- `expire_at` (timestamp, required, TTL 用)
+
+### 重複判定仕様
+- `event_id` をドキュメント ID とし、作成時は存在しないことを前提条件にする
+- 既存ドキュメントがある場合は重複として扱い、API は `409` を返す
+- 重複イベント自体は `webhook_events` に新規保存しない（監査はアプリログで補完）
 
 ## 3. `order_dispatch_logs`
 ブローカーへの発注試行を保持する。
 
-- `id` (string, PK)
-- `event_id` (string, not null, FK -> webhook_events.event_id)
-- `broker` (string, not null)  
-  MVP: `bitflyer`
-- `request_payload` (json/string, not null)
-- `response_payload` (json/string, nullable)
-- `result` (string, not null)  
-  `success` | `failure`
-- `error_code` (string, nullable)
-- `created_at` (timestamp, not null)
+### ドキュメント ID
+- 自動採番 ID
+
+### フィールド
+- `event_id` (string, required)
+- `broker` (string, required)
+  - MVP: `bitflyer`
+- `request_payload` (map または string, required)
+- `response_payload` (map または string, optional)
+- `result` (string, required)
+  - `success` | `failure`
+- `error_code` (string, optional)
+- `created_at` (timestamp, required)
+- `expire_at` (timestamp, required, TTL 用)
 
 ## 保持期間（MVP）
 - `webhook_events`: 90 日
 - `order_dispatch_logs`: 180 日
 - `oidc_connections`: 連携中は保持、削除要求時に削除
 
+## TTL 設計（MVP）
+- `webhook_events.expire_at` に `received_at + 90 日` を設定
+- `order_dispatch_logs.expire_at` に `created_at + 180 日` を設定
+- `oidc_connections` は通常 TTL 対象外（削除要求時に明示削除）
+- Firestore TTL ポリシーは対象コレクションごとに有効化する
+
 ## インデックス（MVP）
-- `webhook_events(received_at)`
-- `order_dispatch_logs(event_id)`
-- `oidc_connections(provider, subject)`
+- Firestore の単一フィールドインデックスはデフォルト利用
+- 追加の複合インデックス（必要時のみ）
+  - `order_dispatch_logs`: `event_id` 昇順 + `created_at` 降順
+- `oidc_connections` はドキュメント ID 参照を基本とし、複合インデックスは不要
 
 ## 整合性ルール
-1. `webhook_events.event_id` は API の重複判定キーと一致させる
-2. `order_dispatch_logs.event_id` は必ず既存 `webhook_events` に紐付く
+1. `webhook_events` のドキュメント ID は API の重複判定キー `event_id` と一致させる
+2. `order_dispatch_logs.event_id` は必ず既存 `webhook_events.event_id` に紐付ける（アプリケーションで検証）
 3. トークン平文保存を禁止する
+4. `webhook_events` 作成と初回処理状態更新は同一トランザクションで行う
+
+## セキュリティ要件（MVP）
+- `access_token_encrypted` と `refresh_token_encrypted` は暗号化済み文字列のみ保存
+- 鍵管理は Cloud KMS を利用する
+- 復号は発注時など必要最小限のタイミングに限定する
