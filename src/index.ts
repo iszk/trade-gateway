@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import { pathToFileURL } from 'node:url'
 import { Hono } from 'hono'
@@ -19,7 +20,7 @@ const tradingViewWebhookSchema = z.object({
         .string()
         .refine((value) => RFC3339_REGEX.test(value), 'must be RFC3339 format')
         .refine((value) => !Number.isNaN(Date.parse(value)), 'must be valid datetime'),
-    symbol: z.literal('BTC_JPY'),
+    symbol: z.literal('BTC_JPY').optional(),
     side: z.enum(['BUY', 'SELL']),
     order_type: z.literal('MARKET'),
     size: z.number().positive(),
@@ -27,6 +28,10 @@ const tradingViewWebhookSchema = z.object({
     broker: z.literal('bitflyer').optional(),
     strategy: z.string().optional(),
     note: z.string().optional(),
+    //
+    ticker: z.string().optional(),
+    price: z.number().positive().optional(),
+    interval: z.string().optional(),
 })
 
 const seenEventIds = new Set<string>()
@@ -46,7 +51,7 @@ const parseIpAllowlist = (): Set<string> => {
 }
 
 const sourceIpAllowlist = parseIpAllowlist()
-const webhookSecret = process.env.WEBHOOK_SECRET ?? 'changeme'
+const webhookSecret = process.env.WEBHOOK_SECRET ?? 'change_me'
 
 const extractSourceIp = (headers: Headers): string | null => {
     const xForwardedFor = headers.get('x-forwarded-for')
@@ -72,12 +77,96 @@ const extractSourceIp = (headers: Headers): string | null => {
     return null
 }
 
+const getRequestId = (headers: Headers) => headers.get('x-request-id')?.trim() || randomUUID()
+
 const errorBody = (code: string, message: string) => ({
     error: {
         code,
         message,
     },
 })
+
+const WEBHOOK_SECRET_REDACTION = '[REDACTED]'
+
+const redactSecrets = (value: unknown): unknown => {
+    if (Array.isArray(value)) {
+        return value.map((item) => redactSecrets(item))
+    }
+
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(
+            Object.entries(value).map(([key, entryValue]) => [
+                key,
+                key === 'webhook_secret' ? WEBHOOK_SECRET_REDACTION : redactSecrets(entryValue),
+            ]),
+        )
+    }
+
+    return value
+}
+
+const redactRawBody = (rawBody?: string) => {
+    if (!rawBody) {
+        return rawBody
+    }
+
+    try {
+        return JSON.stringify(redactSecrets(JSON.parse(rawBody)))
+    } catch {
+        return rawBody.replace(
+            /("webhook_secret"\s*:\s*")([^"]*)(")/g,
+            `$1${WEBHOOK_SECRET_REDACTION}$3`,
+        )
+    }
+}
+
+const logWebhook = (
+    level: 'info' | 'warn',
+    event: 'webhook:received' | 'webhook:accepted' | 'webhook:rejected',
+    details: Record<string, unknown>,
+) => {
+    console[level](
+        JSON.stringify({
+            event,
+            ...details,
+            logged_at: new Date().toISOString(),
+        }),
+    )
+}
+
+const logWebhookRejected = ({
+    requestId,
+    reason,
+    sourceIp,
+    error,
+    contentType,
+    rawBody,
+    payload,
+    eventId,
+    parseError,
+}: {
+    requestId: string
+    reason: string
+    sourceIp: string | null
+    error: { code: string; message: string }
+    contentType?: string
+    rawBody?: string
+    payload?: unknown
+    eventId?: string
+    parseError?: string
+}) => {
+    logWebhook('warn', 'webhook:rejected', {
+        request_id: requestId,
+        reason,
+        sourceIp,
+        contentType,
+        event_id: eventId,
+        error,
+        parseError,
+        rawBody: redactRawBody(rawBody),
+        payload: redactSecrets(payload),
+    })
+}
 
 type CreateAppOptions = {
     webhookSecret?: string
@@ -87,18 +176,24 @@ type CreateAppOptions = {
 export const createApp = (options: CreateAppOptions = {}) => {
     const app = new Hono()
     const sourceIpAllowlist = options.sourceIpAllowlist ?? parseIpAllowlist()
-    const webhookSecret = options.webhookSecret ?? process.env.WEBHOOK_SECRET ?? 'changeme'
+    const webhookSecret = options.webhookSecret ?? process.env.WEBHOOK_SECRET ?? 'change_me'
     const seenEventIds = new Set<string>()
 
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
+    app.get('/favicon.ico', (c) => c.body(null, 204))
 
     app.post('/api/webhooks/tradingview', async (c) => {
+        const requestId = getRequestId(c.req.raw.headers)
         const sourceIp = extractSourceIp(c.req.raw.headers)
 
+        c.header('x-request-id', requestId)
+
         if (!sourceIp || !sourceIpAllowlist.has(sourceIp)) {
-            console.warn('[webhook:rejected]', {
+            logWebhookRejected({
+                requestId,
                 reason: 'forbidden_source_ip',
                 sourceIp,
+                error: errorBody('FORBIDDEN_SOURCE_IP', 'source ip is not allowed').error,
             })
             return c.json(
                 errorBody('FORBIDDEN_SOURCE_IP', 'source ip is not allowed'),
@@ -108,10 +203,16 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
         const contentType = c.req.header('content-type')
         if (!contentType || !contentType.includes('application/json')) {
-            console.warn('[webhook:rejected]', {
+            const rawBody = await c.req.text()
+
+            logWebhookRejected({
+                requestId,
                 reason: 'invalid_content_type',
                 sourceIp,
                 contentType,
+                rawBody,
+                error: errorBody('INVALID_REQUEST', 'content-type must be application/json')
+                    .error,
             })
             return c.json(
                 errorBody('INVALID_REQUEST', 'content-type must be application/json'),
@@ -119,17 +220,31 @@ export const createApp = (options: CreateAppOptions = {}) => {
             )
         }
 
+        const rawBody = await c.req.text()
         let jsonPayload: unknown
 
         try {
-            jsonPayload = await c.req.json()
-        } catch {
-            console.warn('[webhook:rejected]', {
+            jsonPayload = JSON.parse(rawBody)
+        } catch (error) {
+            logWebhookRejected({
+                requestId,
                 reason: 'invalid_json',
                 sourceIp,
+                contentType,
+                rawBody,
+                error: errorBody('INVALID_REQUEST', 'invalid JSON body').error,
+                parseError: error instanceof Error ? error.message : String(error),
             })
+
             return c.json(errorBody('INVALID_REQUEST', 'invalid JSON body'), 400)
         }
+
+        logWebhook('info', 'webhook:received', {
+            request_id: requestId,
+            sourceIp,
+            contentType,
+            payload: redactSecrets(jsonPayload),
+        })
 
         const parsed = tradingViewWebhookSchema.safeParse(jsonPayload)
 
@@ -138,10 +253,14 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 .map((issue) => `${issue.path.join('.') || 'body'}: ${issue.message}`)
                 .join('; ')
 
-            console.warn('[webhook:rejected]', {
+            logWebhookRejected({
+                requestId,
                 reason: 'validation_error',
                 sourceIp,
-                message,
+                contentType,
+                rawBody,
+                payload: jsonPayload,
+                error: errorBody('INVALID_REQUEST', message).error,
             })
 
             return c.json(errorBody('INVALID_REQUEST', message), 400)
@@ -153,10 +272,15 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         if (payload.webhook_secret !== webhookSecret) {
-            console.warn('[webhook:rejected]', {
+            logWebhookRejected({
+                requestId,
                 reason: 'invalid_webhook_secret',
                 sourceIp,
-                event_id: payload.event_id,
+                contentType,
+                rawBody,
+                payload,
+                eventId: payload.event_id,
+                error: errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid').error,
             })
             return c.json(
                 errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid'),
@@ -165,10 +289,15 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         if (seenEventIds.has(payload.event_id)) {
-            console.warn('[webhook:rejected]', {
+            logWebhookRejected({
+                requestId,
                 reason: 'duplicated_event',
                 sourceIp,
-                event_id: payload.event_id,
+                contentType,
+                rawBody,
+                payload,
+                eventId: payload.event_id,
+                error: errorBody('DUPLICATED_EVENT', 'event_id is duplicated').error,
             })
             return c.json(errorBody('DUPLICATED_EVENT', 'event_id is duplicated'), 409)
         }
@@ -176,10 +305,10 @@ export const createApp = (options: CreateAppOptions = {}) => {
         seenEventIds.add(payload.event_id)
 
         const { webhook_secret: _, ...safePayload } = payload
-        console.info('[webhook:accepted]', {
+        logWebhook('info', 'webhook:accepted', {
+            request_id: requestId,
             sourceIp,
             payload: safePayload,
-            received_at: new Date().toISOString(),
         })
 
         return c.json(
