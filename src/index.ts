@@ -14,18 +14,16 @@ const DEFAULT_ALLOWLIST = [
 const tradingViewWebhookSchema = z.object({
     event_id: z.string().min(1),
     occurred_at: z.coerce.number().int().nonnegative(),
-    symbol: z.literal('BTC_JPY').optional(),
+    ticker: z.string().min(1),
     side: z.enum(['BUY', 'SELL']),
-    order_type: z.literal('MARKET'),
+    order_type: z.literal('MARKET').optional(),
     size: z.number().positive(),
+    price: z.number().optional(),
+    interval: z.string().optional(),
     webhook_secret: z.string().min(1),
     broker: z.literal('bitflyer').optional(),
     strategy: z.string().optional(),
     note: z.string().optional(),
-    //
-    ticker: z.string().optional(),
-    price: z.number().positive().optional(),
-    interval: z.string().optional(),
 })
 
 const seenEventIds = new Set<string>()

@@ -28,7 +28,7 @@ const getLogEntry = (call: unknown[] | undefined) => {
 const makePayload = (eventId: string, webhookSecret = 'test-secret') => ({
     event_id: eventId,
     occurred_at: 1773837296000,
-    symbol: 'BTC_JPY',
+    ticker: 'BTC_JPY',
     side: 'BUY',
     order_type: 'MARKET',
     size: 0.01,
@@ -91,6 +91,29 @@ test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => 
             webhook_secret: '[REDACTED]',
         },
         logged_at: receivedLog?.logged_at,
+    })
+})
+
+test('POST /api/webhooks/tradingview accepts payload without order_type', async () => {
+    const app = createApp({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+    })
+
+    const { order_type: _, ...payloadWithoutOrderType } = makePayload('evt-accepted-no-order-type')
+    const payload = {
+        ...payloadWithoutOrderType,
+        price: 123456.78,
+        interval: '15',
+    }
+
+    const res = await postWebhook(app, payload)
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(body, {
+        status: 'accepted',
+        event_id: 'evt-accepted-no-order-type',
     })
 })
 
