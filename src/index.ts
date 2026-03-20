@@ -11,15 +11,9 @@ const DEFAULT_ALLOWLIST = [
     '52.32.178.7',
 ]
 
-const RFC3339_REGEX =
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
-
 const tradingViewWebhookSchema = z.object({
     event_id: z.string().min(1),
-    occurred_at: z
-        .string()
-        .refine((value) => RFC3339_REGEX.test(value), 'must be RFC3339 format')
-        .refine((value) => !Number.isNaN(Date.parse(value)), 'must be valid datetime'),
+    occurred_at: z.coerce.number().int().nonnegative(),
     symbol: z.literal('BTC_JPY').optional(),
     side: z.enum(['BUY', 'SELL']),
     order_type: z.literal('MARKET'),

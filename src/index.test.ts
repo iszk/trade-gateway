@@ -27,7 +27,7 @@ const getLogEntry = (call: unknown[] | undefined) => {
 
 const makePayload = (eventId: string, webhookSecret = 'test-secret') => ({
     event_id: eventId,
-    occurred_at: '2026-03-18T12:34:56Z',
+    occurred_at: 1773837296000,
     symbol: 'BTC_JPY',
     side: 'BUY',
     order_type: 'MARKET',
@@ -102,7 +102,7 @@ test('POST /api/webhooks/tradingview returns 400 on validation error', async () 
 
     const invalidPayload = {
         ...makePayload('evt-invalid-1'),
-        occurred_at: 'bad-date',
+        occurred_at: 'bad-date-ms',
     }
 
     const { result: res, calls } = await captureConsole('warn', () => postWebhook(app, invalidPayload))
@@ -121,7 +121,7 @@ test('POST /api/webhooks/tradingview returns 400 on validation error', async () 
     })
     assert.deepEqual(rejectedLog?.error, {
         code: 'INVALID_REQUEST',
-        message: 'occurred_at: must be RFC3339 format; occurred_at: must be valid datetime',
+        message: 'occurred_at: Invalid input: expected number, received NaN',
     })
     assert.equal(
         rejectedLog?.rawBody,
