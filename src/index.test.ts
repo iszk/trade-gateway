@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createApp } from './index.js'
+import type { DispatchOrderFn } from './types/order.js'
 
 const captureConsole = <T>(method: 'info' | 'warn', run: () => T | Promise<T>) => {
     const original = console[method]
@@ -50,6 +51,24 @@ const postWebhook = async (
     })
 }
 
+const createDispatchStub = (override?: DispatchOrderFn) => {
+    const calls: Parameters<DispatchOrderFn>[0][] = []
+    const dispatchOrder: DispatchOrderFn = async (order) => {
+        calls.push(order)
+        if (override) {
+            return override(order)
+        }
+
+        return {
+            ok: true,
+            broker: 'bitflyer',
+            providerOrderId: 'JRF-test-1',
+        }
+    }
+
+    return { dispatchOrder, calls }
+}
+
 test('GET /api/health returns 200', async () => {
     const app = createApp({
         webhookSecret: 'test-secret',
@@ -62,9 +81,11 @@ test('GET /api/health returns 200', async () => {
 })
 
 test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
     })
 
     const payload = makePayload('evt-accepted-1')
@@ -92,17 +113,29 @@ test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => 
         },
         logged_at: receivedLog?.logged_at,
     })
-})
 
+    assert.equal(dispatchCalls.length, 1)
+    assert.deepEqual(dispatchCalls[0], {
+        eventId: 'evt-accepted-1',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.01,
+        requestId: receivedLog?.request_id,
+    })
+})
 test('POST /api/webhooks/tradingview accepts payload without order_type', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
     })
 
     const { order_type: _, ...payloadWithoutOrderType } = makePayload('evt-accepted-no-order-type')
     const payload = {
         ...payloadWithoutOrderType,
+        broker: 'auto',
         price: 123456.78,
         interval: '15',
     }
@@ -115,6 +148,8 @@ test('POST /api/webhooks/tradingview accepts payload without order_type', async 
         status: 'accepted',
         event_id: 'evt-accepted-no-order-type',
     })
+    assert.equal(dispatchCalls.length, 1)
+    assert.equal(dispatchCalls[0]?.broker, 'bitflyer')
 })
 
 test('POST /api/webhooks/tradingview returns 400 on validation error', async () => {
@@ -236,10 +271,43 @@ test('POST /api/webhooks/tradingview returns 403 on forbidden source ip', async 
     assert.equal(body.error.code, 'FORBIDDEN_SOURCE_IP')
 })
 
-test('POST /api/webhooks/tradingview returns 409 on duplicate event_id', async () => {
+test('POST /api/webhooks/tradingview still returns 202 when dispatch failed', async () => {
+    const { dispatchOrder } = createDispatchStub(async () => ({
+        ok: false,
+        broker: 'bitflyer',
+        code: 'BROKER_REQUEST_FAILED',
+        message: 'bitflyer api timeout',
+    }))
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+    })
+
+    const { result: res, calls } = await captureConsole('warn', () =>
+        postWebhook(app, makePayload('evt-dispatch-failure-1')),
+    )
+    const body = await res.json()
+    const rejectedLog = getLogEntry(calls[0])
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(body, {
+        status: 'accepted',
+        event_id: 'evt-dispatch-failure-1',
+    })
+    assert.equal(rejectedLog?.reason, 'broker_dispatch_failed')
+    assert.deepEqual(rejectedLog?.error, {
+        code: 'BROKER_REQUEST_FAILED',
+        message: 'bitflyer api timeout',
+    })
+})
+
+test('POST /api/webhooks/tradingview returns 409 on duplicate event_id', async () => {
+    const { dispatchOrder } = createDispatchStub()
+    const app = createApp({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
     })
 
     const first = await postWebhook(app, makePayload('evt-dup-1'))

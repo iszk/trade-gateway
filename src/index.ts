@@ -4,6 +4,9 @@ import { pathToFileURL } from 'node:url'
 import { Hono } from 'hono'
 import { z } from 'zod'
 
+import { createOrderDispatcher, resolveBroker } from './services/order-dispatcher.js'
+import type { DispatchOrderFn, IncomingBroker } from './types/order.js'
+
 const DEFAULT_ALLOWLIST = [
     '52.89.214.238',
     '34.212.75.30',
@@ -21,7 +24,7 @@ const tradingViewWebhookSchema = z.object({
     price: z.number().optional(),
     interval: z.string().optional(),
     webhook_secret: z.string().min(1),
-    broker: z.literal('bitflyer').optional(),
+    broker: z.enum(['bitflyer', 'auto']).optional(),
     strategy: z.string().optional(),
     note: z.string().optional(),
 })
@@ -163,12 +166,14 @@ const logWebhookRejected = ({
 type CreateAppOptions = {
     webhookSecret?: string
     sourceIpAllowlist?: Set<string>
+    dispatchOrder?: DispatchOrderFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
     const app = new Hono()
     const sourceIpAllowlist = options.sourceIpAllowlist ?? parseIpAllowlist()
     const webhookSecret = options.webhookSecret ?? process.env.WEBHOOK_SECRET ?? 'change_me'
+    const dispatchOrder = options.dispatchOrder ?? createOrderDispatcher()
     const seenEventIds = new Set<string>()
 
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
@@ -260,7 +265,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
         const payload = {
             ...parsed.data,
-            broker: parsed.data.broker ?? 'bitflyer',
+            broker: resolveBroker(parsed.data.broker as IncomingBroker | undefined),
         }
 
         if (payload.webhook_secret !== webhookSecret) {
@@ -296,11 +301,47 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
         seenEventIds.add(payload.event_id)
 
+        const orderResult = await dispatchOrder({
+            eventId: payload.event_id,
+            broker: payload.broker,
+            ticker: payload.ticker,
+            side: payload.side,
+            size: payload.size,
+            requestId,
+        })
+
+        if (!orderResult.ok) {
+            logWebhook('warn', 'webhook:rejected', {
+                request_id: requestId,
+                reason: 'broker_dispatch_failed',
+                sourceIp,
+                event_id: payload.event_id,
+                error: {
+                    code: orderResult.code,
+                    message: orderResult.message,
+                },
+                payload: redactSecrets(payload),
+            })
+        }
+
         const { webhook_secret: _, ...safePayload } = payload
         logWebhook('info', 'webhook:accepted', {
             request_id: requestId,
             sourceIp,
-            payload: safePayload,
+            payload: {
+                ...safePayload,
+                dispatch_result: orderResult.ok
+                    ? {
+                        status: 'success',
+                        broker: orderResult.broker,
+                        provider_order_id: orderResult.providerOrderId,
+                    }
+                    : {
+                        status: 'failed',
+                        broker: orderResult.broker,
+                        code: orderResult.code,
+                    },
+            },
         })
 
         return c.json(
