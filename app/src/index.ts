@@ -7,6 +7,9 @@ import { z } from 'zod'
 import { createOrderDispatcher, resolveBroker } from './services/order-dispatcher.js'
 import type { DispatchOrderFn, IncomingBroker } from './types/order.js'
 
+import pino from 'pino'
+import { createGcpLoggingPinoConfig } from '@google-cloud/pino-logging-gcp-config'
+
 const DEFAULT_ALLOWLIST = [
     '52.89.214.238',
     '34.212.75.30',
@@ -83,6 +86,14 @@ const errorBody = (code: string, message: string) => ({
 
 const WEBHOOK_SECRET_REDACTION = '[REDACTED]'
 
+const logger = (() => {
+    try {
+        return pino(createGcpLoggingPinoConfig())
+    } catch {
+        return pino()
+    }
+})()
+
 const redactSecrets = (value: unknown): unknown => {
     if (Array.isArray(value)) {
         return value.map((item) => redactSecrets(item))
@@ -120,13 +131,10 @@ const logWebhook = (
     event: 'webhook:received' | 'webhook:accepted' | 'webhook:rejected',
     details: Record<string, unknown>,
 ) => {
-    console[level](
-        JSON.stringify({
-            event,
-            ...details,
-            logged_at: new Date().toISOString(),
-        }),
-    )
+    logger[level]({
+        event,
+        ...details,
+    })
 }
 
 const logWebhookRejected = ({
@@ -176,6 +184,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const dispatchOrder = options.dispatchOrder ?? createOrderDispatcher()
     const seenEventIds = new Set<string>()
 
+    app.get('/', (c) => c.json({ hello: 'world' }))
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
     app.get('/favicon.ico', (c) => c.body(null, 204))
 
@@ -364,7 +373,7 @@ const isMainModule = process.argv[1]
     : false
 
 if (isMainModule) {
-    console.info(`trade-gateway listening on :${port}`)
+    logger.info({ port }, 'trade-gateway listening')
 
     serve({
         fetch: app.fetch,

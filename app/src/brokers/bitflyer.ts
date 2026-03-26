@@ -65,6 +65,7 @@ export class BitflyerClient {
             .update(`${timestamp}POST${path}${body}`)
             .digest('hex')
 
+        /*
         console.log('BitflyerClient sending request', {
             url: `${this.baseUrl}${path}`,
             body,
@@ -76,8 +77,8 @@ export class BitflyerClient {
                 'x-request-id': order.requestId,
             },
         })
+        */
 
-        //*
         let response: Response
         try {
             response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -116,10 +117,6 @@ export class BitflyerClient {
         if (!providerOrderId) {
             return buildFailure('BROKER_REQUEST_FAILED', 'missing child_order_acceptance_id')
         }
-        // */
-
-        // const providerOrderId = "1";
-
 
         return {
             ok: true,
