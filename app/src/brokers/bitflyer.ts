@@ -30,6 +30,20 @@ const buildFailure = (
 
 const normalizeProductCode = (ticker: string) => ticker.replace(/\//g, '_').toUpperCase()
 
+// webhook 側の ticker から bitflyer の product_code へのマッピング
+// マップにない ticker は normalizeProductCode にフォールバック
+const TICKER_PRODUCT_CODE_MAP: Record<string, string> = {
+    'BITFLYER:FXBTCJPY': 'FX_BTC_JPY',
+    'FXBTCJPY': 'FX_BTC_JPY',
+    'FX_BTC_JPY': 'FX_BTC_JPY',
+    'BTCJPY': 'FX_BTC_JPY',
+    'BTC_JPY': 'BTC_JPY',
+    'BTC/JPY': 'BTC_JPY',
+}
+
+const resolveProductCode = (ticker: string): string =>
+    TICKER_PRODUCT_CODE_MAP[ticker.toUpperCase()] ?? normalizeProductCode(ticker)
+
 export class BitflyerClient {
     private readonly apiKey?: string
     private readonly apiSecret?: string
@@ -48,10 +62,9 @@ export class BitflyerClient {
             return buildFailure('BROKER_NOT_CONFIGURED', 'bitflyer api credentials are missing')
         }
 
-        let size = order.size
-        let productCode = normalizeProductCode(order.ticker)
-        size = 0.01
-        productCode = 'FX_BTC_JPY'
+        // const size = order.size
+        const size = 0.01 // TODO: とりあえず固定値。将来的に order.size をそのまま渡せるようにする
+        const productCode = resolveProductCode(order.ticker)
 
         const path = SEND_CHILD_ORDER_PATH
         const timestamp = Date.now().toString()

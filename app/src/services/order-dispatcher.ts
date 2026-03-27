@@ -6,9 +6,18 @@ type OrderDispatcherOptions = {
     bitflyerClient?: BitflyerClient
 }
 
-export const resolveBroker = (broker?: IncomingBroker): OrderRequest['broker'] => {
+// webhook 側の ticker から broker を決定するマッピング
+const TICKER_BROKER_MAP: Record<string, OrderRequest['broker']> = {
+    'BTC_JPY': 'bitflyer',
+    'BTC/JPY': 'bitflyer',
+    'FX_BTC_JPY': 'bitflyer',
+    'FXBTCJPY': 'bitflyer',
+    'BTCJPY': 'bitflyer',
+}
+
+export const resolveBroker = (broker: IncomingBroker | undefined, ticker: string): OrderRequest['broker'] => {
     if (!broker || broker === 'auto') {
-        return 'bitflyer'
+        return TICKER_BROKER_MAP[ticker.toUpperCase()] ?? 'bitflyer'
     }
 
     return broker

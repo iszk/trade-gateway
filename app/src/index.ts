@@ -274,7 +274,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
         const payload = {
             ...parsed.data,
-            broker: resolveBroker(parsed.data.broker as IncomingBroker | undefined),
+            broker: resolveBroker(parsed.data.broker as IncomingBroker | undefined, parsed.data.ticker),
         }
 
         if (payload.webhook_secret !== webhookSecret) {
