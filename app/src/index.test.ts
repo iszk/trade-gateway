@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 import { createApp } from './index.js'
 import type { DispatchOrderFn } from './types/order.js'
+import { DuplicateEventError } from './services/webhook-events.js'
+import type { CreateWebhookEventFn } from './services/webhook-events.js'
 
 const captureConsole = <T>(method: 'info' | 'warn', run: () => T | Promise<T>) => {
     const original = console[method]
@@ -69,6 +71,17 @@ const createDispatchStub = (override?: DispatchOrderFn) => {
     return { dispatchOrder, calls }
 }
 
+const createWebhookEventStub = (): { createWebhookEvent: CreateWebhookEventFn; seen: Set<string> } => {
+    const seen = new Set<string>()
+    const createWebhookEvent: CreateWebhookEventFn = async (data) => {
+        if (seen.has(data.event_id)) {
+            throw new DuplicateEventError(data.event_id)
+        }
+        seen.add(data.event_id)
+    }
+    return { createWebhookEvent, seen }
+}
+
 test('GET /api/health returns 200', async () => {
     const app = createApp({
         webhookSecret: 'test-secret',
@@ -82,10 +95,12 @@ test('GET /api/health returns 200', async () => {
 
 test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
+        createWebhookEvent,
     })
 
     const payload = makePayload('evt-accepted-1')
@@ -126,10 +141,12 @@ test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => 
 })
 test('POST /api/webhooks/tradingview accepts payload without order_type', async () => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
+        createWebhookEvent,
     })
 
     const { order_type: _, ...payloadWithoutOrderType } = makePayload('evt-accepted-no-order-type')
@@ -220,9 +237,11 @@ test('POST /api/webhooks/tradingview masks webhook_secret in invalid secret logs
 })
 
 test('POST /api/webhooks/tradingview uses incoming x-request-id when provided', async () => {
+    const { createWebhookEvent } = createWebhookEventStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
+        createWebhookEvent,
     })
 
     const payload = makePayload('evt-request-id-1')
@@ -278,10 +297,12 @@ test('POST /api/webhooks/tradingview still returns 202 when dispatch failed', as
         code: 'BROKER_REQUEST_FAILED',
         message: 'bitflyer api timeout',
     }))
+    const { createWebhookEvent } = createWebhookEventStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
+        createWebhookEvent,
     })
 
     const { result: res, calls } = await captureConsole('warn', () =>
@@ -304,10 +325,12 @@ test('POST /api/webhooks/tradingview still returns 202 when dispatch failed', as
 
 test('POST /api/webhooks/tradingview returns 409 on duplicate event_id', async () => {
     const { dispatchOrder } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
+        createWebhookEvent,
     })
 
     const first = await postWebhook(app, makePayload('evt-dup-1'))

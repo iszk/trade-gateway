@@ -6,6 +6,11 @@ import { z } from 'zod'
 
 import { createOrderDispatcher, resolveBroker } from './services/order-dispatcher.js'
 import type { DispatchOrderFn, IncomingBroker } from './types/order.js'
+import { getFirestoreClient } from './firestore.js'
+import { createWebhookEventFn, DuplicateEventError } from './services/webhook-events.js'
+import type { CreateWebhookEventFn } from './services/webhook-events.js'
+import { createOrderDispatchLogFn } from './services/order-dispatch-logs.js'
+import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 
 import pino from 'pino'
 import { createGcpLoggingPinoConfig } from '@google-cloud/pino-logging-gcp-config'
@@ -31,8 +36,6 @@ const tradingViewWebhookSchema = z.object({
     strategy: z.string().optional(),
     note: z.string().optional(),
 })
-
-const seenEventIds = new Set<string>()
 
 const parseIpAllowlist = (): Set<string> => {
     const fromEnv = process.env.TRADINGVIEW_IP_ALLOWLIST
@@ -175,6 +178,8 @@ type CreateAppOptions = {
     webhookSecret?: string
     sourceIpAllowlist?: Set<string>
     dispatchOrder?: DispatchOrderFn
+    createWebhookEvent?: CreateWebhookEventFn
+    createOrderDispatchLog?: CreateOrderDispatchLogFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -182,7 +187,10 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const sourceIpAllowlist = options.sourceIpAllowlist ?? parseIpAllowlist()
     const webhookSecret = options.webhookSecret ?? process.env.WEBHOOK_SECRET ?? 'change_me'
     const dispatchOrder = options.dispatchOrder ?? createOrderDispatcher()
-    const seenEventIds = new Set<string>()
+    const createWebhookEvent: CreateWebhookEventFn = options.createWebhookEvent ??
+        ((data) => createWebhookEventFn(getFirestoreClient())(data))
+    const createOrderDispatchLog: CreateOrderDispatchLogFn = options.createOrderDispatchLog ??
+        ((data) => createOrderDispatchLogFn(getFirestoreClient())(data))
 
     app.get('/', (c) => c.json({ hello: 'world' }))
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
@@ -294,21 +302,35 @@ export const createApp = (options: CreateAppOptions = {}) => {
             )
         }
 
-        if (seenEventIds.has(payload.event_id)) {
-            logWebhookRejected({
-                requestId,
-                reason: 'duplicated_event',
-                sourceIp,
-                contentType,
-                rawBody,
-                payload,
-                eventId: payload.event_id,
-                error: errorBody('DUPLICATED_EVENT', 'event_id is duplicated').error,
+        try {
+            await createWebhookEvent({
+                event_id: payload.event_id,
+                source: 'tradingview',
+                broker: payload.broker,
+                symbol: payload.ticker,
+                side: payload.side,
+                order_type: payload.order_type ?? 'MARKET',
+                size: payload.size,
+                occurred_at: new Date(payload.occurred_at),
+                received_at: new Date(),
+                status: 'accepted',
             })
-            return c.json(errorBody('DUPLICATED_EVENT', 'event_id is duplicated'), 409)
+        } catch (error) {
+            if (error instanceof DuplicateEventError) {
+                logWebhookRejected({
+                    requestId,
+                    reason: 'duplicated_event',
+                    sourceIp,
+                    contentType,
+                    rawBody,
+                    payload,
+                    eventId: payload.event_id,
+                    error: errorBody('DUPLICATED_EVENT', 'event_id is duplicated').error,
+                })
+                return c.json(errorBody('DUPLICATED_EVENT', 'event_id is duplicated'), 409)
+            }
+            throw error
         }
-
-        seenEventIds.add(payload.event_id)
 
         const orderResult = await dispatchOrder({
             eventId: payload.event_id,
@@ -332,6 +354,26 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 payload: redactSecrets(payload),
             })
         }
+
+        createOrderDispatchLog({
+            event_id: payload.event_id,
+            broker: payload.broker,
+            request_payload: {
+                eventId: payload.event_id,
+                broker: payload.broker,
+                ticker: payload.ticker,
+                side: payload.side,
+                size: payload.size,
+                requestId,
+            },
+            response_payload: orderResult.ok
+                ? { providerOrderId: orderResult.providerOrderId }
+                : undefined,
+            result: orderResult.ok ? 'success' : 'failure',
+            error_code: orderResult.ok ? undefined : orderResult.code,
+        }).catch((err) => {
+            logger.warn({ event: 'dispatch_log:failed', error: err }, 'failed to write order dispatch log')
+        })
 
         const { webhook_secret: _, ...safePayload } = payload
         logWebhook('info', 'webhook:accepted', {
