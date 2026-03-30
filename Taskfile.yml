@@ -1,0 +1,26 @@
+version: "3.8"
+
+includes:
+  app:
+    taskfile: app/Taskfile.yml
+    dir: app
+
+tasks:
+  default:
+    cmds:
+      - echo 'hello'
+
+  deploy:
+    cmds:
+      - echo 'deploy all services'
+      - task: app:deploy
+
+  test:
+    cmds:
+      - echo 'run all tests'
+      - task: app:test
+
+  test_buy:
+    cmds:
+      - curl -X POST http://localhost:3000/api/webhooks/tradingview -H "Content-Type:application/json"  -d '{"event_id":"123456", "occurred_at":1774336885000, "ticker":"FX_BTC_JPY", "side":"BUY", "size":10, "price":150.00, "strategy":"my_strategy", "interval":"1h", "note":"test order", "webhook_secret":"change_me"}'
+    desc: Test the buy webhook
