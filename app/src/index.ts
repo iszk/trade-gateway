@@ -6,10 +6,9 @@ import { z } from 'zod'
 
 import { createOrderDispatcher, resolveBroker } from './services/order-dispatcher.js'
 import type { DispatchOrderFn, IncomingBroker } from './types/order.js'
-import { getFirestoreClient } from './firestore.js'
-import { createWebhookEventFn, DuplicateEventError } from './services/webhook-events.js'
+import { DuplicateEventError, createDefaultWebhookEventFn } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
-import { createOrderDispatchLogFn } from './services/order-dispatch-logs.js'
+import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 
 import pino from 'pino'
@@ -148,10 +147,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const sourceIpAllowlist = options.sourceIpAllowlist ?? parseIpAllowlist()
     const webhookSecret = options.webhookSecret ?? process.env.WEBHOOK_SECRET ?? 'change_me'
     const dispatchOrder = options.dispatchOrder ?? createOrderDispatcher()
-    const createWebhookEvent: CreateWebhookEventFn = options.createWebhookEvent ??
-        ((data) => createWebhookEventFn(getFirestoreClient())(data))
-    const createOrderDispatchLog: CreateOrderDispatchLogFn = options.createOrderDispatchLog ??
-        ((data) => createOrderDispatchLogFn(getFirestoreClient())(data))
+    const createWebhookEvent = options.createWebhookEvent ?? createDefaultWebhookEventFn()
+    const createOrderDispatchLog = options.createOrderDispatchLog ?? createDefaultOrderDispatchLogFn()
     const logger = options.logger ?? defaultLogger
 
     const logWebhook = (

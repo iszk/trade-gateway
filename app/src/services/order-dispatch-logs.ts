@@ -1,4 +1,5 @@
 import type { Firestore } from 'firebase-admin/firestore'
+import { getFirestoreClient } from '../firestore.js'
 
 export type OrderDispatchLogInput = {
     event_id: string
@@ -23,3 +24,6 @@ export const createOrderDispatchLogFn = (db: Firestore): CreateOrderDispatchLogF
         })
     }
 }
+
+export const createDefaultOrderDispatchLogFn = (): CreateOrderDispatchLogFn =>
+    createOrderDispatchLogFn(getFirestoreClient())

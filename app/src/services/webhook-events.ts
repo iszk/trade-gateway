@@ -1,4 +1,5 @@
 import type { Firestore } from 'firebase-admin/firestore'
+import { getFirestoreClient } from '../firestore.js'
 
 export type WebhookEventInput = {
     event_id: string
@@ -47,3 +48,6 @@ export const createWebhookEventFn = (db: Firestore): CreateWebhookEventFn => {
         }
     }
 }
+
+export const createDefaultWebhookEventFn = (): CreateWebhookEventFn =>
+    createWebhookEventFn(getFirestoreClient())
