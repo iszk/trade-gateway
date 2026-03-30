@@ -34,7 +34,7 @@ const tradingViewWebhookSchema = z.object({
     price: z.number().optional(),
     interval: z.string().optional(),
     webhook_secret: z.string().min(1),
-    broker: z.enum(['bitflyer', 'auto']).optional(),
+    broker: z.enum(['bitflyer', 'dummy', 'auto']).optional(),
     strategy: z.string().optional(),
     note: z.string().optional(),
 })

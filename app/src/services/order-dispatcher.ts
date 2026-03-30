@@ -1,9 +1,11 @@
 import { BitflyerClient } from '../brokers/bitflyer.js'
+import { DummyClient } from '../brokers/dummy.js'
 import { config } from '../config.js'
 import type { DispatchOrderFn, IncomingBroker, OrderRequest } from '../types/order.js'
 
 type OrderDispatcherOptions = {
     bitflyerClient?: BitflyerClient
+    dummyClient?: DummyClient
 }
 
 // webhook 側の ticker から broker を決定するマッピング
@@ -33,11 +35,14 @@ export const createOrderDispatcher = (
             apiSecret: config.bitflyer.apiSecret,
             baseUrl: config.bitflyer.baseUrl,
         })
+    const dummyClient = options.dummyClient ?? new DummyClient()
 
     return async (order) => {
         switch (order.broker) {
             case 'bitflyer':
                 return bitflyerClient.sendMarketOrder(order)
+            case 'dummy':
+                return dummyClient.sendMarketOrder(order)
             default:
                 return {
                     ok: false,
