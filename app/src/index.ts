@@ -12,6 +12,9 @@ import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 
 import pino from 'pino'
+import * as pinoCallerNs from 'pino-caller'
+// pino-caller is a CJS module; at runtime .default is the traceCaller function
+const pinoCaller = pinoCallerNs.default as unknown as (l: pino.Logger) => pino.Logger
 import { createGcpLoggingPinoConfig } from '@google-cloud/pino-logging-gcp-config'
 
 const DEFAULT_ALLOWLIST = [
@@ -91,13 +94,14 @@ const WEBHOOK_SECRET_REDACTION = '[REDACTED]'
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
     warn(obj: Record<string, unknown>, msg?: string): void
+    child(bindings: Record<string, unknown>): Logger
 }
 
 const defaultLogger: Logger = (() => {
     try {
-        return pino(createGcpLoggingPinoConfig())
+        return pinoCaller(pino(createGcpLoggingPinoConfig()))
     } catch {
-        return pino()
+        return pinoCaller(pino())
     }
 })()
 
@@ -133,6 +137,25 @@ const redactRawBody = (rawBody?: string) => {
     }
 }
 
+const extractTraceContext = (headers: Headers): Record<string, unknown> => {
+    const projectId = process.env.GOOGLE_CLOUD_PROJECT
+    if (!projectId) return {}
+
+    const traceHeader = headers.get('x-cloud-trace-context')
+    if (!traceHeader) return {}
+
+    // Format: TRACE_ID/SPAN_ID;o=TRACE_FLAG
+    const match = traceHeader.match(/^([^/]+)\/([^;]+)(?:;o=(\d+))?/)
+    if (!match) return {}
+
+    const [, traceId, spanId, flag] = match
+    return {
+        'logging.googleapis.com/trace': `projects/${projectId}/traces/${traceId}`,
+        'logging.googleapis.com/spanId': spanId,
+        'logging.googleapis.com/trace_sampled': flag === '1',
+    }
+}
+
 type CreateAppOptions = {
     webhookSecret?: string
     sourceIpAllowlist?: Set<string>
@@ -155,8 +178,10 @@ export const createApp = (options: CreateAppOptions = {}) => {
         level: 'info' | 'warn',
         event: 'webhook:received' | 'webhook:accepted' | 'webhook:rejected',
         details: Record<string, unknown>,
+        reqLogger?: Logger,
     ) => {
-        logger[level]({
+        const log = reqLogger ?? logger
+        log[level]({
             event,
             logged_at: new Date().toISOString(),
             ...details,
@@ -173,6 +198,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         payload,
         eventId,
         parseError,
+        reqLogger,
     }: {
         requestId: string
         reason: string
@@ -183,6 +209,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         payload?: unknown
         eventId?: string
         parseError?: string
+        reqLogger?: Logger
     }) => {
         logWebhook('warn', 'webhook:rejected', {
             request_id: requestId,
@@ -194,7 +221,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             parseError,
             rawBody: redactRawBody(rawBody),
             payload: redactSecrets(payload),
-        })
+        }, reqLogger)
     }
 
     app.get('/', (c) => c.json({ hello: 'world' }))
@@ -204,6 +231,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     app.post('/api/webhooks/tradingview', async (c) => {
         const requestId = getRequestId(c.req.raw.headers)
         const sourceIp = extractSourceIp(c.req.raw.headers)
+        const reqLogger = logger.child(extractTraceContext(c.req.raw.headers))
 
         c.header('x-request-id', requestId)
 
@@ -213,6 +241,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 reason: 'forbidden_source_ip',
                 sourceIp,
                 error: errorBody('FORBIDDEN_SOURCE_IP', 'source ip is not allowed').error,
+                reqLogger,
             })
             return c.json(
                 errorBody('FORBIDDEN_SOURCE_IP', 'source ip is not allowed'),
@@ -232,6 +261,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 rawBody,
                 error: errorBody('INVALID_REQUEST', 'content-type must be application/json')
                     .error,
+                reqLogger,
             })
             return c.json(
                 errorBody('INVALID_REQUEST', 'content-type must be application/json'),
@@ -253,6 +283,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 rawBody,
                 error: errorBody('INVALID_REQUEST', 'invalid JSON body').error,
                 parseError: error instanceof Error ? error.message : String(error),
+                reqLogger,
             })
 
             return c.json(errorBody('INVALID_REQUEST', 'invalid JSON body'), 400)
@@ -263,7 +294,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             sourceIp,
             contentType,
             payload: redactSecrets(jsonPayload),
-        })
+        }, reqLogger)
 
         const parsed = tradingViewWebhookSchema.safeParse(jsonPayload)
 
@@ -280,6 +311,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 rawBody,
                 payload: jsonPayload,
                 error: errorBody('INVALID_REQUEST', message).error,
+                reqLogger,
             })
 
             return c.json(errorBody('INVALID_REQUEST', message), 400)
@@ -300,6 +332,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 payload,
                 eventId: payload.event_id,
                 error: errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid').error,
+                reqLogger,
             })
             return c.json(
                 errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid'),
@@ -331,6 +364,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                     payload,
                     eventId: payload.event_id,
                     error: errorBody('DUPLICATED_EVENT', 'event_id is duplicated').error,
+                    reqLogger,
                 })
                 return c.json(errorBody('DUPLICATED_EVENT', 'event_id is duplicated'), 409)
             }
@@ -357,7 +391,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                     message: orderResult.message,
                 },
                 payload: redactSecrets(payload),
-            })
+            }, reqLogger)
         }
 
         createOrderDispatchLog({
@@ -377,7 +411,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             result: orderResult.ok ? 'success' : 'failure',
             error_code: orderResult.ok ? undefined : orderResult.code,
         }).catch((err) => {
-            logger.warn({ event: 'dispatch_log:failed', error: err }, 'failed to write order dispatch log')
+            reqLogger.warn({ event: 'dispatch_log:failed', error: err }, 'failed to write order dispatch log')
         })
 
         const { webhook_secret: _, ...safePayload } = payload
@@ -398,7 +432,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                         code: orderResult.code,
                     },
             },
-        })
+        }, reqLogger)
 
         return c.json(
             {

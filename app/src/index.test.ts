@@ -11,6 +11,7 @@ const createLoggerStub = () => {
     const logger = {
         info: (obj: Record<string, unknown>) => calls.push(obj),
         warn: (obj: Record<string, unknown>) => calls.push(obj),
+        child: (_bindings: Record<string, unknown>) => logger,
     }
     return { logger, calls }
 }
