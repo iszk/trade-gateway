@@ -1,0 +1,37 @@
+{
+    "name": "trade-gateway",
+    "dockerComposeFile": [
+        "../compose.yml"
+    ],
+    "service": "console",
+    "workspaceFolder": "/workspace",
+    "shutdownAction": "none",
+    "remoteUser": "vscode",
+    "forwardPorts": [
+        "app:3000",
+        "firebase:4000",
+        "firebase:8080"
+    ],
+    "portsAttributes": {
+        "app:3000": {
+            "label": "trade-gw API",
+            "onAutoForward": "silent"
+        },
+        "firebase:4000": {
+            "label": "firebase ui",
+            "onAutoForward": "silent"
+        },
+        "firebase:8080": {
+            "label": "firestore api",
+            "onAutoForward": "silent"
+        }
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "esbenp.prettier-vscode",
+                "dbaeumer.vscode-eslint"
+            ]
+        }
+    }
+}
