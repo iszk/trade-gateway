@@ -6,26 +6,13 @@ import type { DispatchOrderFn } from './types/order.js'
 import { DuplicateEventError } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 
-const captureConsole = <T>(method: 'info' | 'warn', run: () => T | Promise<T>) => {
-    const original = console[method]
-    const calls: unknown[][] = []
-
-    console[method] = (...args: unknown[]) => {
-        calls.push(args)
+const createLoggerStub = () => {
+    const calls: Record<string, unknown>[] = []
+    const logger = {
+        info: (obj: Record<string, unknown>) => calls.push(obj),
+        warn: (obj: Record<string, unknown>) => calls.push(obj),
     }
-
-    return Promise.resolve(run())
-        .then((result) => ({ result, calls }))
-        .finally(() => {
-            console[method] = original
-        })
-}
-
-const getLogEntry = (call: unknown[] | undefined) => {
-    const candidate = call?.[0]
-    return typeof candidate === 'string'
-        ? (JSON.parse(candidate) as Record<string, unknown>)
-        : undefined
+    return { logger, calls }
 }
 
 const makePayload = (eventId: string, webhookSecret = 'test-secret') => ({
@@ -96,15 +83,17 @@ test('GET /api/health returns 200', async () => {
 test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()
+    const { logger, calls } = createLoggerStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
         createWebhookEvent,
+        logger,
     })
 
     const payload = makePayload('evt-accepted-1')
-    const { result: res, calls } = await captureConsole('info', () => postWebhook(app, payload))
+    const res = await postWebhook(app, payload)
     const body = await res.json()
 
     assert.equal(res.status, 202)
@@ -113,12 +102,13 @@ test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => 
         event_id: 'evt-accepted-1',
     })
 
-    const receivedLog = getLogEntry(calls[0])
+    const receivedLog = calls[0]
 
     assert.equal(res.headers.get('x-request-id'), receivedLog?.request_id)
     assert.equal(receivedLog?.event, 'webhook:received')
     assert.deepEqual(receivedLog, {
         event: 'webhook:received',
+        logged_at: receivedLog?.logged_at,
         request_id: receivedLog?.request_id,
         sourceIp: '52.89.214.238',
         contentType: 'application/json',
@@ -126,7 +116,6 @@ test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => 
             ...payload,
             webhook_secret: '[REDACTED]',
         },
-        logged_at: receivedLog?.logged_at,
     })
 
     assert.equal(dispatchCalls.length, 1)
@@ -170,9 +159,11 @@ test('POST /api/webhooks/tradingview accepts payload without order_type', async 
 })
 
 test('POST /api/webhooks/tradingview returns 400 on validation error', async () => {
+    const { logger, calls } = createLoggerStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
+        logger,
     })
 
     const invalidPayload = {
@@ -180,12 +171,12 @@ test('POST /api/webhooks/tradingview returns 400 on validation error', async () 
         occurred_at: 'bad-date-ms',
     }
 
-    const { result: res, calls } = await captureConsole('warn', () => postWebhook(app, invalidPayload))
+    const res = await postWebhook(app, invalidPayload)
     const body = await res.json()
 
     assert.equal(res.status, 400)
     assert.equal(body.error.code, 'INVALID_REQUEST')
-    const rejectedLog = getLogEntry(calls[0])
+    const rejectedLog = calls.find(c => c['event'] === 'webhook:rejected')
 
     assert.equal(rejectedLog?.event, 'webhook:rejected')
     assert.equal(res.headers.get('x-request-id'), rejectedLog?.request_id)
@@ -208,15 +199,17 @@ test('POST /api/webhooks/tradingview returns 400 on validation error', async () 
 })
 
 test('POST /api/webhooks/tradingview masks webhook_secret in invalid secret logs', async () => {
+    const { logger, calls } = createLoggerStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
+        logger,
     })
 
     const payload = makePayload('evt-unauth-1', 'wrong-secret')
-    const { result: res, calls } = await captureConsole('warn', () => postWebhook(app, payload))
+    const res = await postWebhook(app, payload)
     const body = await res.json()
-    const rejectedLog = getLogEntry(calls[0])
+    const rejectedLog = calls.find(c => c['event'] === 'webhook:rejected')
 
     assert.equal(res.status, 401)
     assert.equal(body.error.code, 'INVALID_WEBHOOK_SECRET')
@@ -238,26 +231,26 @@ test('POST /api/webhooks/tradingview masks webhook_secret in invalid secret logs
 
 test('POST /api/webhooks/tradingview uses incoming x-request-id when provided', async () => {
     const { createWebhookEvent } = createWebhookEventStub()
+    const { logger, calls } = createLoggerStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         createWebhookEvent,
+        logger,
     })
 
     const payload = makePayload('evt-request-id-1')
-    const { result: res, calls } = await captureConsole('info', () =>
-        app.request('/api/webhooks/tradingview', {
-            method: 'POST',
-            headers: {
-                'content-type': 'application/json',
-                'x-forwarded-for': '52.89.214.238',
-                'x-request-id': 'req-test-123',
-            },
-            body: JSON.stringify(payload),
-        }),
-    )
+    const res = await app.request('/api/webhooks/tradingview', {
+        method: 'POST',
+        headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': '52.89.214.238',
+            'x-request-id': 'req-test-123',
+        },
+        body: JSON.stringify(payload),
+    })
 
-    const receivedLog = getLogEntry(calls[0])
+    const receivedLog = calls[0]
 
     assert.equal(res.status, 202)
     assert.equal(res.headers.get('x-request-id'), 'req-test-123')
@@ -298,18 +291,18 @@ test('POST /api/webhooks/tradingview still returns 202 when dispatch failed', as
         message: 'bitflyer api timeout',
     }))
     const { createWebhookEvent } = createWebhookEventStub()
+    const { logger, calls } = createLoggerStub()
     const app = createApp({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
         createWebhookEvent,
+        logger,
     })
 
-    const { result: res, calls } = await captureConsole('warn', () =>
-        postWebhook(app, makePayload('evt-dispatch-failure-1')),
-    )
+    const res = await postWebhook(app, makePayload('evt-dispatch-failure-1'))
     const body = await res.json()
-    const rejectedLog = getLogEntry(calls[0])
+    const rejectedLog = calls.find(c => c['reason'] === 'broker_dispatch_failed')
 
     assert.equal(res.status, 202)
     assert.deepEqual(body, {

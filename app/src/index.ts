@@ -89,7 +89,12 @@ const errorBody = (code: string, message: string) => ({
 
 const WEBHOOK_SECRET_REDACTION = '[REDACTED]'
 
-const logger = (() => {
+type Logger = {
+    info(obj: Record<string, unknown>, msg?: string): void
+    warn(obj: Record<string, unknown>, msg?: string): void
+}
+
+const defaultLogger: Logger = (() => {
     try {
         return pino(createGcpLoggingPinoConfig())
     } catch {
@@ -129,57 +134,13 @@ const redactRawBody = (rawBody?: string) => {
     }
 }
 
-const logWebhook = (
-    level: 'info' | 'warn',
-    event: 'webhook:received' | 'webhook:accepted' | 'webhook:rejected',
-    details: Record<string, unknown>,
-) => {
-    logger[level]({
-        event,
-        ...details,
-    })
-}
-
-const logWebhookRejected = ({
-    requestId,
-    reason,
-    sourceIp,
-    error,
-    contentType,
-    rawBody,
-    payload,
-    eventId,
-    parseError,
-}: {
-    requestId: string
-    reason: string
-    sourceIp: string | null
-    error: { code: string; message: string }
-    contentType?: string
-    rawBody?: string
-    payload?: unknown
-    eventId?: string
-    parseError?: string
-}) => {
-    logWebhook('warn', 'webhook:rejected', {
-        request_id: requestId,
-        reason,
-        sourceIp,
-        contentType,
-        event_id: eventId,
-        error,
-        parseError,
-        rawBody: redactRawBody(rawBody),
-        payload: redactSecrets(payload),
-    })
-}
-
 type CreateAppOptions = {
     webhookSecret?: string
     sourceIpAllowlist?: Set<string>
     dispatchOrder?: DispatchOrderFn
     createWebhookEvent?: CreateWebhookEventFn
     createOrderDispatchLog?: CreateOrderDispatchLogFn
+    logger?: Logger
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -191,6 +152,53 @@ export const createApp = (options: CreateAppOptions = {}) => {
         ((data) => createWebhookEventFn(getFirestoreClient())(data))
     const createOrderDispatchLog: CreateOrderDispatchLogFn = options.createOrderDispatchLog ??
         ((data) => createOrderDispatchLogFn(getFirestoreClient())(data))
+    const logger = options.logger ?? defaultLogger
+
+    const logWebhook = (
+        level: 'info' | 'warn',
+        event: 'webhook:received' | 'webhook:accepted' | 'webhook:rejected',
+        details: Record<string, unknown>,
+    ) => {
+        logger[level]({
+            event,
+            logged_at: new Date().toISOString(),
+            ...details,
+        })
+    }
+
+    const logWebhookRejected = ({
+        requestId,
+        reason,
+        sourceIp,
+        error,
+        contentType,
+        rawBody,
+        payload,
+        eventId,
+        parseError,
+    }: {
+        requestId: string
+        reason: string
+        sourceIp: string | null
+        error: { code: string; message: string }
+        contentType?: string
+        rawBody?: string
+        payload?: unknown
+        eventId?: string
+        parseError?: string
+    }) => {
+        logWebhook('warn', 'webhook:rejected', {
+            request_id: requestId,
+            reason,
+            sourceIp,
+            contentType,
+            event_id: eventId,
+            error,
+            parseError,
+            rawBody: redactRawBody(rawBody),
+            payload: redactSecrets(payload),
+        })
+    }
 
     app.get('/', (c) => c.json({ hello: 'world' }))
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
@@ -415,7 +423,7 @@ const isMainModule = process.argv[1]
     : false
 
 if (isMainModule) {
-    logger.info({ port }, 'trade-gateway listening')
+    defaultLogger.info({ port }, 'trade-gateway listening')
 
     serve({
         fetch: app.fetch,
