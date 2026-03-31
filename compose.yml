@@ -11,7 +11,10 @@ services:
       - ./:/workspace
       - console-node-modules:/workspace/app/node_modules
     environment:
-      - FIRESTORE_EMULATOR_HOST=trade-gateway-firebase:8080
+      - FIRESTORE_EMULATOR_HOST=firebase:8080
+      - GCLOUD_PROJECT="trade-gateway"
+    networks:
+      - firebase
 
   app:
     container_name: trade-gateway-app
@@ -22,20 +25,16 @@ services:
     working_dir: /app
     command: bash -c "npm install && npm run dev"
     environment:
-      - FIRESTORE_EMULATOR_HOST=trade-gateway-firebase:8080
-
-  firebase:
-    container_name: trade-gateway-firebase
-    build:
-      context: ./firebase
-      dockerfile: Dockerfile
-    volumes:
-      - ./firebase/.firebaserc:/firebase/.firebaserc
-      - ./firebase/firebase.json:/firebase/firebase.json
-    tty: true
-    working_dir: /firebase
-    command: firebase emulators:start
+      - FIRESTORE_EMULATOR_HOST=firebase:8080
+      - GCLOUD_PROJECT="trade-gateway"
+    networks:
+      - firebase
 
 volumes:
   app-node-modules:
   console-node-modules:
+
+networks:
+  firebase:
+    name: firebase
+    external: true
