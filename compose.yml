@@ -10,9 +10,10 @@ services:
     volumes:
       - ./:/workspace
       - console-node-modules:/workspace/app/node_modules
+      - console-config:/home/vscode/.config
     environment:
       - FIRESTORE_EMULATOR_HOST=firebase:8080
-      - GCLOUD_PROJECT="trade-gateway"
+      - GOOGLE_CLOUD_PROJECT=trade-gateway
     networks:
       - firebase
 
@@ -26,11 +27,12 @@ services:
     command: bash -c "npm install && npm run dev"
     environment:
       - FIRESTORE_EMULATOR_HOST=firebase:8080
-      - GCLOUD_PROJECT="trade-gateway"
+      - GOOGLE_CLOUD_PROJECT=trade-gateway
     networks:
       - firebase
 
 volumes:
+  console-config:
   app-node-modules:
   console-node-modules:
 

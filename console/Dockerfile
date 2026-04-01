@@ -1,21 +1,19 @@
-FROM mcr.microsoft.com/devcontainers/typescript-node:24-trixie
+FROM mcr.microsoft.com/devcontainers/base:trixie
 
-RUN apt-get update && apt-get upgrade -y
+ENV TZ=Asia/Tokyo
+ENV LANG=C.UTF-8
 
-RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && apt-get update -y && apt-get install google-cloud-cli -y
-RUN apt-get update && apt-get install google-cloud-cli -y
+ARG USER_UID=2001
+ARG USER_GID=2001
 
+RUN groupmod -g ${USER_GID} vscode
+RUN usermod -u ${USER_UID} vscode
 
-ARG USERNAME=vscode
-ARG GROUPNAME=vscode
-ARG UID=2001
-ARG GID=2001
-# FIXME 将来的に直す
-#  これはDockerfileの中で定数として定義するべきではない
-#  ユーザーとグループのIDは、ホストマシンのユーザーと一致させる必要がある
-#  そうしないと、ホストマシンとコンテナ間でファイルの所有権が正しく設定されない可能性がある
+USER vscode
 
-RUN groupadd -g $GID $GROUPNAME && \
-    useradd -m -s /bin/bash -u $UID -g $GID $USERNAME
+RUN mkdir -p ~/.local/bin
+RUN curl https://mise.run | sh
+RUN ~/.local/bin/mise use --global fzf
+RUN ~/.local/bin/mise use --global aqua:go-task/task@latest
 
-USER $USERNAME
+CMD ["bash"]
