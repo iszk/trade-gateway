@@ -34,11 +34,7 @@ const normalizeProductCode = (ticker: string) => ticker.replace(/\//g, '_').toUp
 // マップにない ticker は normalizeProductCode にフォールバック
 const TICKER_PRODUCT_CODE_MAP: Record<string, string> = {
     'BITFLYER:FXBTCJPY': 'FX_BTC_JPY',
-    'FXBTCJPY': 'FX_BTC_JPY',
-    'FX_BTC_JPY': 'FX_BTC_JPY',
-    'BTCJPY': 'FX_BTC_JPY',
-    'BTC_JPY': 'BTC_JPY',
-    'BTC/JPY': 'BTC_JPY',
+    'BITFLYER:BTCJPY': 'BTC_JPY',
 }
 
 const resolveProductCode = (ticker: string): string =>
@@ -77,20 +73,6 @@ export class BitflyerClient {
         const sign = createHmac('sha256', this.apiSecret)
             .update(`${timestamp}POST${path}${body}`)
             .digest('hex')
-
-        /*
-        console.log('BitflyerClient sending request', {
-            url: `${this.baseUrl}${path}`,
-            body,
-            headers: {
-                'content-type': 'application/json',
-                'access-key': this.apiKey,
-                'access-timestamp': timestamp,
-                'access-sign': sign,
-                'x-request-id': order.requestId,
-            },
-        })
-        */
 
         let response: Response
         try {
