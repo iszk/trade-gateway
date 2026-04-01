@@ -1,20 +1,21 @@
 version: "3.8"
 
-tasks:
-  docker-build:
-    cmds:
-      - docker build -t trade-gateway .
-    desc: Build the project
+env:
+  GOOGLE_CLOUD_PROJECT: trade-gateway-1
 
+tasks:
   docker-push:
     cmds:
-      - gcloud builds submit --tag asia-northeast1-docker.pkg.dev/trade-gateway-1/repos/trade-gateway
+      - gcloud builds submit
+        --project {{.GOOGLE_CLOUD_PROJECT}}
+        --tag asia-northeast1-docker.pkg.dev/{{.GOOGLE_CLOUD_PROJECT}}/repos/trade-gateway
     desc: Push the project to Google Cloud Artifact Registry
 
   deploy-from-registry:
     cmds:
       - gcloud run deploy trade-gateway
-        --image asia-northeast1-docker.pkg.dev/trade-gateway-1/repos/trade-gateway
+        --project {{.GOOGLE_CLOUD_PROJECT}}
+        --image asia-northeast1-docker.pkg.dev/{{.GOOGLE_CLOUD_PROJECT}}/repos/trade-gateway
         --region asia-northeast1
         --set-secrets "WEBHOOK_SECRET=WEBHOOK_SECRET:latest"
         --set-secrets "BITFLYER_API_KEY=BITFLYER_API_KEY:latest"
@@ -32,4 +33,5 @@ tasks:
       - npm ci
       - npm run typecheck
       - npm run test
+      - npm run build
     desc: Run tests

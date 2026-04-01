@@ -7,6 +7,9 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig.json ./
 
+# update npm
+RUN npm install -g npm@latest
+
 # Install dependencies
 RUN npm ci
 
