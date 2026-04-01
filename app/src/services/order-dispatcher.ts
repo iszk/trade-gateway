@@ -1,13 +1,13 @@
 import { BitflyerClient } from '../brokers/bitflyer.js'
 import { DummyClient } from '../brokers/dummy.js'
-import { SaxoBankClient } from '../brokers/saxobank.js'
+import { SaxoClient } from '../brokers/saxo.js'
 import { config } from '../config.js'
 import type { DispatchOrderFn, IncomingBroker, OrderRequest } from '../types/order.js'
 
 type OrderDispatcherOptions = {
     bitflyerClient?: BitflyerClient
     dummyClient?: DummyClient
-    saxoBankClient?: SaxoBankClient
+    saxoClient?: SaxoClient
 }
 
 // webhook 側の ticker から broker を決定するマッピング
@@ -35,9 +35,9 @@ export const createOrderDispatcher = (
             baseUrl: config.bitflyer.baseUrl,
         })
     const dummyClient = options.dummyClient ?? new DummyClient()
-    const saxoBankClient =
-        options.saxoBankClient ??
-        new SaxoBankClient({
+    const saxoClient =
+        options.saxoClient ??
+        new SaxoClient({
             appKey: config.saxo.appKey,
             appSecret: config.saxo.appSecret,
             baseUrl: config.saxo.baseUrl,
@@ -52,7 +52,7 @@ export const createOrderDispatcher = (
             case 'dummy':
                 return dummyClient.sendMarketOrder(order)
             case 'saxo':
-                return saxoBankClient.sendMarketOrder(order)
+                return saxoClient.sendMarketOrder(order)
             default:
                 return {
                     ok: false,

@@ -10,7 +10,7 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
-import { SaxoBankClient } from './brokers/saxobank.js'
+import { SaxoClient } from './brokers/saxo.js'
 import { config } from './config.js'
 
 import { Logger as TSLogger, type ILogObj } from 'tslog'
@@ -303,7 +303,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
     app.get('/favicon.ico', (c) => c.body(null, 204))
 
-    const saxoBankClientForAuth = new SaxoBankClient({
+    const saxoClientForAuth = new SaxoClient({
         appKey: saxoConfig.appKey,
         appSecret: saxoConfig.appSecret,
         authBaseUrl: saxoConfig.authBaseUrl,
@@ -312,7 +312,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
     app.get('/api/auth/saxo/login', (c) => {
         const state = randomUUID()
-        const loginUrl = saxoBankClientForAuth.getLoginUrl(state)
+        const loginUrl = saxoClientForAuth.getLoginUrl(state)
         return c.redirect(loginUrl)
     })
 
@@ -329,10 +329,10 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         try {
-            await saxoBankClientForAuth.exchangeCodeForToken(code)
-            return c.json({ status: 'success', message: 'Saxo Bank authentication successful' })
+            await saxoClientForAuth.exchangeCodeForToken(code)
+            return c.json({ status: 'success', message: 'Saxo authentication successful' })
         } catch (err) {
-            logger.warn({ event: 'saxo_auth:failed', error: err }, 'Saxo Bank authentication failed')
+            logger.warn({ event: 'saxo_auth:failed', error: err }, 'Saxo authentication failed')
             return c.json({ error: 'Authentication failed' }, 500)
         }
     })

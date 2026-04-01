@@ -27,10 +27,10 @@ type SaxoTokenResponse = {
     token_type: string
 }
 
-const FIRESTORE_COLLECTION = 'settings'
+const FIRESTORE_COLLECTION = 'saxo_auth_data'
 const FIRESTORE_DOC = 'saxo_auth'
 
-export class SaxoBankClient {
+export class SaxoClient {
     private readonly appKey?: string
     private readonly appSecret?: string
     private readonly baseUrl: string
@@ -173,14 +173,14 @@ export class SaxoBankClient {
     async sendMarketOrder(order: OrderRequest): Promise<OrderDispatchResult> {
         const accessToken = await this.getValidAccessToken()
         if (!accessToken) {
-            return this.buildFailure('BROKER_NOT_CONFIGURED', 'Saxo Bank auth is missing or expired')
+            return this.buildFailure('BROKER_NOT_CONFIGURED', 'Saxo auth is missing or expired')
         }
 
         // TODO: Saxo specific market order implementation
         // For now, return a failure or a dummy success to verify connectivity later
         // Real implementation would use: POST /trade/v2/orders
 
-        return this.buildFailure('BROKER_REQUEST_FAILED', 'Saxo Bank order implementation is pending')
+        return this.buildFailure('BROKER_REQUEST_FAILED', 'Saxo order implementation is pending')
     }
 
     getLoginUrl(state: string): string {

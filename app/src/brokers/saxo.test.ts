@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Firestore } from 'firebase-admin/firestore'
 
-import { SaxoBankClient } from './saxobank.js'
+import { SaxoClient } from './saxo.js'
 
 const mockFirestore = (data: Record<string, any> = {}) => {
     const store = { ...data }
@@ -21,8 +21,8 @@ const mockFirestore = (data: Record<string, any> = {}) => {
     } as unknown as Firestore
 }
 
-test('SaxoBankClient.getLoginUrl returns correct URL', () => {
-    const client = new SaxoBankClient({
+test('SaxoClient.getLoginUrl returns correct URL', () => {
+    const client = new SaxoClient({
         appKey: 'test-app-key',
         redirectUri: 'http://localhost/callback',
         authBaseUrl: 'https://auth.example.com',
@@ -35,11 +35,11 @@ test('SaxoBankClient.getLoginUrl returns correct URL', () => {
     )
 })
 
-test('SaxoBankClient.exchangeCodeForToken exchanges code and saves to firestore', async () => {
+test('SaxoClient.exchangeCodeForToken exchanges code and saves to firestore', async () => {
     const db = mockFirestore()
     let capturedBody = ''
 
-    const client = new SaxoBankClient({
+    const client = new SaxoClient({
         appKey: 'test-key',
         appSecret: 'test-secret',
         redirectUri: 'http://localhost/callback',
@@ -69,7 +69,7 @@ test('SaxoBankClient.exchangeCodeForToken exchanges code and saves to firestore'
     assert.equal(auth?.refreshToken, 'new-refresh-token')
 })
 
-test('SaxoBankClient.getValidAccessToken refreshes if expired', async () => {
+test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
     const initialAuth = {
         accessToken: 'old-token',
         refreshToken: 'refresh-token',
@@ -78,7 +78,7 @@ test('SaxoBankClient.getValidAccessToken refreshes if expired', async () => {
     }
     const db = mockFirestore({ 'settings/saxo_auth': initialAuth })
 
-    const client = new SaxoBankClient({
+    const client = new SaxoClient({
         appKey: 'test-key',
         appSecret: 'test-secret',
         authBaseUrl: 'https://auth.example.com',

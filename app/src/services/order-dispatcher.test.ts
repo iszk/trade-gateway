@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { BitflyerClient } from '../brokers/bitflyer.js'
-import type { SaxoBankClient } from '../brokers/saxobank.js'
+import type { SaxoClient } from '../brokers/saxo.js'
 import { createOrderDispatcher, resolveBroker } from './order-dispatcher.js'
 
 test('resolveBroker uses bitflyer for auto', () => {
@@ -66,10 +66,10 @@ test('createOrderDispatcher dispatches to saxo handler', async () => {
                 providerOrderId: 'SAXO-dispatched',
             }
         },
-    } as unknown as SaxoBankClient
+    } as unknown as SaxoClient
 
     const dispatchOrder = createOrderDispatcher({
-        saxoBankClient: fakeClient,
+        saxoClient: fakeClient,
     })
 
     const result = await dispatchOrder({
@@ -98,7 +98,7 @@ test('createOrderDispatcher returns unsupported for unknown broker', async () =>
                 providerOrderId: 'JRF-not-used',
             }),
         } as unknown as BitflyerClient,
-        saxoBankClient: {} as any, // Mock to avoid Firestore init
+        saxoClient: {} as any, // Mock to avoid Firestore init
     })
 
     const result = await dispatchOrder({
