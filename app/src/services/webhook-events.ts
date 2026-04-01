@@ -32,7 +32,7 @@ const isAlreadyExistsError = (error: unknown): boolean =>
 
 export const createWebhookEventFn = (db: Firestore): CreateWebhookEventFn => {
     return async (data) => {
-        const docRef = db.collection('webhook_events').doc(data.event_id)
+        const docRef = db.collection('webhook_events').doc(`${data.broker}:${data.symbol}:${data.event_id}`)
         const expireAt = new Date(data.received_at.getTime() + 90 * 24 * 60 * 60 * 1000)
 
         try {

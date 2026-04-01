@@ -47,7 +47,7 @@ test('createWebhookEventFn saves document to Firestore', async () => {
 
     await createWebhookEvent(makeInput('evt-001'))
 
-    assert.ok('evt-001' in db.docs)
+    assert.ok('bitflyer:BTC_JPY:evt-001' in db.docs)
 })
 
 test('createWebhookEventFn sets expire_at to received_at + 90 days', async () => {
@@ -57,7 +57,7 @@ test('createWebhookEventFn sets expire_at to received_at + 90 days', async () =>
     const receivedAt = new Date('2026-01-01T00:00:00Z')
     await createWebhookEvent({ ...makeInput('evt-expire-1'), received_at: receivedAt })
 
-    const doc = db.docs['evt-expire-1'] as Record<string, unknown>
+    const doc = db.docs['bitflyer:BTC_JPY:evt-expire-1'] as Record<string, unknown>
     const expectedExpireAt = new Date(receivedAt.getTime() + 90 * 24 * 60 * 60 * 1000)
     assert.deepEqual(doc.expire_at, expectedExpireAt)
 })
