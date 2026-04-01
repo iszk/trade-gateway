@@ -1,4 +1,4 @@
-export type BrokerName = 'bitflyer' | 'dummy'
+export type BrokerName = 'bitflyer' | 'dummy' | 'saxo'
 export type IncomingBroker = BrokerName | 'auto'
 
 export type OrderSide = 'BUY' | 'SELL'

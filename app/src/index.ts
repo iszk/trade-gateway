@@ -10,6 +10,8 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
+import { SaxoBankClient } from './brokers/saxobank.js'
+import { config } from './config.js'
 
 import { Logger as TSLogger, type ILogObj } from 'tslog'
 
@@ -228,6 +230,12 @@ type CreateAppOptions = {
     createWebhookEvent?: CreateWebhookEventFn
     createOrderDispatchLog?: CreateOrderDispatchLogFn
     logger?: Logger
+    saxoConfig?: {
+        appKey?: string
+        appSecret?: string
+        authBaseUrl?: string
+        redirectUri?: string
+    }
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -238,6 +246,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const createWebhookEvent = options.createWebhookEvent ?? createDefaultWebhookEventFn()
     const createOrderDispatchLog = options.createOrderDispatchLog ?? createDefaultOrderDispatchLogFn()
     const logger = options.logger ?? defaultLogger
+
+    const saxoConfig = options.saxoConfig ?? config.saxo
 
     const logWebhook = (
         level: 'info' | 'warn',
@@ -292,6 +302,40 @@ export const createApp = (options: CreateAppOptions = {}) => {
     app.get('/', (c) => c.json({ hello: 'world' }))
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
     app.get('/favicon.ico', (c) => c.body(null, 204))
+
+    const saxoBankClientForAuth = new SaxoBankClient({
+        appKey: saxoConfig.appKey,
+        appSecret: saxoConfig.appSecret,
+        authBaseUrl: saxoConfig.authBaseUrl,
+        redirectUri: saxoConfig.redirectUri,
+    })
+
+    app.get('/api/auth/saxo/login', (c) => {
+        const state = randomUUID()
+        const loginUrl = saxoBankClientForAuth.getLoginUrl(state)
+        return c.redirect(loginUrl)
+    })
+
+    app.get('/api/auth/saxo/callback', async (c) => {
+        const code = c.req.query('code')
+        const error = c.req.query('error')
+
+        if (error) {
+            return c.json({ error }, 400)
+        }
+
+        if (!code) {
+            return c.json({ error: 'code is missing' }, 400)
+        }
+
+        try {
+            await saxoBankClientForAuth.exchangeCodeForToken(code)
+            return c.json({ status: 'success', message: 'Saxo Bank authentication successful' })
+        } catch (err) {
+            logger.warn({ event: 'saxo_auth:failed', error: err }, 'Saxo Bank authentication failed')
+            return c.json({ error: 'Authentication failed' }, 500)
+        }
+    })
 
     app.post('/api/webhooks/tradingview', async (c) => {
         const requestId = getRequestId(c.req.raw.headers)
