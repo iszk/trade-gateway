@@ -76,7 +76,7 @@ test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
         accessTokenExpiresAt: Date.now() - 1000, // Expired
         refreshTokenExpiresAt: Date.now() + 86400000,
     }
-    const db = mockFirestore({ 'settings/saxo_auth': initialAuth })
+    const db = mockFirestore({ 'saxo_auth_data/saxo_auth': initialAuth })
 
     const client = new SaxoClient({
         appKey: 'test-key',
