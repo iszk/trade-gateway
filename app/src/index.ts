@@ -11,11 +11,7 @@ import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 
-import pino from 'pino'
-import * as pinoCallerNs from 'pino-caller'
-// pino-caller is a CJS module; at runtime .default is the traceCaller function
-const pinoCaller = pinoCallerNs.default as unknown as (l: pino.Logger) => pino.Logger
-import { createGcpLoggingPinoConfig } from '@google-cloud/pino-logging-gcp-config'
+import { Logger as TSLogger, type ILogObj } from 'tslog'
 
 const DEFAULT_ALLOWLIST = [
     '52.89.214.238',
@@ -97,12 +93,77 @@ type Logger = {
     child(bindings: Record<string, unknown>): Logger
 }
 
+const createLogger = (tsLogger: TSLogger<ILogObj>, additionalFields: Record<string, unknown> = {}): Logger => ({
+    info: (obj, msg) => {
+        if (msg) {
+            tsLogger.info(msg, { ...additionalFields, ...obj })
+        } else {
+            tsLogger.info({ ...additionalFields, ...obj })
+        }
+    },
+    warn: (obj, msg) => {
+        if (msg) {
+            tsLogger.warn(msg, { ...additionalFields, ...obj })
+        } else {
+            tsLogger.warn({ ...additionalFields, ...obj })
+        }
+    },
+    child: (bindings) => createLogger(tsLogger, { ...additionalFields, ...bindings }),
+})
+
 const defaultLogger: Logger = (() => {
-    try {
-        return pinoCaller(pino(createGcpLoggingPinoConfig()))
-    } catch {
-        return pinoCaller(pino())
+    const isCloudRun = !!process.env.K_SERVICE
+    const tsLogger = new TSLogger<ILogObj>({
+        type: isCloudRun ? 'hidden' : 'pretty',
+        hideLogItemDetails: true,
+    })
+
+    if (isCloudRun) {
+        tsLogger.attachTransport((logObj) => {
+            const severityMap: Record<string, string> = {
+                silly: 'DEBUG',
+                trace: 'DEBUG',
+                debug: 'DEBUG',
+                info: 'INFO',
+                warn: 'WARNING',
+                error: 'ERROR',
+                fatal: 'CRITICAL',
+            }
+
+            const meta = logObj._meta
+            const level = meta?.logLevelName?.toLowerCase() || 'info'
+            const { _meta: _, ...rest } = logObj
+
+            let message = ''
+            let details: Record<string, unknown> = {}
+
+            if (typeof rest[0] === 'string') {
+                message = rest[0]
+                details = (rest[1] as Record<string, unknown>) || {}
+            } else if (rest[0] !== undefined) {
+                details = rest[0] as Record<string, unknown>
+                message = (details.message as string) || (details.event as string) || ''
+            } else {
+                details = rest as Record<string, unknown>
+                message = (details.message as string) || (details.event as string) || ''
+            }
+
+            const output = {
+                severity: severityMap[level] || 'DEFAULT',
+                message: message,
+                ...details,
+                'logging.googleapis.com/sourceLocation': {
+                    file: meta?.path?.filePath,
+                    line: meta?.path?.fileLine,
+                    function: meta?.path?.method,
+                },
+            }
+
+            process.stdout.write(JSON.stringify(output) + '\n')
+        })
     }
+
+    return createLogger(tsLogger)
 })()
 
 const redactSecrets = (value: unknown): unknown => {
