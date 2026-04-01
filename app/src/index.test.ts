@@ -335,3 +335,34 @@ test('POST /api/webhooks/tradingview returns 409 on duplicate event_id', async (
     assert.equal(second.status, 409)
     assert.equal(body.error.code, 'DUPLICATED_EVENT')
 })
+
+test('GET /api/auth/saxo/login redirects to Saxo login page', async () => {
+    const app = createApp({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        saxoConfig: {
+            appKey: 'test-key',
+            appSecret: 'test-secret',
+            authBaseUrl: 'https://sim.logonvalidation.net',
+            redirectUri: 'http://localhost/callback',
+        },
+    })
+
+    const res = await app.request('/api/auth/saxo/login')
+    assert.equal(res.status, 302)
+    const location = res.headers.get('location')
+    assert.ok(location?.includes('sim.logonvalidation.net/authorize'))
+    assert.ok(location?.includes('response_type=code'))
+})
+
+test('GET /api/auth/saxo/callback returns 400 if code is missing', async () => {
+    const app = createApp({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+    })
+
+    const res = await app.request('/api/auth/saxo/callback')
+    assert.equal(res.status, 400)
+    const body = await res.json()
+    assert.equal(body.error, 'code is missing')
+})

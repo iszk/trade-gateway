@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { BitflyerClient } from '../brokers/bitflyer.js'
+import type { SaxoBankClient } from '../brokers/saxobank.js'
 import { createOrderDispatcher, resolveBroker } from './order-dispatcher.js'
 
 test('resolveBroker uses bitflyer for auto', () => {
@@ -54,6 +55,40 @@ test('createOrderDispatcher dispatches to bitflyer handler', async () => {
     })
 })
 
+test('createOrderDispatcher dispatches to saxo handler', async () => {
+    let called = false
+    const fakeClient = {
+        sendMarketOrder: async () => {
+            called = true
+            return {
+                ok: true,
+                broker: 'saxo' as const,
+                providerOrderId: 'SAXO-dispatched',
+            }
+        },
+    } as unknown as SaxoBankClient
+
+    const dispatchOrder = createOrderDispatcher({
+        saxoBankClient: fakeClient,
+    })
+
+    const result = await dispatchOrder({
+        eventId: 'evt-1',
+        broker: 'saxo',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.01,
+        requestId: 'req-1',
+    })
+
+    assert.equal(called, true)
+    assert.deepEqual(result, {
+        ok: true,
+        broker: 'saxo',
+        providerOrderId: 'SAXO-dispatched',
+    })
+})
+
 test('createOrderDispatcher returns unsupported for unknown broker', async () => {
     const dispatchOrder = createOrderDispatcher({
         bitflyerClient: {
@@ -63,11 +98,12 @@ test('createOrderDispatcher returns unsupported for unknown broker', async () =>
                 providerOrderId: 'JRF-not-used',
             }),
         } as unknown as BitflyerClient,
+        saxoBankClient: {} as any, // Mock to avoid Firestore init
     })
 
     const result = await dispatchOrder({
         eventId: 'evt-unsupported',
-        broker: 'saxo' as 'bitflyer',
+        broker: 'unknown' as any,
         ticker: 'BTC_JPY',
         side: 'SELL',
         size: 0.02,
@@ -76,8 +112,8 @@ test('createOrderDispatcher returns unsupported for unknown broker', async () =>
 
     assert.deepEqual(result, {
         ok: false,
-        broker: 'saxo',
+        broker: 'unknown',
         code: 'BROKER_NOT_SUPPORTED',
-        message: 'unsupported broker: saxo',
+        message: 'unsupported broker: unknown',
     })
 })
