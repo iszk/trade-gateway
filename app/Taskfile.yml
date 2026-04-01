@@ -29,6 +29,7 @@ tasks:
 
   test:
     cmds:
+      - npm ci
       - npm run typecheck
       - npm run test
     desc: Run tests
