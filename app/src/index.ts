@@ -459,7 +459,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             }, reqLogger)
         }
 
-        createOrderDispatchLog({
+        const dispatchLogData = {
             event_id: payload.event_id,
             broker: payload.broker,
             request_payload: {
@@ -473,10 +473,11 @@ export const createApp = (options: CreateAppOptions = {}) => {
             response_payload: orderResult.ok
                 ? { providerOrderId: orderResult.providerOrderId }
                 : undefined,
-            result: orderResult.ok ? 'success' : 'failure',
+            result: (orderResult.ok ? 'success' : 'failure') as 'success' | 'failure',
             error_code: orderResult.ok ? undefined : orderResult.code,
-        }).catch((err) => {
-            reqLogger.warn({ event: 'dispatch_log:failed', error: err }, 'failed to write order dispatch log')
+        }
+        createOrderDispatchLog(dispatchLogData).catch((err) => {
+            reqLogger.warn({ event: 'dispatch_log:failed', error: err, data: dispatchLogData }, 'failed to write order dispatch log')
         })
 
         const { webhook_secret: _, ...safePayload } = payload
