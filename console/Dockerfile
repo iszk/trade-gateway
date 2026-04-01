@@ -14,6 +14,7 @@ USER vscode
 RUN mkdir -p ~/.local/bin
 RUN curl https://mise.run | sh
 RUN ~/.local/bin/mise use --global fzf
+RUN ~/.local/bin/mise use --global ripgrep
 RUN ~/.local/bin/mise use --global aqua:go-task/task@latest
 
 CMD ["bash"]
