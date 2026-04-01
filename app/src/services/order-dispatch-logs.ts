@@ -12,13 +12,19 @@ export type OrderDispatchLogInput = {
 
 export type CreateOrderDispatchLogFn = (data: OrderDispatchLogInput) => Promise<void>
 
+const omitUndefinedFields = <T extends Record<string, unknown>>(value: T): T => {
+    return Object.fromEntries(
+        Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
+    ) as T
+}
+
 export const createOrderDispatchLogFn = (db: Firestore): CreateOrderDispatchLogFn => {
     return async (data) => {
         const createdAt = new Date()
         const expireAt = new Date(createdAt.getTime() + 180 * 24 * 60 * 60 * 1000)
 
         await db.collection('order_dispatch_logs').add({
-            ...data,
+            ...omitUndefinedFields(data),
             created_at: createdAt,
             expire_at: expireAt,
         })

@@ -93,6 +93,9 @@ type Logger = {
     child(bindings: Record<string, unknown>): Logger
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+
 const createLogger = (tsLogger: TSLogger<ILogObj>, additionalFields: Record<string, unknown> = {}): Logger => ({
     info: (obj, msg) => {
         if (msg) {
@@ -115,7 +118,6 @@ const defaultLogger: Logger = (() => {
     const isCloudRun = !!process.env.K_SERVICE
     const tsLogger = new TSLogger<ILogObj>({
         type: isCloudRun ? 'hidden' : 'pretty',
-        hideLogItemDetails: true,
     })
 
     if (isCloudRun) {
@@ -133,18 +135,20 @@ const defaultLogger: Logger = (() => {
             const meta = logObj._meta
             const level = meta?.logLevelName?.toLowerCase() || 'info'
             const { _meta: _, ...rest } = logObj
+            const firstArg: unknown = rest[0]
+            const secondArg: unknown = rest[1]
 
             let message = ''
             let details: Record<string, unknown> = {}
 
-            if (typeof rest[0] === 'string') {
-                message = rest[0]
-                details = (rest[1] as Record<string, unknown>) || {}
-            } else if (rest[0] !== undefined) {
-                details = rest[0] as Record<string, unknown>
+            if (typeof firstArg === 'string') {
+                message = firstArg
+                details = isRecord(secondArg) ? secondArg : {}
+            } else if (isRecord(firstArg)) {
+                details = firstArg
                 message = (details.message as string) || (details.event as string) || ''
             } else {
-                details = rest as Record<string, unknown>
+                details = rest
                 message = (details.message as string) || (details.event as string) || ''
             }
 
