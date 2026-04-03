@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto'
 
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
+import type { Position } from '../types/position.js'
 
 type BitflyerClientOptions = {
     apiKey?: string
@@ -15,7 +16,22 @@ type BitflyerOrderResponse = {
     error_message?: string
 }
 
+type BitflyerPositionResponse = {
+    product_code: string
+    side: string
+    price: number
+    size: number
+    commission: number
+    swap_point_accumulated: number
+    require_collateral: number
+    open_date: string
+    leverage: number
+    pnl: number
+    sfd: number
+}
+
 const SEND_CHILD_ORDER_PATH = '/v1/me/sendchildorder'
+const GET_POSITIONS_PATH = '/v1/me/getpositions'
 const DEFAULT_BITFLYER_BASE_URL = 'https://api.bitflyer.com'
 
 const buildFailure = (
@@ -53,70 +69,93 @@ export class BitflyerClient {
         this.fetchImpl = options.fetchImpl ?? fetch
     }
 
-    async sendMarketOrder(order: OrderRequest): Promise<OrderDispatchResult> {
+    private async callApi<T>(method: 'GET' | 'POST', path: string, body?: string): Promise<T> {
         if (!this.apiKey || !this.apiSecret) {
-            return buildFailure('BROKER_NOT_CONFIGURED', 'bitflyer api credentials are missing')
+            throw new Error('bitflyer api credentials are missing')
         }
 
-        // const size = order.size
-        const size = 0.01 // TODO: とりあえず固定値。将来的に order.size をそのまま渡せるようにする
-        const productCode = resolveProductCode(order.ticker)
-
-        const path = SEND_CHILD_ORDER_PATH
         const timestamp = Date.now().toString()
-        const body = JSON.stringify({
-            product_code: productCode,
-            child_order_type: 'MARKET',
-            side: order.side,
-            size: size,
-        })
+        const signBody = body ?? ''
         const sign = createHmac('sha256', this.apiSecret)
-            .update(`${timestamp}POST${path}${body}`)
+            .update(`${timestamp}${method}${path}${signBody}`)
             .digest('hex')
 
-        let response: Response
+        const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+            method,
+            headers: {
+                'content-type': 'application/json',
+                'access-key': this.apiKey,
+                'access-timestamp': timestamp,
+                'access-sign': sign,
+            },
+            body,
+        })
+
+        if (!response.ok) {
+            let payload: any
+            try {
+                payload = await response.json()
+            } catch {
+                payload = undefined
+            }
+            throw new Error(payload?.error_message || payload?.message || `bitflyer response status ${response.status}`)
+        }
+
+        return (await response.json()) as T
+    }
+
+    async sendMarketOrder(order: OrderRequest): Promise<OrderDispatchResult> {
         try {
-            response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-                method: 'POST',
-                headers: {
-                    'content-type': 'application/json',
-                    'access-key': this.apiKey,
-                    'access-timestamp': timestamp,
-                    'access-sign': sign,
-                    'x-request-id': order.requestId,
-                },
-                body,
+            const size = 0.01 // TODO: とりあえず固定値。将来的に order.size をそのまま渡せるようにする
+            const productCode = resolveProductCode(order.ticker)
+
+            const body = JSON.stringify({
+                product_code: productCode,
+                child_order_type: 'MARKET',
+                side: order.side,
+                size: size,
             })
+
+            const payload = await this.callApi<BitflyerOrderResponse>('POST', SEND_CHILD_ORDER_PATH, body)
+
+            const providerOrderId = payload?.child_order_acceptance_id
+            if (!providerOrderId) {
+                return buildFailure('BROKER_REQUEST_FAILED', 'missing child_order_acceptance_id')
+            }
+
+            return {
+                ok: true,
+                broker: 'bitflyer',
+                providerOrderId,
+            }
         } catch (error) {
             return buildFailure(
                 'BROKER_REQUEST_FAILED',
                 error instanceof Error ? error.message : String(error),
             )
         }
+    }
 
-        let payload: BitflyerOrderResponse | undefined
+    async getPositions(): Promise<Position[]> {
+        // bitflyer では銘柄ごとに取得する必要があるが、とりあえず主要なものを取得するようにする
+        // 本来は引数で ticker を指定するか、設定されている全ての ticker についてループする必要がある
+        // ここでは MVP として FX_BTC_JPY 固定で取得してみる（TODO: 汎用化）
         try {
-            payload = (await response.json()) as BitflyerOrderResponse
-        } catch {
-            payload = undefined
-        }
+            const productCode = 'FX_BTC_JPY'
+            const path = `${GET_POSITIONS_PATH}?product_code=${productCode}`
+            const results = await this.callApi<BitflyerPositionResponse[]>('GET', path)
 
-        if (!response.ok) {
-            return buildFailure(
-                'BROKER_REQUEST_FAILED',
-                payload?.error_message || payload?.message || `bitflyer response status ${response.status}`,
-            )
-        }
-
-        const providerOrderId = payload?.child_order_acceptance_id
-        if (!providerOrderId) {
-            return buildFailure('BROKER_REQUEST_FAILED', 'missing child_order_acceptance_id')
-        }
-
-        return {
-            ok: true,
-            broker: 'bitflyer',
-            providerOrderId,
+            return results.map((res) => ({
+                broker: 'bitflyer',
+                ticker: res.product_code,
+                side: res.side as any, // 'BUY' | 'SELL'
+                size: res.size,
+                price: res.price,
+                pnl: res.pnl,
+            }))
+        } catch (error) {
+            console.error('Failed to get bitflyer positions', error)
+            return []
         }
     }
 }
