@@ -27,6 +27,9 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
+# update npm
+RUN npm install -g npm@latest
+
 # Install only production dependencies
 RUN npm ci --omit=dev
 

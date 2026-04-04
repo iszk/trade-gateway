@@ -14,6 +14,7 @@ services:
     environment:
       - FIRESTORE_EMULATOR_HOST=firebase:8080
       - GOOGLE_CLOUD_PROJECT=trade-gateway
+    entrypoint: ["/workspace/console/entrypoint.sh"]
     networks:
       - firebase
 
@@ -24,12 +25,14 @@ services:
       - ./app:/app
       - app-node-modules:/app/node_modules
     working_dir: /app
-    command: bash -c "npm install && npm run dev"
     environment:
       - FIRESTORE_EMULATOR_HOST=firebase:8080
       - GOOGLE_CLOUD_PROJECT=trade-gateway
+    env_file:
+      - ./app/.env
     networks:
       - firebase
+    command: bash -c "npm install && npm run dev"
 
 volumes:
   console-config:
