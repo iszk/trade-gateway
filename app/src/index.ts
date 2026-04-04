@@ -308,9 +308,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
     app.get('/api/positions', async (c) => {
         const authHeader = c.req.header('Authorization')
-        const apiToken = process.env.API_TOKEN ?? 'change_me'
+        const apiSecret = process.env.API_SECRET ?? 'change_me'
 
-        if (!authHeader || authHeader !== `Bearer ${apiToken}`) {
+        if (!authHeader || authHeader !== `Bearer ${apiSecret}`) {
             return c.json(errorBody('UNAUTHORIZED', 'invalid or missing token'), 401)
         }
 
