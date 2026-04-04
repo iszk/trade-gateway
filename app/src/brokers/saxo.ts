@@ -28,6 +28,22 @@ type SaxoTokenResponse = {
     token_type: string
 }
 
+type SaxoNetPosition = {
+    NetPositionId: string
+    NetPositionBase: {
+        Amount: number
+        OpeningDirection: 'Buy' | 'Sell'
+    }
+    NetPositionView: {
+        AverageOpenPrice?: number
+        ProfitLossOnTrade?: number
+    }
+}
+
+type SaxoNetPositionsResponse = {
+    Data: SaxoNetPosition[]
+}
+
 const FIRESTORE_COLLECTION = 'saxo_auth_data'
 const FIRESTORE_DOC = 'saxo_auth'
 
@@ -198,8 +214,30 @@ export class SaxoClient {
     }
 
     async getPositions(): Promise<Position[]> {
-        // TODO: Saxo specific positions implementation
-        // Real implementation would use: GET /port/v1/positions/me
-        return []
+        const accessToken = await this.getValidAccessToken()
+        if (!accessToken) {
+            return []
+        }
+
+        const response = await this.fetchImpl(`${this.baseUrl}/port/v1/netpositions/me`, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+        })
+
+        if (!response.ok) {
+            const body = await response.text()
+            throw new Error(`Failed to fetch Saxo positions: ${response.status} ${body}`)
+        }
+
+        const data = (await response.json()) as SaxoNetPositionsResponse
+        return data.Data.map((item) => ({
+            broker: 'saxo' as const,
+            ticker: item.NetPositionId.split('__')[0] ?? item.NetPositionId,
+            side: item.NetPositionBase.OpeningDirection === 'Buy' ? 'BUY' : 'SELL',
+            size: item.NetPositionBase.Amount,
+            price: item.NetPositionView.AverageOpenPrice,
+            pnl: item.NetPositionView.ProfitLossOnTrade,
+        }))
     }
 }
