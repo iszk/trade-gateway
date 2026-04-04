@@ -5,12 +5,13 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 
 import { createOrderDispatcher, resolveBroker } from './services/order-dispatcher.js'
-import type { DispatchOrderFn, IncomingBroker } from './types/order.js'
+import type { DispatchOrderFn, IncomingBroker, BrokerName } from './types/order.js'
 import { DuplicateEventError, createDefaultWebhookEventFn } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import { SaxoClient } from './brokers/saxo.js'
+import { PositionFetcher } from './services/position-fetcher.js'
 import { config } from './config.js'
 
 import { Logger as TSLogger, type ILogObj } from 'tslog'
@@ -302,6 +303,29 @@ export const createApp = (options: CreateAppOptions = {}) => {
     app.get('/', (c) => c.json({ hello: 'world' }))
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
     app.get('/favicon.ico', (c) => c.body(null, 204))
+
+    const positionFetcher = new PositionFetcher()
+
+    app.get('/api/positions', async (c) => {
+        const authHeader = c.req.header('Authorization')
+        const apiToken = process.env.API_TOKEN ?? 'change_me'
+
+        if (!authHeader || authHeader !== `Bearer ${apiToken}`) {
+            return c.json(errorBody('UNAUTHORIZED', 'invalid or missing token'), 401)
+        }
+
+        const broker = c.req.query('broker') as BrokerName | undefined
+        try {
+            const positions = await positionFetcher.fetchAllPositions(broker)
+            return c.json({
+                positions,
+                updated_at: Date.now(),
+            })
+        } catch (err) {
+            logger.warn({ event: 'positions:fetch_failed', error: err }, 'failed to fetch positions')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch positions'), 500)
+        }
+    })
 
     const saxoClientForAuth = new SaxoClient({
         appKey: saxoConfig.appKey,

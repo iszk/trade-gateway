@@ -1,6 +1,7 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient } from '../firestore.js'
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
+import type { Position } from '../types/position.js'
 
 type SaxoClientOptions = {
     appKey?: string
@@ -194,5 +195,11 @@ export class SaxoClient {
             redirect_uri: this.redirectUri,
         })
         return `${this.authBaseUrl}/authorize?${params.toString()}`
+    }
+
+    async getPositions(): Promise<Position[]> {
+        // TODO: Saxo specific positions implementation
+        // Real implementation would use: GET /port/v1/positions/me
+        return []
     }
 }
