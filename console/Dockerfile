@@ -9,7 +9,7 @@ ARG USER_GID=2001
 RUN groupmod -g ${USER_GID} vscode
 RUN usermod -u ${USER_UID} vscode
 
-RUN apt-get update && apt-get install
+RUN apt-get update && apt-get install \
     gnupg \
     -y --no-install-recommends
 
