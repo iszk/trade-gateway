@@ -337,8 +337,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
         const broker = 'saxo' as BrokerName
         try {
-            await positionFetcher.fetchAllPositions(broker)
-            return c.json({'cron': 'ok'})
+            const positions = await positionFetcher.fetchAllPositions(broker)
+            logger.info({ event: 'cron:positions_fetched', broker, count: positions.length }, 'cron fetched positions')
+            return c.json({'count': positions.length})
         } catch (err) {
             logger.warn({ event: 'positions:fetch_failed', error: err }, 'failed to fetch positions')
             return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch positions'), 500)
