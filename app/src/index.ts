@@ -327,6 +327,24 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
     })
 
+    app.get('/api/cron', async (c) => {
+        const authHeader = c.req.header('Authorization')
+        const apiSecret = process.env.API_SECRET ?? 'change_me'
+
+        if (!authHeader || authHeader !== `Bearer ${apiSecret}`) {
+            return c.json(errorBody('UNAUTHORIZED', 'invalid or missing token'), 401)
+        }
+
+        const broker = 'saxo' as BrokerName
+        try {
+            await positionFetcher.fetchAllPositions(broker)
+            return c.json({'cron': 'ok'})
+        } catch (err) {
+            logger.warn({ event: 'positions:fetch_failed', error: err }, 'failed to fetch positions')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch positions'), 500)
+        }
+    })
+
     const saxoClientForAuth = new SaxoClient({
         appKey: saxoConfig.appKey,
         appSecret: saxoConfig.appSecret,
