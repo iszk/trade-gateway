@@ -2,7 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createApp } from './index.js'
-import type { DispatchOrderFn } from './types/order.js'
+import type { DispatchOrderFn, BrokerName } from './types/order.js'
+import type { BrokerBalance } from './types/balance.js'
+import type { Position } from './types/position.js'
 import { DuplicateEventError } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 
@@ -15,6 +17,21 @@ const createLoggerStub = () => {
     }
     return { logger, calls }
 }
+
+const createBalanceFetcherStub = (balances: BrokerBalance[] = []) => ({
+    fetchAllBalances: async () => balances,
+})
+
+const createPositionFetcherStub = (positions: Position[] = []) => ({
+    fetchAllPositions: async (_broker?: BrokerName) => positions,
+})
+
+const createAppForTests = (options: Parameters<typeof createApp>[0] = {}) =>
+    createApp({
+        balanceFetcher: createBalanceFetcherStub(),
+        positionFetcher: createPositionFetcherStub(),
+        ...options,
+    })
 
 const makePayload = (eventId: string, webhookSecret = 'test-secret') => ({
     event_id: eventId,
@@ -71,7 +88,7 @@ const createWebhookEventStub = (): { createWebhookEvent: CreateWebhookEventFn; s
 }
 
 test('GET /api/health returns 200', async () => {
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
     })
@@ -81,11 +98,78 @@ test('GET /api/health returns 200', async () => {
     assert.deepEqual(await res.json(), { status: 'ok' })
 })
 
+test('GET /api/balances rejects requests without the shared key', async () => {
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+    })
+
+    const res = await app.request('/api/balances')
+    const body = await res.json()
+
+    assert.equal(res.status, 401)
+    assert.equal(body.error.code, 'UNAUTHORIZED')
+})
+
+test('GET /api/balances returns balances when the shared key matches', async () => {
+    const sampleBalances: BrokerBalance[] = [
+        {
+            broker: 'bitflyer',
+            balances: [
+                { asset: 'BTC', amount: 0.5 },
+            ],
+            updatedAt: 123,
+        },
+    ]
+
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        balanceFetcher: createBalanceFetcherStub(sampleBalances),
+    })
+
+    const res = await app.request('/api/balances', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+        },
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.deepEqual(body.balances, sampleBalances)
+    assert.equal(typeof body.updated_at, 'number')
+})
+
+test('GET /api/positions returns positions when the shared key matches', async () => {
+    const samplePositions: Position[] = [
+        {
+            broker: 'bitflyer',
+            ticker: 'BTC_JPY',
+            side: 'BUY',
+            size: 0.02,
+        },
+    ]
+
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        positionFetcher: createPositionFetcherStub(samplePositions),
+    })
+
+    const res = await app.request('/api/positions', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+        },
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.deepEqual(body.positions, samplePositions)
+    assert.equal(typeof body.updated_at, 'number')
+})
+
 test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()
     const { logger, calls } = createLoggerStub()
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
@@ -132,7 +216,7 @@ test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => 
 test('POST /api/webhooks/tradingview accepts payload without order_type', async () => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
@@ -161,7 +245,7 @@ test('POST /api/webhooks/tradingview accepts payload without order_type', async 
 
 test('POST /api/webhooks/tradingview returns 400 on validation error', async () => {
     const { logger, calls } = createLoggerStub()
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         logger,
@@ -201,7 +285,7 @@ test('POST /api/webhooks/tradingview returns 400 on validation error', async () 
 
 test('POST /api/webhooks/tradingview masks webhook_secret in invalid secret logs', async () => {
     const { logger, calls } = createLoggerStub()
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         logger,
@@ -233,7 +317,7 @@ test('POST /api/webhooks/tradingview masks webhook_secret in invalid secret logs
 test('POST /api/webhooks/tradingview uses incoming x-request-id when provided', async () => {
     const { createWebhookEvent } = createWebhookEventStub()
     const { logger, calls } = createLoggerStub()
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         createWebhookEvent,
@@ -259,7 +343,7 @@ test('POST /api/webhooks/tradingview uses incoming x-request-id when provided', 
 })
 
 test('POST /api/webhooks/tradingview returns 401 on invalid secret', async () => {
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
     })
@@ -272,7 +356,7 @@ test('POST /api/webhooks/tradingview returns 401 on invalid secret', async () =>
 })
 
 test('POST /api/webhooks/tradingview returns 403 on forbidden source ip', async () => {
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
     })
@@ -293,7 +377,7 @@ test('POST /api/webhooks/tradingview still returns 202 when dispatch failed', as
     }))
     const { createWebhookEvent } = createWebhookEventStub()
     const { logger, calls } = createLoggerStub()
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
@@ -320,7 +404,7 @@ test('POST /api/webhooks/tradingview still returns 202 when dispatch failed', as
 test('POST /api/webhooks/tradingview returns 409 on duplicate event_id', async () => {
     const { dispatchOrder } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         dispatchOrder,
@@ -337,7 +421,7 @@ test('POST /api/webhooks/tradingview returns 409 on duplicate event_id', async (
 })
 
 test('GET /api/auth/saxo/login redirects to Saxo login page', async () => {
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         saxoConfig: {
@@ -356,7 +440,7 @@ test('GET /api/auth/saxo/login redirects to Saxo login page', async () => {
 })
 
 test('GET /api/auth/saxo/callback returns 400 if code is missing', async () => {
-    const app = createApp({
+    const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
     })

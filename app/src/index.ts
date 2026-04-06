@@ -2,10 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import { pathToFileURL } from 'node:url'
 import { Hono } from 'hono'
+import type { Context, Next } from 'hono'
 import { z } from 'zod'
 
 import { createOrderDispatcher, resolveBroker } from './services/order-dispatcher.js'
 import type { DispatchOrderFn, IncomingBroker, BrokerName } from './types/order.js'
+import type { BrokerBalance } from './types/balance.js'
+import type { Position } from './types/position.js'
 import { DuplicateEventError, createDefaultWebhookEventFn } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
@@ -88,6 +91,17 @@ const errorBody = (code: string, message: string) => ({
         message,
     },
 })
+
+const createApiSecretAuthMiddleware = (secret: string) => {
+    return async (c: Context, next: Next) => {
+        const authHeader = c.req.header('Authorization')
+        if (!authHeader || authHeader !== `Bearer ${secret}`) {
+            return c.json(errorBody('UNAUTHORIZED', 'invalid or missing token'), 401)
+        }
+
+        return next()
+    }
+}
 
 const WEBHOOK_SECRET_REDACTION = '[REDACTED]'
 
@@ -225,8 +239,17 @@ const extractTraceContext = (headers: Headers): Record<string, unknown> => {
     }
 }
 
+type BalanceFetcherLike = {
+    fetchAllBalances(): Promise<BrokerBalance[]>
+}
+
+type PositionFetcherLike = {
+    fetchAllPositions(broker?: BrokerName): Promise<Position[]>
+}
+
 type CreateAppOptions = {
     webhookSecret?: string
+    apiSecret?: string
     sourceIpAllowlist?: Set<string>
     dispatchOrder?: DispatchOrderFn
     createWebhookEvent?: CreateWebhookEventFn
@@ -238,18 +261,24 @@ type CreateAppOptions = {
         authBaseUrl?: string
         redirectUri?: string
     }
+    balanceFetcher?: BalanceFetcherLike
+    positionFetcher?: PositionFetcherLike
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
     const app = new Hono()
     const sourceIpAllowlist = options.sourceIpAllowlist ?? parseIpAllowlist()
     const webhookSecret = options.webhookSecret ?? process.env.WEBHOOK_SECRET ?? 'change_me'
+    const apiSecret = options.apiSecret ?? process.env.API_SECRET ?? 'change_me'
     const dispatchOrder = options.dispatchOrder ?? createOrderDispatcher()
     const createWebhookEvent = options.createWebhookEvent ?? createDefaultWebhookEventFn()
     const createOrderDispatchLog = options.createOrderDispatchLog ?? createDefaultOrderDispatchLogFn()
     const logger = options.logger ?? defaultLogger
 
     const saxoConfig = options.saxoConfig ?? config.saxo
+    const positionFetcher = options.positionFetcher ?? new PositionFetcher()
+    const balanceFetcher = options.balanceFetcher ?? new BalanceFetcher()
+    const requireApiSecret = createApiSecretAuthMiddleware(apiSecret)
 
     const logWebhook = (
         level: 'info' | 'warn',
@@ -305,17 +334,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
     app.get('/favicon.ico', (c) => c.body(null, 204))
 
-    const positionFetcher = new PositionFetcher()
-    const balanceFetcher = new BalanceFetcher()
-
-    app.get('/api/balances', async (c) => {
-        const authHeader = c.req.header('Authorization')
-        const apiSecret = process.env.API_SECRET ?? 'change_me'
-
-        if (!authHeader || authHeader !== `Bearer ${apiSecret}`) {
-            return c.json(errorBody('UNAUTHORIZED', 'invalid or missing token'), 401)
-        }
-
+    app.get('/api/balances', requireApiSecret, async (c) => {
         try {
             const balances = await balanceFetcher.fetchAllBalances()
             return c.json({
@@ -328,14 +347,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
     })
 
-    app.get('/api/positions', async (c) => {
-        const authHeader = c.req.header('Authorization')
-        const apiSecret = process.env.API_SECRET ?? 'change_me'
-
-        if (!authHeader || authHeader !== `Bearer ${apiSecret}`) {
-            return c.json(errorBody('UNAUTHORIZED', 'invalid or missing token'), 401)
-        }
-
+    app.get('/api/positions', requireApiSecret, async (c) => {
         const broker = c.req.query('broker') as BrokerName | undefined
         try {
             const positions = await positionFetcher.fetchAllPositions(broker)
@@ -349,19 +361,12 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
     })
 
-    app.get('/api/cron', async (c) => {
-        const authHeader = c.req.header('Authorization')
-        const apiSecret = process.env.API_SECRET ?? 'change_me'
-
-        if (!authHeader || authHeader !== `Bearer ${apiSecret}`) {
-            return c.json(errorBody('UNAUTHORIZED', 'invalid or missing token'), 401)
-        }
-
+    app.get('/api/cron', requireApiSecret, async (c) => {
         const broker = 'saxo' as BrokerName
         try {
             const positions = await positionFetcher.fetchAllPositions(broker)
             logger.info({ event: 'cron:positions_fetched', broker, count: positions.length }, 'cron fetched positions')
-            return c.json({'count': positions.length})
+            return c.json({ 'count': positions.length })
         } catch (err) {
             logger.warn({ event: 'positions:fetch_failed', error: err }, 'failed to fetch positions')
             return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch positions'), 500)
@@ -437,11 +442,11 @@ export const createApp = (options: CreateAppOptions = {}) => {
                     .error,
                 reqLogger,
             })
-            return c.json(
-                errorBody('INVALID_REQUEST', 'content-type must be application/json'),
-                400,
-            )
-        }
+        return c.json(
+            errorBody('INVALID_REQUEST', 'content-type must be application/json'),
+            400,
+        )
+    }
 
         const rawBody = await c.req.text()
         let jsonPayload: unknown
