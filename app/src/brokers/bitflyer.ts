@@ -30,8 +30,22 @@ type BitflyerPositionResponse = {
     sfd: number
 }
 
+type BitflyerBalanceResponse = {
+    currency_code: string
+    amount: number
+    available: number
+}
+
+type BitflyerCollateralResponse = {
+    collateral: number
+    open_pnl: number
+    keep_rate: number
+}
+
 const SEND_CHILD_ORDER_PATH = '/v1/me/sendchildorder'
 const GET_POSITIONS_PATH = '/v1/me/getpositions'
+const GET_BALANCE_PATH = '/v1/me/getbalance'
+const GET_COLLATERAL_PATH = '/v1/me/getcollateral'
 const DEFAULT_BITFLYER_BASE_URL = 'https://api.bitflyer.com'
 
 const buildFailure = (
@@ -69,7 +83,12 @@ export class BitflyerClient {
         this.fetchImpl = options.fetchImpl ?? fetch
     }
 
-    private async callApi<T>(method: 'GET' | 'POST', path: string, body?: string): Promise<T> {
+    private async callApi<T>(
+        method: 'GET' | 'POST',
+        path: string,
+        body?: string,
+        requestId?: string,
+    ): Promise<T> {
         if (!this.apiKey || !this.apiSecret) {
             throw new Error('bitflyer api credentials are missing')
         }
@@ -80,14 +99,20 @@ export class BitflyerClient {
             .update(`${timestamp}${method}${path}${signBody}`)
             .digest('hex')
 
+        const headers: Record<string, string> = {
+            'content-type': 'application/json',
+            'access-key': this.apiKey,
+            'access-timestamp': timestamp,
+            'access-sign': sign,
+        }
+
+        if (requestId) {
+            headers['x-request-id'] = requestId
+        }
+
         const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
             method,
-            headers: {
-                'content-type': 'application/json',
-                'access-key': this.apiKey,
-                'access-timestamp': timestamp,
-                'access-sign': sign,
-            },
+            headers,
             body,
         })
 
@@ -116,7 +141,12 @@ export class BitflyerClient {
                 size: size,
             })
 
-            const payload = await this.callApi<BitflyerOrderResponse>('POST', SEND_CHILD_ORDER_PATH, body)
+            const payload = await this.callApi<BitflyerOrderResponse>(
+                'POST',
+                SEND_CHILD_ORDER_PATH,
+                body,
+                order.requestId,
+            )
 
             const providerOrderId = payload?.child_order_acceptance_id
             if (!providerOrderId) {
@@ -129,10 +159,11 @@ export class BitflyerClient {
                 providerOrderId,
             }
         } catch (error) {
-            return buildFailure(
-                'BROKER_REQUEST_FAILED',
-                error instanceof Error ? error.message : String(error),
-            )
+            const message = error instanceof Error ? error.message : String(error)
+            if (message.includes('api credentials are missing')) {
+                return buildFailure('BROKER_NOT_CONFIGURED', message)
+            }
+            return buildFailure('BROKER_REQUEST_FAILED', message)
         }
     }
 
@@ -156,6 +187,24 @@ export class BitflyerClient {
         } catch (error) {
             console.error('Failed to get bitflyer positions', error)
             return []
+        }
+    }
+
+    async getBalances(): Promise<BitflyerBalanceResponse[]> {
+        try {
+            return await this.callApi<BitflyerBalanceResponse[]>('GET', GET_BALANCE_PATH)
+        } catch (error) {
+            console.error('Failed to get bitflyer balances', error)
+            return []
+        }
+    }
+
+    async getCollateral(): Promise<BitflyerCollateralResponse | null> {
+        try {
+            return await this.callApi<BitflyerCollateralResponse>('GET', GET_COLLATERAL_PATH)
+        } catch (error) {
+            console.error('Failed to get bitflyer collateral', error)
+            return null
         }
     }
 }
