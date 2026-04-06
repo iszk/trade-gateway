@@ -18,6 +18,8 @@ type SaxoAuthData = {
     refreshToken: string
     accessTokenExpiresAt: number // timestamp in ms
     refreshTokenExpiresAt: number // timestamp in ms
+    clientKey?: string
+    accountKey?: string
 }
 
 type SaxoTokenResponse = {
@@ -26,6 +28,18 @@ type SaxoTokenResponse = {
     expires_in: number // seconds
     refresh_token_expires_in: number // seconds
     token_type: string
+}
+
+type SaxoClientMeResponse = {
+    ClientKey: string
+    Name: string
+}
+
+type SaxoAccountMeResponse = {
+    Data: Array<{
+        AccountKey: string
+        AccountId: string
+    }>
 }
 
 type SaxoNetPosition = {
@@ -120,11 +134,15 @@ export class SaxoClient {
         }
 
         const payload = (await response.json()) as SaxoTokenResponse
+        const { clientKey, accountKey } = await this.fetchClientAndAccountKeys(payload.access_token)
+
         const authData: SaxoAuthData = {
             accessToken: payload.access_token,
             refreshToken: payload.refresh_token,
             accessTokenExpiresAt: Date.now() + payload.expires_in * 1000,
             refreshTokenExpiresAt: Date.now() + payload.refresh_token_expires_in * 1000,
+            clientKey,
+            accountKey,
         }
 
         await this.saveAuth(authData)
@@ -156,15 +174,48 @@ export class SaxoClient {
         }
 
         const payload = (await response.json()) as SaxoTokenResponse
+        const { clientKey, accountKey } = await this.fetchClientAndAccountKeys(payload.access_token)
+
         const authData: SaxoAuthData = {
             accessToken: payload.access_token,
             refreshToken: payload.refresh_token,
             accessTokenExpiresAt: Date.now() + payload.expires_in * 1000,
             refreshTokenExpiresAt: Date.now() + payload.refresh_token_expires_in * 1000,
+            clientKey,
+            accountKey,
         }
 
         await this.saveAuth(authData)
         return authData
+    }
+
+    private async fetchClientAndAccountKeys(
+        accessToken: string,
+    ): Promise<{ clientKey: string; accountKey: string }> {
+        // Fetch ClientKey
+        const clientResp = await this.fetchImpl(`${this.baseUrl}/port/v1/clients/me`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+        })
+        if (!clientResp.ok) {
+            throw new Error(`Failed to fetch Saxo client key: ${clientResp.status}`)
+        }
+        const clientData = (await clientResp.json()) as SaxoClientMeResponse
+        const clientKey = clientData.ClientKey
+
+        // Fetch AccountKey
+        const accountResp = await this.fetchImpl(`${this.baseUrl}/port/v1/accounts/me`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+        })
+        if (!accountResp.ok) {
+            throw new Error(`Failed to fetch Saxo account key: ${accountResp.status}`)
+        }
+        const accountData = (await accountResp.json()) as SaxoAccountMeResponse
+        if (!accountData.Data || accountData.Data.length === 0) {
+            throw new Error('No Saxo accounts found')
+        }
+        const accountKey = accountData.Data[0]!.AccountKey
+
+        return { clientKey, accountKey }
     }
 
     async getValidAccessToken(): Promise<string | null> {

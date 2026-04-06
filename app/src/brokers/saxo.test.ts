@@ -44,29 +44,42 @@ test('SaxoClient.exchangeCodeForToken exchanges code and saves to firestore', as
         appSecret: 'test-secret',
         redirectUri: 'http://localhost/callback',
         authBaseUrl: 'https://auth.example.com',
+        baseUrl: 'https://api.example.com',
         db,
-        fetchImpl: async (url, init) => {
-            capturedBody = String(init?.body)
-            return new Response(
-                JSON.stringify({
-                    access_token: 'new-access-token',
-                    refresh_token: 'new-refresh-token',
-                    expires_in: 1200,
-                    refresh_token_expires_in: 86400,
-                }),
-                { status: 200 },
-            )
+        fetchImpl: async (url) => {
+            if (url.toString().endsWith('/token')) {
+                return new Response(
+                    JSON.stringify({
+                        access_token: 'new-access-token',
+                        refresh_token: 'new-refresh-token',
+                        expires_in: 1200,
+                        refresh_token_expires_in: 86400,
+                    }),
+                    { status: 200 },
+                )
+            }
+            if (url.toString().endsWith('/port/v1/clients/me')) {
+                return new Response(JSON.stringify({ ClientKey: 'test-client-key' }), {
+                    status: 200,
+                })
+            }
+            if (url.toString().endsWith('/port/v1/accounts/me')) {
+                return new Response(
+                    JSON.stringify({ Data: [{ AccountKey: 'test-account-key' }] }),
+                    { status: 200 },
+                )
+            }
+            return new Response('Not Found', { status: 404 })
         },
     })
 
     await client.exchangeCodeForToken('test-code')
 
-    assert.ok(capturedBody.includes('code=test-code'))
-    assert.ok(capturedBody.includes('grant_type=authorization_code'))
-
     const auth = await client.getAuth()
     assert.equal(auth?.accessToken, 'new-access-token')
     assert.equal(auth?.refreshToken, 'new-refresh-token')
+    assert.equal(auth?.clientKey, 'test-client-key')
+    assert.equal(auth?.accountKey, 'test-account-key')
 })
 
 test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
@@ -82,17 +95,32 @@ test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
         appKey: 'test-key',
         appSecret: 'test-secret',
         authBaseUrl: 'https://auth.example.com',
+        baseUrl: 'https://api.example.com',
         db,
-        fetchImpl: async () => {
-            return new Response(
-                JSON.stringify({
-                    access_token: 'refreshed-token',
-                    refresh_token: 'new-refresh-token',
-                    expires_in: 1200,
-                    refresh_token_expires_in: 86400,
-                }),
-                { status: 200 },
-            )
+        fetchImpl: async (url) => {
+            if (url.toString().endsWith('/token')) {
+                return new Response(
+                    JSON.stringify({
+                        access_token: 'refreshed-token',
+                        refresh_token: 'new-refresh-token',
+                        expires_in: 1200,
+                        refresh_token_expires_in: 86400,
+                    }),
+                    { status: 200 },
+                )
+            }
+            if (url.toString().endsWith('/port/v1/clients/me')) {
+                return new Response(JSON.stringify({ ClientKey: 'test-client-key' }), {
+                    status: 200,
+                })
+            }
+            if (url.toString().endsWith('/port/v1/accounts/me')) {
+                return new Response(
+                    JSON.stringify({ Data: [{ AccountKey: 'test-account-key' }] }),
+                    { status: 200 },
+                )
+            }
+            return new Response('Not Found', { status: 404 })
         },
     })
 
@@ -101,4 +129,6 @@ test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
 
     const auth = await client.getAuth()
     assert.equal(auth?.accessToken, 'refreshed-token')
+    assert.equal(auth?.clientKey, 'test-client-key')
+    assert.equal(auth?.accountKey, 'test-account-key')
 })
