@@ -37,7 +37,6 @@ test('SaxoClient.getLoginUrl returns correct URL', () => {
 
 test('SaxoClient.exchangeCodeForToken exchanges code and saves to firestore', async () => {
     const db = mockFirestore()
-    let capturedBody = ''
 
     const client = new SaxoClient({
         appKey: 'test-key',
@@ -58,14 +57,19 @@ test('SaxoClient.exchangeCodeForToken exchanges code and saves to firestore', as
                     { status: 200 },
                 )
             }
-            if (url.toString().endsWith('/port/v1/clients/me')) {
-                return new Response(JSON.stringify({ ClientKey: 'test-client-key' }), {
-                    status: 200,
-                })
-            }
             if (url.toString().endsWith('/port/v1/accounts/me')) {
                 return new Response(
-                    JSON.stringify({ Data: [{ AccountKey: 'test-account-key' }] }),
+                    JSON.stringify({
+                        Data: [
+                            {
+                                AccountKey: 'test-account-key',
+                                ClientKey: 'test-client-key',
+                                LegalAssetTypes: ['FxSpot'],
+                                Currency: 'USD',
+                                DisplayName: 'Test Account',
+                            },
+                        ],
+                    }),
                     { status: 200 },
                 )
             }
@@ -78,8 +82,10 @@ test('SaxoClient.exchangeCodeForToken exchanges code and saves to firestore', as
     const auth = await client.getAuth()
     assert.equal(auth?.accessToken, 'new-access-token')
     assert.equal(auth?.refreshToken, 'new-refresh-token')
-    assert.equal(auth?.clientKey, 'test-client-key')
-    assert.equal(auth?.accountKey, 'test-account-key')
+    assert.equal(auth?.accounts?.[0]?.accountKey, 'test-account-key')
+    assert.equal(auth?.accounts?.[0]?.clientKey, 'test-client-key')
+    assert.equal(auth?.accounts?.[0]?.currency, 'USD')
+    assert.equal(auth?.accounts?.[0]?.displayName, 'Test Account')
 })
 
 test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
@@ -109,14 +115,19 @@ test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
                     { status: 200 },
                 )
             }
-            if (url.toString().endsWith('/port/v1/clients/me')) {
-                return new Response(JSON.stringify({ ClientKey: 'test-client-key' }), {
-                    status: 200,
-                })
-            }
             if (url.toString().endsWith('/port/v1/accounts/me')) {
                 return new Response(
-                    JSON.stringify({ Data: [{ AccountKey: 'test-account-key' }] }),
+                    JSON.stringify({
+                        Data: [
+                            {
+                                AccountKey: 'test-account-key',
+                                ClientKey: 'test-client-key',
+                                LegalAssetTypes: ['FxSpot'],
+                                Currency: 'USD',
+                                DisplayName: 'Test Account',
+                            },
+                        ],
+                    }),
                     { status: 200 },
                 )
             }
@@ -129,6 +140,5 @@ test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
 
     const auth = await client.getAuth()
     assert.equal(auth?.accessToken, 'refreshed-token')
-    assert.equal(auth?.clientKey, 'test-client-key')
-    assert.equal(auth?.accountKey, 'test-account-key')
+    assert.equal(auth?.accounts?.[0]?.accountKey, 'test-account-key')
 })
