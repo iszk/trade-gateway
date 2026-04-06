@@ -103,3 +103,41 @@ test('BitflyerClient returns failure when broker response is error', async () =>
         message: 'invalid size',
     })
 })
+
+test('BitflyerClient.getBalances returns balances', async () => {
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () =>
+            new Response(
+                JSON.stringify([
+                    { currency_code: 'JPY', amount: 100, available: 100 },
+                    { currency_code: 'BTC', amount: 0, available: 0 },
+                ]),
+                { status: 200 },
+            ),
+    })
+
+    const result = await client.getBalances()
+    assert.deepEqual(result, [
+        { currency_code: 'JPY', amount: 100, available: 100 },
+        { currency_code: 'BTC', amount: 0, available: 0 },
+    ])
+})
+
+test('BitflyerClient.getCollateral returns collateral', async () => {
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () =>
+            new Response(
+                JSON.stringify({ collateral: 50000, open_pnl: 100, keep_rate: 2.5 }),
+                { status: 200 },
+            ),
+    })
+
+    const result = await client.getCollateral()
+    assert.deepEqual(result, { collateral: 50000, open_pnl: 100, keep_rate: 2.5 })
+})

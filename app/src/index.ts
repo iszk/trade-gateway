@@ -12,6 +12,7 @@ import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
+import { BalanceFetcher } from './services/balance-fetcher.js'
 import { config } from './config.js'
 
 import { Logger as TSLogger, type ILogObj } from 'tslog'
@@ -305,6 +306,27 @@ export const createApp = (options: CreateAppOptions = {}) => {
     app.get('/favicon.ico', (c) => c.body(null, 204))
 
     const positionFetcher = new PositionFetcher()
+    const balanceFetcher = new BalanceFetcher()
+
+    app.get('/api/balances', async (c) => {
+        const authHeader = c.req.header('Authorization')
+        const apiSecret = process.env.API_SECRET ?? 'change_me'
+
+        if (!authHeader || authHeader !== `Bearer ${apiSecret}`) {
+            return c.json(errorBody('UNAUTHORIZED', 'invalid or missing token'), 401)
+        }
+
+        try {
+            const balances = await balanceFetcher.fetchAllBalances()
+            return c.json({
+                balances,
+                updated_at: Date.now(),
+            })
+        } catch (err) {
+            logger.warn({ event: 'balances:fetch_failed', error: err }, 'failed to fetch balances')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch balances'), 500)
+        }
+    })
 
     app.get('/api/positions', async (c) => {
         const authHeader = c.req.header('Authorization')
