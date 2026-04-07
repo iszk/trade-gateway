@@ -39,3 +39,10 @@ tasks:
       - npm run test
       - npm run build
     desc: Run tests
+
+  setup:
+    cmds:
+      - mise trust
+      - mise install
+      - npm ci
+    desc: Set up the project by installing dependencies
