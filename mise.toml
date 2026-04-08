@@ -1,3 +1,67 @@
 [tools]
 gcloud = "latest"
 node = "24"
+
+[env]
+GOOGLE_CLOUD_PROJECT = "trade-gateway-1"
+
+[tasks.setup]
+description = "Set up the project by installing dependencies"
+dir = "app"
+run = "npm ci"
+
+[tasks.dev]
+description = "Start the development server"
+dir = "app"
+run = "npm run dev"
+
+[tasks.build]
+description = "Build the application"
+dir = "app"
+run = "npm run build"
+
+[tasks.start]
+description = "Start the production server"
+dir = "app"
+run = "npm run start"
+
+[tasks.typecheck]
+description = "Run type checking"
+dir = "app"
+run = "npm run typecheck"
+
+[tasks.test]
+description = "Run all tests"
+dir = "app"
+run = "npm run test"
+
+[tasks."app:docker-push"]
+description = "Push the project to Google Cloud Artifact Registry"
+dir = "app"
+run = "gcloud builds submit --project $GOOGLE_CLOUD_PROJECT --tag asia-northeast1-docker.pkg.dev/$GOOGLE_CLOUD_PROJECT/repos/trade-gateway"
+
+[tasks."app:deploy-from-registry"]
+description = "Deploy to Google Cloud Run from Artifact Registry"
+dir = "app"
+run = """
+gcloud run deploy trade-gateway \
+  --project $GOOGLE_CLOUD_PROJECT \
+  --image asia-northeast1-docker.pkg.dev/$GOOGLE_CLOUD_PROJECT/repos/trade-gateway \
+  --region asia-northeast1 \
+  --set-secrets "API_SECRET=API_SECRET:latest" \
+  --set-secrets "WEBHOOK_SECRET=WEBHOOK_SECRET:latest" \
+  --set-secrets "BITFLYER_API_KEY=BITFLYER_API_KEY:latest" \
+  --set-secrets "BITFLYER_API_SECRET=BITFLYER_API_SECRET:latest" \
+  --set-secrets "SAXO_APP_KEY=SAXO_APP_KEY:latest" \
+  --set-secrets "SAXO_APP_SECRET=SAXO_APP_SECRET:latest" \
+  --env-vars-file=prod.env.yml \
+  --allow-unauthenticated
+"""
+
+[tasks.deploy]
+description = "Deploy the project to Google Cloud Run"
+depends = ["app:docker-push", "app:deploy-from-registry"]
+
+[tasks.test_buy]
+description = "Test the buy webhook"
+run = "curl -X POST http://localhost:3000/api/webhooks/tradingview -H 'Content-Type:application/json' -d '{\"event_id\":\"123456\", \"occurred_at\":1774336885000, \"ticker\":\"FX_BTC_JPY\", \"side\":\"BUY\", \"size\":10, \"price\":150.00, \"strategy\":\"my_strategy\", \"interval\":\"1h\", \"note\":\"test order\", \"webhook_secret\":\"change_me\"}'"
