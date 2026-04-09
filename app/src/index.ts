@@ -31,7 +31,13 @@ const tradingViewWebhookSchema = z.object({
     event_id: z.string().min(1),
     occurred_at: z.coerce.number().int().nonnegative(),
     ticker: z.string().min(1),
-    side: z.enum(['BUY', 'SELL']),
+    side: z.preprocess((val) => {
+        if (typeof val !== 'string') return val
+        const upper = val.toUpperCase()
+        if (upper === 'LONG') return 'BUY'
+        if (upper === 'SHORT') return 'SELL'
+        return upper
+    }, z.enum(['BUY', 'SELL'])),
     order_type: z.literal('MARKET').optional(),
     size: z.number().positive(),
     price: z.number().optional(),
@@ -442,11 +448,11 @@ export const createApp = (options: CreateAppOptions = {}) => {
                     .error,
                 reqLogger,
             })
-        return c.json(
-            errorBody('INVALID_REQUEST', 'content-type must be application/json'),
-            400,
-        )
-    }
+            return c.json(
+                errorBody('INVALID_REQUEST', 'content-type must be application/json'),
+                400,
+            )
+        }
 
         const rawBody = await c.req.text()
         let jsonPayload: unknown

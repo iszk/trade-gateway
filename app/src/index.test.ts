@@ -450,3 +450,53 @@ test('GET /api/auth/saxo/callback returns 400 if code is missing', async () => {
     const body = await res.json()
     assert.equal(body.error, 'code is missing')
 })
+
+const sideNormalizationCases: { input: string; expected: 'BUY' | 'SELL' }[] = [
+    { input: 'BUY', expected: 'BUY' },
+    { input: 'buy', expected: 'BUY' },
+    { input: 'Buy', expected: 'BUY' },
+    { input: 'LONG', expected: 'BUY' },
+    { input: 'long', expected: 'BUY' },
+    { input: 'Long', expected: 'BUY' },
+    { input: 'SELL', expected: 'SELL' },
+    { input: 'sell', expected: 'SELL' },
+    { input: 'Sell', expected: 'SELL' },
+    { input: 'SHORT', expected: 'SELL' },
+    { input: 'short', expected: 'SELL' },
+    { input: 'Short', expected: 'SELL' },
+]
+
+for (const { input, expected } of sideNormalizationCases) {
+    test(`POST /api/webhooks/tradingview normalizes side "${input}" to "${expected}"`, async () => {
+        const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+        const { createWebhookEvent } = createWebhookEventStub()
+        const app = createAppForTests({
+            webhookSecret: 'test-secret',
+            sourceIpAllowlist: new Set(['52.89.214.238']),
+            dispatchOrder,
+            createWebhookEvent,
+        })
+
+        const payload = { ...makePayload(`evt-side-${input}`), side: input }
+        const res = await postWebhook(app, payload)
+        const body = await res.json()
+
+        assert.equal(res.status, 202, `expected 202 for side="${input}"`)
+        assert.equal(body.status, 'accepted')
+        assert.equal(dispatchCalls[0]?.side, expected, `expected side to be normalized to "${expected}"`)
+    })
+}
+
+test('POST /api/webhooks/tradingview returns 400 for invalid side value', async () => {
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+    })
+
+    const payload = { ...makePayload('evt-side-invalid'), side: 'HOLD' }
+    const res = await postWebhook(app, payload)
+    const body = await res.json()
+
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'INVALID_REQUEST')
+})
