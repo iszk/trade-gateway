@@ -60,7 +60,8 @@ gcloud run deploy trade-gateway \
 
 [tasks.deploy]
 description = "Deploy the project to Google Cloud Run"
-depends = ["app:docker-push", "app:deploy-from-registry"]
+# depends = ["app:docker-push", "app:deploy-from-registry"]
+run = "mise run app:docker-push && mise run app:deploy-from-registry"
 
 [tasks.test_buy]
 description = "Test the buy webhook"
