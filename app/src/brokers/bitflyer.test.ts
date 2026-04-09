@@ -104,6 +104,50 @@ test('BitflyerClient returns failure when broker response is error', async () =>
     })
 })
 
+test('BitflyerClient clamps order size to minimum 0.001', async () => {
+    let capturedBody = ''
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (_url, init) => {
+            capturedBody = String(init?.body)
+            return new Response(
+                JSON.stringify({ child_order_acceptance_id: 'JRF-accepted-1' }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    await client.sendMarketOrder({ ...makeOrder(), size: 0.0001 })
+
+    const body = JSON.parse(capturedBody)
+    assert.equal(body.size, 0.001)
+})
+
+test('BitflyerClient clamps order size to maximum 0.02', async () => {
+    let capturedBody = ''
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (_url, init) => {
+            capturedBody = String(init?.body)
+            return new Response(
+                JSON.stringify({ child_order_acceptance_id: 'JRF-accepted-1' }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    await client.sendMarketOrder({ ...makeOrder(), size: 1.0 })
+
+    const body = JSON.parse(capturedBody)
+    assert.equal(body.size, 0.02)
+})
+
 test('BitflyerClient.getBalances returns balances', async () => {
     const client = new BitflyerClient({
         apiKey: 'test-key',

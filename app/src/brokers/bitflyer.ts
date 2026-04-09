@@ -131,7 +131,9 @@ export class BitflyerClient {
 
     async sendMarketOrder(order: OrderRequest): Promise<OrderDispatchResult> {
         try {
-            const size = 0.01 // TODO: とりあえず固定値。将来的に order.size をそのまま渡せるようにする
+            const maxSize = 0.02
+            const minSize = 0.001 // bitflyer の最小注文サイズ（例: FX_BTC_JPY の場合は 0.001）
+            const size = Math.max(minSize, Math.min(maxSize, order.size))
             const productCode = resolveProductCode(order.ticker)
 
             const body = JSON.stringify({
