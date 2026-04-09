@@ -14,6 +14,8 @@ type OrderDispatcherOptions = {
 const TICKER_BROKER_MAP: Record<string, OrderRequest['broker']> = {
     'BITFLYER:FXBTCJPY': 'bitflyer',
     'BITFLYER:BTCJPY': 'bitflyer',
+    'FX:NAS100': 'saxo',
+    'FX:US30': 'saxo',
 }
 
 export const resolveBroker = (broker: IncomingBroker | undefined, ticker: string): OrderRequest['broker'] => {

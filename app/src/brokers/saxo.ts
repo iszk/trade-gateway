@@ -63,8 +63,28 @@ type SaxoNetPositionsResponse = {
     Data: SaxoNetPosition[]
 }
 
+type SaxoOrderResponse = {
+    OrderId: string
+}
+
 const FIRESTORE_COLLECTION = 'saxo_auth_data'
 const FIRESTORE_DOC = 'saxo_auth'
+
+type SaxoProductInfo = {
+    AssetType: string
+    Uic: number
+}
+
+const TICKER_PRODUCT_CODE_MAP: Record<string, SaxoProductInfo> = {
+    'FX:NAS100': {
+        AssetType: 'CfdOnIndex',
+        Uic: 4912,
+    },
+    'FX:US30': {
+        AssetType: 'CfdOnIndex',
+        Uic: 4911,
+    },
+}
 
 export class SaxoClient {
     private readonly appKey?: string
@@ -238,11 +258,63 @@ export class SaxoClient {
             return this.buildFailure('BROKER_NOT_CONFIGURED', 'Saxo auth is missing or expired')
         }
 
-        // TODO: Saxo specific market order implementation
-        // For now, return a failure or a dummy success to verify connectivity later
-        // Real implementation would use: POST /trade/v2/orders
+        const productInfo = TICKER_PRODUCT_CODE_MAP[order.ticker.toUpperCase()]
+        if (!productInfo) {
+            return this.buildFailure('BROKER_REQUEST_FAILED', `Unsupported ticker: ${order.ticker}`)
+        }
 
-        return this.buildFailure('BROKER_REQUEST_FAILED', 'Saxo order implementation is pending')
+        const auth = await this.getAuth()
+        if (!auth?.accounts || auth.accounts.length === 0) {
+            return this.buildFailure('BROKER_NOT_CONFIGURED', 'No Saxo accounts available')
+        }
+
+        const account =
+            auth.accounts.find((acc) => acc.legalAssetTypes.includes(productInfo.AssetType)) ??
+            auth.accounts[0]
+        // TODO: AssetType をサポートする account が複数あった場合の対応
+
+        const body = JSON.stringify({
+            AccountKey: account.accountKey,
+            AssetType: productInfo.AssetType,
+            Uic: productInfo.Uic,
+            BuySell: order.side === 'BUY' ? 'Buy' : 'Sell',
+            Amount: order.size,
+            OrderType: 'Market',
+            OrderDuration: { DurationType: 'DayOrder' },
+        })
+
+        return this.buildFailure('BROKER_NOT_CONFIGURED', 'send: ' + body)
+
+        /*
+        try {
+            const response = await this.fetchImpl(`${this.baseUrl}/trade/v2/orders`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body,
+            })
+
+            if (!response.ok) {
+                const errorBody = await response.text()
+                return this.buildFailure(
+                    'BROKER_REQUEST_FAILED',
+                    `Saxo order failed: ${response.status} ${errorBody}`,
+                )
+            }
+
+            const payload = (await response.json()) as SaxoOrderResponse
+            return {
+                ok: true,
+                broker: 'saxo',
+                providerOrderId: payload.OrderId,
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            return this.buildFailure('BROKER_REQUEST_FAILED', message)
+        }
+        */
     }
 
     getLoginUrl(state: string): string {
