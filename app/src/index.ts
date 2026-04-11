@@ -20,6 +20,7 @@ import { config } from './config.js'
 import { createDefaultSlotScheduler } from './services/slot-scheduler.js'
 import type { SlotScheduler } from './services/slot-scheduler.js'
 import { executeTenMinutelyTask, executeHourlyTask } from './services/cron-tasks.js'
+import type { CronContext } from './services/cron-tasks.js'
 
 import { Logger as TSLogger, type ILogObj } from 'tslog'
 
@@ -290,6 +291,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const balanceFetcher = options.balanceFetcher ?? new BalanceFetcher()
     const requireApiSecret = createApiSecretAuthMiddleware(apiSecret)
     const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
+    const cronCtx: CronContext = { logger, positionFetcher }
 
     const logWebhook = (
         level: 'info' | 'warn',
@@ -373,38 +375,29 @@ export const createApp = (options: CreateAppOptions = {}) => {
     })
 
     app.get('/api/cron', requireApiSecret, async (c) => {
-        const broker = 'saxo' as BrokerName
+        const nowMs = Date.now()
         try {
-            const positions = await positionFetcher.fetchAllPositions(broker)
-            logger.info({ event: 'cron:positions_fetched', broker, count: positions.length }, 'cron fetched positions')
-
-            const nowMs = Date.now()
-            try {
-                await Promise.all([
-                    slotScheduler.runIfNewSlot({
-                        nowMs,
-                        intervalSeconds: 600,
-                        slotKey: 'last_slot_10m',
-                        task: () => executeTenMinutelyTask(logger),
-                        logger,
-                    }),
-                    slotScheduler.runIfNewSlot({
-                        nowMs,
-                        intervalSeconds: 3600,
-                        slotKey: 'last_slot_1h',
-                        task: () => executeHourlyTask(logger),
-                        logger,
-                    }),
-                ])
-            } catch (slotErr) {
-                logger.warn({ event: 'cron:slot_scheduler_error', error: slotErr }, 'slot scheduler error, continuing')
-            }
-
-            return c.json({ 'count': positions.length })
-        } catch (err) {
-            logger.warn({ event: 'positions:fetch_failed', error: err }, 'failed to fetch positions')
-            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch positions'), 500)
+            await Promise.all([
+                slotScheduler.runIfNewSlot({
+                    nowMs,
+                    intervalSeconds: 600,
+                    slotKey: 'last_slot_10m',
+                    task: () => executeTenMinutelyTask(cronCtx),
+                    logger,
+                }),
+                slotScheduler.runIfNewSlot({
+                    nowMs,
+                    intervalSeconds: 3600,
+                    slotKey: 'last_slot_1h',
+                    task: () => executeHourlyTask(cronCtx),
+                    logger,
+                }),
+            ])
+        } catch (slotErr) {
+            logger.warn({ event: 'cron:slot_scheduler_error', error: slotErr }, 'slot scheduler error, continuing')
         }
+
+        return c.json({ status: 'ok' })
     })
 
     const saxoClientForAuth = new SaxoClient({
