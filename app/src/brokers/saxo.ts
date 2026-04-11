@@ -283,6 +283,17 @@ export class SaxoClient {
             OrderDuration: { DurationType: 'DayOrder' },
         })
 
+        if (order.dryRun) {
+            console.log(JSON.stringify({
+                event: 'dry_run:broker_api_call',
+                broker: 'saxo',
+                method: 'POST',
+                url: `${this.baseUrl}/trade/v2/orders`,
+                body: JSON.parse(body),
+            }))
+            return { ok: true, broker: 'saxo', providerOrderId: 'DRY_RUN' }
+        }
+
         try {
             const response = await this.fetchImpl(`${this.baseUrl}/trade/v2/orders`, {
                 method: 'POST',
