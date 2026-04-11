@@ -7,6 +7,7 @@ import type { BrokerBalance } from './types/balance.js'
 import type { Position } from './types/position.js'
 import { DuplicateEventError } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
+import type { SlotScheduler, RunIfNewSlotParams } from './services/slot-scheduler.js'
 
 const createLoggerStub = () => {
     const calls: Record<string, unknown>[] = []
@@ -499,4 +500,66 @@ test('POST /api/webhooks/tradingview returns 400 for invalid side value', async 
 
     assert.equal(res.status, 400)
     assert.equal(body.error.code, 'INVALID_REQUEST')
+})
+
+// ---------------------------------------------------------------------------
+// SlotScheduler stub helpers
+// ---------------------------------------------------------------------------
+
+const createSlotSchedulerStub = () => {
+    const calls: Array<Pick<RunIfNewSlotParams, 'intervalSeconds' | 'slotKey'>> = []
+    const slotScheduler: SlotScheduler = {
+        runIfNewSlot: async ({ intervalSeconds, slotKey }: RunIfNewSlotParams) => {
+            calls.push({ intervalSeconds, slotKey })
+        },
+    }
+    return { slotScheduler, calls }
+}
+
+// ---------------------------------------------------------------------------
+// /api/cron tests
+// ---------------------------------------------------------------------------
+
+test('GET /api/cron calls slot-scheduler for 10m and 1h tasks', async () => {
+    const { slotScheduler, calls } = createSlotSchedulerStub()
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        slotScheduler,
+    })
+
+    const res = await app.request('/api/cron', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+
+    assert.equal(res.status, 200)
+
+    const call10m = calls.find(c => c.slotKey === 'last_slot_10m')
+    const call1h  = calls.find(c => c.slotKey === 'last_slot_1h')
+
+    assert.ok(call10m, 'should have called slot-scheduler for 10m task')
+    assert.equal(call10m?.intervalSeconds, 600)
+
+    assert.ok(call1h, 'should have called slot-scheduler for 1h task')
+    assert.equal(call1h?.intervalSeconds, 3600)
+})
+
+test('GET /api/cron returns 200 even if slot-scheduler throws internally', async () => {
+    const failingSlotScheduler: SlotScheduler = {
+        runIfNewSlot: async () => {
+            throw new Error('unexpected internal error')
+        },
+    }
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        slotScheduler: failingSlotScheduler,
+    })
+
+    const res = await app.request('/api/cron', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+
+    // The main cron handler should still succeed even if the scheduler throws.
+    // (In production, runIfNewSlot catches errors internally; this tests the
+    //  defence-in-depth case where that boundary is breached.)
+    assert.equal(res.status, 200)
 })

@@ -78,6 +78,22 @@ OpenID 連携情報を保持する。
 - `created_at` (timestamp, required)
 - `expire_at` (timestamp, required, TTL 用)
 
+## 4. `cron_metadata`
+
+Cloud Run 上で動作するスロットスケジューラーが、各周期タスクの実行済みスロットIDを管理するために使用する（詳細は [slot-scheduler.md](./slot-scheduler.md) を参照）。
+
+### ドキュメント ID
+- `task_status`（固定）
+
+### フィールド
+- `last_slot_10m` (number, required) — 10分周期タスクが最後に実行されたスロットID
+- `last_slot_1h` (number, required) — 1時間周期タスクが最後に実行されたスロットID
+- 新しい周期タスクを追加する場合は、対応する `last_slot_<interval>` フィールドを追加する
+
+### 制約
+- Firestoreトランザクションを使用して読み書きを行い、重複実行を防止する
+- TTLは不要（上書きで管理）
+
 ## 保持期間（MVP）
 - `webhook_events`: 90 日
 - `order_dispatch_logs`: 180 日

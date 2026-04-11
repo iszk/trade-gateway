@@ -17,6 +17,9 @@ import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
 import { BalanceFetcher } from './services/balance-fetcher.js'
 import { config } from './config.js'
+import { createDefaultSlotScheduler } from './services/slot-scheduler.js'
+import type { SlotScheduler } from './services/slot-scheduler.js'
+import { executeTenMinutelyTask, executeHourlyTask } from './services/cron-tasks.js'
 
 import { Logger as TSLogger, type ILogObj } from 'tslog'
 
@@ -269,6 +272,7 @@ type CreateAppOptions = {
     }
     balanceFetcher?: BalanceFetcherLike
     positionFetcher?: PositionFetcherLike
+    slotScheduler?: SlotScheduler
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -285,6 +289,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const positionFetcher = options.positionFetcher ?? new PositionFetcher()
     const balanceFetcher = options.balanceFetcher ?? new BalanceFetcher()
     const requireApiSecret = createApiSecretAuthMiddleware(apiSecret)
+    const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
 
     const logWebhook = (
         level: 'info' | 'warn',
@@ -372,6 +377,29 @@ export const createApp = (options: CreateAppOptions = {}) => {
         try {
             const positions = await positionFetcher.fetchAllPositions(broker)
             logger.info({ event: 'cron:positions_fetched', broker, count: positions.length }, 'cron fetched positions')
+
+            const nowMs = Date.now()
+            try {
+                await Promise.all([
+                    slotScheduler.runIfNewSlot({
+                        nowMs,
+                        intervalSeconds: 600,
+                        slotKey: 'last_slot_10m',
+                        task: () => executeTenMinutelyTask(logger),
+                        logger,
+                    }),
+                    slotScheduler.runIfNewSlot({
+                        nowMs,
+                        intervalSeconds: 3600,
+                        slotKey: 'last_slot_1h',
+                        task: () => executeHourlyTask(logger),
+                        logger,
+                    }),
+                ])
+            } catch (slotErr) {
+                logger.warn({ event: 'cron:slot_scheduler_error', error: slotErr }, 'slot scheduler error, continuing')
+            }
+
             return c.json({ 'count': positions.length })
         } catch (err) {
             logger.warn({ event: 'positions:fetch_failed', error: err }, 'failed to fetch positions')
