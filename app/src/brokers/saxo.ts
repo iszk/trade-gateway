@@ -283,9 +283,6 @@ export class SaxoClient {
             OrderDuration: { DurationType: 'DayOrder' },
         })
 
-        return this.buildFailure('BROKER_NOT_CONFIGURED', 'send: ' + body)
-
-        /*
         try {
             const response = await this.fetchImpl(`${this.baseUrl}/trade/v2/orders`, {
                 method: 'POST',
@@ -314,7 +311,6 @@ export class SaxoClient {
             const message = error instanceof Error ? error.message : String(error)
             return this.buildFailure('BROKER_REQUEST_FAILED', message)
         }
-        */
     }
 
     getLoginUrl(state: string): string {
