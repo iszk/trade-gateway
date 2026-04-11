@@ -143,6 +143,17 @@ export class BitflyerClient {
                 size: size,
             })
 
+            if (order.dryRun) {
+                console.log(JSON.stringify({
+                    event: 'dry_run:broker_api_call',
+                    broker: 'bitflyer',
+                    method: 'POST',
+                    path: SEND_CHILD_ORDER_PATH,
+                    body: JSON.parse(body),
+                }))
+                return { ok: true, broker: 'bitflyer', providerOrderId: 'DRY_RUN' }
+            }
+
             const payload = await this.callApi<BitflyerOrderResponse>(
                 'POST',
                 SEND_CHILD_ORDER_PATH,

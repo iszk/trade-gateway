@@ -10,6 +10,7 @@ export type OrderRequest = {
     side: OrderSide
     size: number
     requestId: string
+    dryRun?: boolean
 }
 
 export type OrderDispatchSuccess = {

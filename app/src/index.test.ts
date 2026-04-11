@@ -502,6 +502,41 @@ test('POST /api/webhooks/tradingview returns 400 for invalid side value', async 
     assert.equal(body.error.code, 'INVALID_REQUEST')
 })
 
+test('POST /api/webhooks/tradingview with dry_run=true skips dispatch and returns 202', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const payload = { ...makePayload('evt-dry-run-1'), dry_run: true }
+    const res = await postWebhook(app, payload)
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(body, { status: 'accepted', event_id: 'evt-dry-run-1' })
+    assert.equal(dispatchCalls.length, 1)
+    assert.equal(dispatchCalls[0]?.dryRun, true)
+})
+
+test('POST /api/webhooks/tradingview without dry_run does not set dryRun flag', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const res = await postWebhook(app, makePayload('evt-no-dry-run-1'))
+    assert.equal(res.status, 202)
+    assert.equal(dispatchCalls[0]?.dryRun, undefined)
+})
+
 // ---------------------------------------------------------------------------
 // SlotScheduler stub helpers
 // ---------------------------------------------------------------------------

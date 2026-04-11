@@ -50,6 +50,7 @@ const tradingViewWebhookSchema = z.object({
     broker: z.enum(['bitflyer', 'dummy', 'auto']).optional(),
     strategy: z.string().optional(),
     note: z.string().optional(),
+    dry_run: z.boolean().optional(),
 })
 
 const parseIpAllowlist = (): Set<string> => {
@@ -584,6 +585,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             side: payload.side,
             size: payload.size,
             requestId,
+            ...(payload.dry_run ? { dryRun: true } : {}),
         })
 
         if (!orderResult.ok) {
