@@ -51,6 +51,8 @@ const tradingViewWebhookSchema = z.object({
     strategy: z.string().optional(),
     note: z.string().optional(),
     dry_run: z.boolean().optional(),
+    stop_loss: z.string().optional(),
+    take_profit: z.string().optional(),
 })
 
 const parseIpAllowlist = (): Set<string> => {
@@ -506,6 +508,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
             size: payload.size,
             requestId,
             ...(payload.dry_run ? { dryRun: true } : {}),
+            ...(payload.price !== undefined ? { price: payload.price } : {}),
+            ...(payload.stop_loss ? { stopLoss: payload.stop_loss } : {}),
+            ...(payload.take_profit ? { takeProfit: payload.take_profit } : {}),
         })
 
         if (!orderResult.ok) {

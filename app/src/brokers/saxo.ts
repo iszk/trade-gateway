@@ -72,6 +72,23 @@ type SaxoOrderResponse = {
 const FIRESTORE_COLLECTION = 'saxo_auth_data'
 const FIRESTORE_DOC = 'saxo_auth'
 
+function parsePercentage(value: string): number | null {
+    const match = value.trim().match(/^(\d+(?:\.\d+)?)%$/)
+    if (!match || !match[1]) return null
+    return parseFloat(match[1]) / 100
+}
+
+type SaxoRelatedOrder = {
+    AccountKey: string
+    AssetType: string
+    Uic: number
+    BuySell: 'Buy' | 'Sell'
+    Amount: number
+    OrderType: 'StopIfTraded' | 'Limit'
+    OrderPrice: number
+    OrderDuration: { DurationType: string }
+}
+
 type SaxoProductInfo = {
     AssetType: string
     Uic: number
@@ -277,7 +294,62 @@ export class SaxoClient {
             auth.accounts[0]
         // TODO: AssetType をサポートする account が複数あった場合の対応
 
-        const body = JSON.stringify({
+        const closingSide = order.side === 'BUY' ? 'Sell' : 'Buy'
+
+        const relatedOrders: SaxoRelatedOrder[] = []
+
+        if ((order.stopLoss || order.takeProfit) && order.price === undefined) {
+            this.logger.warn(
+                { event: 'saxo:related_orders_skipped', ticker: order.ticker },
+                'stop_loss/take_profit ignored: no reference price provided',
+            )
+        } else if (order.price !== undefined) {
+            const refPrice = order.price
+
+            if (order.stopLoss) {
+                const pct = parsePercentage(order.stopLoss)
+                if (pct === null) {
+                    this.logger.warn({ event: 'saxo:invalid_stop_loss', value: order.stopLoss }, 'invalid stop_loss format')
+                } else {
+                    const stopPrice = order.side === 'BUY'
+                        ? refPrice * (1 - pct)
+                        : refPrice * (1 + pct)
+                    relatedOrders.push({
+                        AccountKey: account.accountKey,
+                        AssetType: productInfo.AssetType,
+                        Uic: productInfo.Uic,
+                        BuySell: closingSide,
+                        Amount: order.size,
+                        OrderType: 'StopIfTraded',
+                        OrderPrice: stopPrice,
+                        OrderDuration: { DurationType: 'GoodTillCancel' },
+                    })
+                }
+            }
+
+            if (order.takeProfit) {
+                const pct = parsePercentage(order.takeProfit)
+                if (pct === null) {
+                    this.logger.warn({ event: 'saxo:invalid_take_profit', value: order.takeProfit }, 'invalid take_profit format')
+                } else {
+                    const limitPrice = order.side === 'BUY'
+                        ? refPrice * (1 + pct)
+                        : refPrice * (1 - pct)
+                    relatedOrders.push({
+                        AccountKey: account.accountKey,
+                        AssetType: productInfo.AssetType,
+                        Uic: productInfo.Uic,
+                        BuySell: closingSide,
+                        Amount: order.size,
+                        OrderType: 'Limit',
+                        OrderPrice: limitPrice,
+                        OrderDuration: { DurationType: 'GoodTillCancel' },
+                    })
+                }
+            }
+        }
+
+        const orderBody = {
             AccountKey: account.accountKey,
             AssetType: productInfo.AssetType,
             Uic: productInfo.Uic,
@@ -285,7 +357,10 @@ export class SaxoClient {
             Amount: order.size,
             OrderType: 'Market',
             OrderDuration: { DurationType: 'DayOrder' },
-        })
+            ...(relatedOrders.length > 0 ? { Orders: relatedOrders } : {}),
+        }
+
+        const body = JSON.stringify(orderBody)
 
         if (order.dryRun) {
             this.logger.info({

@@ -11,6 +11,9 @@ export type OrderRequest = {
     size: number
     requestId: string
     dryRun?: boolean
+    price?: number
+    stopLoss?: string
+    takeProfit?: string
 }
 
 export type OrderDispatchSuccess = {
