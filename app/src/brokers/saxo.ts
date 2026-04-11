@@ -2,6 +2,7 @@ import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient } from '../firestore.js'
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { Position } from '../types/position.js'
+import { defaultLogger, type Logger } from '../logger.js'
 
 type SaxoClientOptions = {
     appKey?: string
@@ -11,6 +12,7 @@ type SaxoClientOptions = {
     redirectUri?: string
     fetchImpl?: typeof fetch
     db?: Firestore
+    logger?: Logger
 }
 
 type SaxoAccountInfo = {
@@ -94,6 +96,7 @@ export class SaxoClient {
     private readonly redirectUri?: string
     private readonly fetchImpl: typeof fetch
     private readonly db?: Firestore
+    private readonly logger: Logger
 
     constructor(options: SaxoClientOptions = {}) {
         this.appKey = options.appKey
@@ -103,6 +106,7 @@ export class SaxoClient {
         this.redirectUri = options.redirectUri
         this.fetchImpl = options.fetchImpl ?? fetch
         this.db = options.db
+        this.logger = options.logger ?? defaultLogger
     }
 
     private getFirestore(): Firestore {
@@ -244,7 +248,7 @@ export class SaxoClient {
             try {
                 auth = await this.refreshAccessToken(auth.refreshToken)
             } catch (error) {
-                console.error('Failed to auto-refresh Saxo token', error)
+                this.logger.warn({ event: 'saxo:token_refresh_failed', error }, 'Failed to auto-refresh Saxo token')
                 return null
             }
         }
@@ -284,13 +288,13 @@ export class SaxoClient {
         })
 
         if (order.dryRun) {
-            console.log(JSON.stringify({
+            this.logger.info({
                 event: 'dry_run:broker_api_call',
                 broker: 'saxo',
                 method: 'POST',
                 url: `${this.baseUrl}/trade/v2/orders`,
                 body: JSON.parse(body),
-            }))
+            })
             return { ok: true, broker: 'saxo', providerOrderId: 'DRY_RUN' }
         }
 

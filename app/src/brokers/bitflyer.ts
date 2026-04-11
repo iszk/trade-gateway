@@ -2,12 +2,14 @@ import { createHmac } from 'node:crypto'
 
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { Position } from '../types/position.js'
+import { defaultLogger, type Logger } from '../logger.js'
 
 type BitflyerClientOptions = {
     apiKey?: string
     apiSecret?: string
     baseUrl?: string
     fetchImpl?: typeof fetch
+    logger?: Logger
 }
 
 type BitflyerOrderResponse = {
@@ -75,12 +77,14 @@ export class BitflyerClient {
     private readonly apiSecret?: string
     private readonly baseUrl: string
     private readonly fetchImpl: typeof fetch
+    private readonly logger: Logger
 
     constructor(options: BitflyerClientOptions = {}) {
         this.apiKey = options.apiKey
         this.apiSecret = options.apiSecret
         this.baseUrl = options.baseUrl ?? DEFAULT_BITFLYER_BASE_URL
         this.fetchImpl = options.fetchImpl ?? fetch
+        this.logger = options.logger ?? defaultLogger
     }
 
     private async callApi<T>(
@@ -144,13 +148,13 @@ export class BitflyerClient {
             })
 
             if (order.dryRun) {
-                console.log(JSON.stringify({
+                this.logger.info({
                     event: 'dry_run:broker_api_call',
                     broker: 'bitflyer',
                     method: 'POST',
                     path: SEND_CHILD_ORDER_PATH,
                     body: JSON.parse(body),
-                }))
+                })
                 return { ok: true, broker: 'bitflyer', providerOrderId: 'DRY_RUN' }
             }
 
@@ -198,7 +202,7 @@ export class BitflyerClient {
                 pnl: res.pnl,
             }))
         } catch (error) {
-            console.error('Failed to get bitflyer positions', error)
+            this.logger.warn({ event: 'bitflyer:get_positions_failed', error }, 'Failed to get bitflyer positions')
             return []
         }
     }
@@ -207,7 +211,7 @@ export class BitflyerClient {
         try {
             return await this.callApi<BitflyerBalanceResponse[]>('GET', GET_BALANCE_PATH)
         } catch (error) {
-            console.error('Failed to get bitflyer balances', error)
+            this.logger.warn({ event: 'bitflyer:get_balances_failed', error }, 'Failed to get bitflyer balances')
             return []
         }
     }
@@ -216,7 +220,7 @@ export class BitflyerClient {
         try {
             return await this.callApi<BitflyerCollateralResponse>('GET', GET_COLLATERAL_PATH)
         } catch (error) {
-            console.error('Failed to get bitflyer collateral', error)
+            this.logger.warn({ event: 'bitflyer:get_collateral_failed', error }, 'Failed to get bitflyer collateral')
             return null
         }
     }
