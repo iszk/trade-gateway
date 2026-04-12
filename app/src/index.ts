@@ -32,7 +32,8 @@ const DEFAULT_ALLOWLIST = [
 ]
 
 const tradingViewWebhookSchema = z.object({
-    event_id: z.string().min(1),
+    event_id: z.string().min(1).optional(),
+    time: z.string().optional(), // ISO 8601形式
     // occurred_at: z.coerce.number().int().nonnegative(),
     occurred_at: z.preprocess((val) => {
         if (typeof val === 'string' && isNaN(Number(val))) {
@@ -459,6 +460,14 @@ export const createApp = (options: CreateAppOptions = {}) => {
             broker: resolveBroker(parsed.data.broker as IncomingBroker | undefined, parsed.data.ticker),
         }
 
+        const effectiveEventId = payload.event_id ?? [
+            payload.time ? String(new Date(payload.time).getTime()) : randomUUID(),
+            payload.symbol ?? payload.broker + payload.ticker,
+            payload.interval ?? 'no_interval',
+            payload.strategy ? payload.strategy.replace(/\s+/g, '_') : 'no_strategy',
+            payload.side,
+        ].join('-')
+
         if (payload.webhook_secret !== webhookSecret) {
             logWebhookRejected({
                 requestId,
@@ -467,7 +476,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 contentType,
                 rawBody,
                 payload,
-                eventId: payload.event_id,
+                eventId: effectiveEventId,
                 error: errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid').error,
                 reqLogger,
             })
@@ -489,7 +498,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 }
             }
             await createWebhookEvent({
-                event_id: payload.event_id,
+                event_id: effectiveEventId,
                 source: 'tradingview',
                 broker: payload.broker,
                 symbol: payload.ticker,
@@ -509,7 +518,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                     contentType,
                     rawBody,
                     payload,
-                    eventId: payload.event_id,
+                    eventId: effectiveEventId,
                     error: errorBody('DUPLICATED_EVENT', 'event_id is duplicated').error,
                     reqLogger,
                 })
@@ -519,7 +528,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         const orderResult = await dispatchOrder({
-            eventId: payload.event_id,
+            eventId: effectiveEventId,
             broker: payload.broker,
             ticker: payload.ticker,
             side: payload.side,
@@ -536,7 +545,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 request_id: requestId,
                 reason: 'broker_dispatch_failed',
                 sourceIp,
-                event_id: payload.event_id,
+                event_id: effectiveEventId,
                 error: {
                     code: orderResult.code,
                     message: orderResult.message,
@@ -546,10 +555,10 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         const dispatchLogData = {
-            event_id: payload.event_id,
+            event_id: effectiveEventId,
             broker: payload.broker,
             request_payload: {
-                eventId: payload.event_id,
+                eventId: effectiveEventId,
                 broker: payload.broker,
                 ticker: payload.ticker,
                 side: payload.side,
@@ -589,7 +598,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         return c.json(
             {
                 status: 'accepted',
-                event_id: payload.event_id,
+                event_id: effectiveEventId,
             },
             202,
         )
