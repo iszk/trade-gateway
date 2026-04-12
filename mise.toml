@@ -3,7 +3,7 @@ gcloud = "latest"
 node = "24"
 
 [env]
-GOOGLE_CLOUD_PROJECT = "trade-gateway-1"
+DEPLOY_GOOGLE_CLOUD_PROJECT = "trade-gateway-1"
 
 [tasks.setup]
 description = "Set up the project by installing dependencies"
@@ -38,15 +38,15 @@ run = "npm run test"
 [tasks."app:docker-push"]
 description = "Push the project to Google Cloud Artifact Registry"
 dir = "app"
-run = "gcloud builds submit --project $GOOGLE_CLOUD_PROJECT --tag asia-northeast1-docker.pkg.dev/$GOOGLE_CLOUD_PROJECT/repos/trade-gateway"
+run = "gcloud builds submit --project $DEPLOY_GOOGLE_CLOUD_PROJECT --tag asia-northeast1-docker.pkg.dev/$DEPLOY_GOOGLE_CLOUD_PROJECT/repos/trade-gateway"
 
 [tasks."app:deploy-from-registry"]
 description = "Deploy to Google Cloud Run from Artifact Registry"
 dir = "app"
 run = """
 gcloud run deploy trade-gateway \
-  --project $GOOGLE_CLOUD_PROJECT \
-  --image asia-northeast1-docker.pkg.dev/$GOOGLE_CLOUD_PROJECT/repos/trade-gateway \
+  --project $DEPLOY_GOOGLE_CLOUD_PROJECT \
+  --image asia-northeast1-docker.pkg.dev/$DEPLOY_GOOGLE_CLOUD_PROJECT/repos/trade-gateway \
   --region asia-northeast1 \
   --set-secrets "API_SECRET=API_SECRET:latest" \
   --set-secrets "WEBHOOK_SECRET=WEBHOOK_SECRET:latest" \
