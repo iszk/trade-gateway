@@ -279,9 +279,16 @@ export class SaxoClient {
             return this.buildFailure('BROKER_NOT_CONFIGURED', 'Saxo auth is missing or expired')
         }
 
+        /*
         const productInfo = TICKER_PRODUCT_CODE_MAP[order.ticker.toUpperCase()]
         if (!productInfo) {
             return this.buildFailure('BROKER_REQUEST_FAILED', `Unsupported ticker: ${order.ticker}`)
+        }
+        */
+        // ticker は "CfdOnIndex:4912" のような形式で渡される
+        const productInfo: SaxoProductInfo = {
+            AssetType: order.ticker.split(':')[0],
+            Uic: parseInt(order.ticker.split(':')[1], 10),
         }
 
         const auth = await this.getAuth()

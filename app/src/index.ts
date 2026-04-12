@@ -53,6 +53,7 @@ const tradingViewWebhookSchema = z.object({
     dry_run: z.boolean().optional(),
     stop_loss: z.string().optional(),
     take_profit: z.string().optional(),
+    symbol: z.string().optional(), // "brokerName:brokerTickerCode" の形式
 })
 
 const parseIpAllowlist = (): Set<string> => {
@@ -470,6 +471,16 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         try {
+            if (payload.symbol) {
+                const [symbolBroker, ...symbolParts] = payload.symbol.split(':')
+                const symbolTicker = symbolParts.join(':')
+                if (symbolBroker && symbolTicker) {
+                    payload.broker = resolveBroker(symbolBroker as IncomingBroker, symbolTicker)
+                    payload.ticker = symbolTicker
+                } else {
+                    logger.warn({ "symbol": payload.symbol }, "invalid symbol format, expected 'brokerName:brokerTickerCode'")
+                }
+            }
             await createWebhookEvent({
                 event_id: payload.event_id,
                 source: 'tradingview',
