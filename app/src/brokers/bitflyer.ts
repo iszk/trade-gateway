@@ -14,8 +14,15 @@ type BitflyerClientOptions = {
 
 type BitflyerOrderResponse = {
     child_order_acceptance_id?: string
+    parent_order_acceptance_id?: string
     message?: string
     error_message?: string
+}
+
+function parsePercentage(value: string): number | null {
+    const match = value.trim().match(/^(\d+(?:\.\d+)?)%$/)
+    if (!match || !match[1]) return null
+    return parseFloat(match[1]) / 100
 }
 
 type BitflyerPositionResponse = {
@@ -45,10 +52,28 @@ type BitflyerCollateralResponse = {
 }
 
 const SEND_CHILD_ORDER_PATH = '/v1/me/sendchildorder'
+const SEND_PARENT_ORDER_PATH = '/v1/me/sendparentorder'
 const GET_POSITIONS_PATH = '/v1/me/getpositions'
 const GET_BALANCE_PATH = '/v1/me/getbalance'
 const GET_COLLATERAL_PATH = '/v1/me/getcollateral'
 const DEFAULT_BITFLYER_BASE_URL = 'https://api.bitflyer.com'
+
+type BitflyerParentOrderParameter = {
+    product_code: string
+    condition_type: 'MARKET' | 'LIMIT' | 'STOP' | 'STOP_LIMIT' | 'TRAIL'
+    side: 'BUY' | 'SELL'
+    size: number
+    price?: number
+    trigger_price?: number
+    offset?: number
+}
+
+type BitflyerParentOrderRequest = {
+    order_method: 'SIMPLE' | 'IFD' | 'OCO' | 'IFDOCO'
+    minute_to_expire?: number
+    time_in_force?: 'GTC' | 'IOC' | 'FOK'
+    parameters: BitflyerParentOrderParameter[]
+}
 
 const buildFailure = (
     code: OrderDispatchFailure['code'],
@@ -139,6 +164,114 @@ export class BitflyerClient {
             const minSize = 0.001 // bitflyer の最小注文サイズ（例: FX_BTC_JPY の場合は 0.001）
             const size = Math.max(minSize, Math.min(maxSize, order.size))
             const productCode = resolveProductCode(order.ticker)
+
+            const closingSide = order.side === 'BUY' ? 'SELL' : 'BUY'
+            const stopLossPct = order.stopLoss ? parsePercentage(order.stopLoss) : null
+            const takeProfitPct = order.takeProfit ? parsePercentage(order.takeProfit) : null
+
+            if ((order.stopLoss || order.takeProfit) && order.price === undefined) {
+                this.logger.warn(
+                    { event: 'bitflyer:related_orders_skipped', ticker: order.ticker },
+                    'stop_loss/take_profit ignored: no reference price provided',
+                )
+            } else if ((stopLossPct !== null || takeProfitPct !== null) && order.price !== undefined) {
+                const parameters: BitflyerParentOrderParameter[] = [
+                    {
+                        product_code: productCode,
+                        condition_type: 'MARKET',
+                        side: order.side,
+                        size: size,
+                    },
+                ]
+
+                let orderMethod: BitflyerParentOrderRequest['order_method'] = 'IFD'
+
+                if (stopLossPct !== null && takeProfitPct !== null) {
+                    orderMethod = 'IFDOCO'
+                    const stopPrice = order.side === 'BUY'
+                        ? Math.floor(order.price * (1 - stopLossPct))
+                        : Math.ceil(order.price * (1 + stopLossPct))
+                    const limitPrice = order.side === 'BUY'
+                        ? Math.ceil(order.price * (1 + takeProfitPct))
+                        : Math.floor(order.price * (1 - takeProfitPct))
+
+                    parameters.push({
+                        product_code: productCode,
+                        condition_type: 'STOP',
+                        side: closingSide,
+                        size: size,
+                        trigger_price: stopPrice,
+                    })
+                    parameters.push({
+                        product_code: productCode,
+                        condition_type: 'LIMIT',
+                        side: closingSide,
+                        size: size,
+                        price: limitPrice,
+                    })
+                } else if (stopLossPct !== null) {
+                    orderMethod = 'IFD'
+                    const stopPrice = order.side === 'BUY'
+                        ? Math.floor(order.price * (1 - stopLossPct))
+                        : Math.ceil(order.price * (1 + stopLossPct))
+                    parameters.push({
+                        product_code: productCode,
+                        condition_type: 'STOP',
+                        side: closingSide,
+                        size: size,
+                        trigger_price: stopPrice,
+                    })
+                } else if (takeProfitPct !== null) {
+                    orderMethod = 'IFD'
+                    const limitPrice = order.side === 'BUY'
+                        ? Math.ceil(order.price * (1 + takeProfitPct))
+                        : Math.floor(order.price * (1 - takeProfitPct))
+                    parameters.push({
+                        product_code: productCode,
+                        condition_type: 'LIMIT',
+                        side: closingSide,
+                        size: size,
+                        price: limitPrice,
+                    })
+                }
+
+                const bodyObj: BitflyerParentOrderRequest = {
+                    order_method: orderMethod,
+                    minute_to_expire: 43200,
+                    time_in_force: 'GTC',
+                    parameters,
+                }
+                const body = JSON.stringify(bodyObj)
+
+                if (order.dryRun) {
+                    this.logger.info({
+                        event: 'dry_run:broker_api_call',
+                        broker: 'bitflyer',
+                        method: 'POST',
+                        path: SEND_PARENT_ORDER_PATH,
+                        body: JSON.parse(body),
+                    })
+                    return { ok: true, broker: 'bitflyer', providerOrderId: 'DRY_RUN' }
+                }
+
+                const payload = await this.callApi<BitflyerOrderResponse>(
+                    'POST',
+                    SEND_PARENT_ORDER_PATH,
+                    body,
+                    order.requestId,
+                )
+
+                const providerOrderId = payload?.parent_order_acceptance_id
+                if (!providerOrderId) {
+                    return buildFailure('BROKER_REQUEST_FAILED', 'missing parent_order_acceptance_id')
+                }
+
+                return {
+                    ok: true,
+                    broker: 'bitflyer',
+                    providerOrderId,
+                }
+            }
 
             const body = JSON.stringify({
                 product_code: productCode,

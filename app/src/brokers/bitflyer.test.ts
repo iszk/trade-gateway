@@ -185,3 +185,85 @@ test('BitflyerClient.getCollateral returns collateral', async () => {
     const result = await client.getCollateral()
     assert.deepEqual(result, { collateral: 50000, open_pnl: 100, keep_rate: 2.5 })
 })
+
+test('BitflyerClient uses IFD when stopLoss is provided with price', async () => {
+    let capturedUrl = ''
+    let capturedBody = ''
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url, init) => {
+            capturedUrl = String(url)
+            capturedBody = String(init?.body)
+            return new Response(
+                JSON.stringify({ parent_order_acceptance_id: 'JRF-parent-1' }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.sendMarketOrder({
+        ...makeOrder(),
+        price: 1000000,
+        stopLoss: '1%',
+    })
+
+    assert.equal(capturedUrl, 'https://example.com/v1/me/sendparentorder')
+    const body = JSON.parse(capturedBody)
+    assert.equal(body.order_method, 'IFD')
+    assert.equal(body.parameters.length, 2)
+    assert.equal(body.parameters[0].condition_type, 'MARKET')
+    assert.equal(body.parameters[1].condition_type, 'STOP')
+    assert.equal(body.parameters[1].trigger_price, 990000)
+
+    assert.deepEqual(result, {
+        ok: true,
+        broker: 'bitflyer',
+        providerOrderId: 'JRF-parent-1',
+    })
+})
+
+test('BitflyerClient uses IFDOCO when stopLoss and takeProfit are provided with price', async () => {
+    let capturedUrl = ''
+    let capturedBody = ''
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url, init) => {
+            capturedUrl = String(url)
+            capturedBody = String(init?.body)
+            return new Response(
+                JSON.stringify({ parent_order_acceptance_id: 'JRF-parent-2' }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.sendMarketOrder({
+        ...makeOrder(),
+        side: 'SELL',
+        price: 1000000,
+        stopLoss: '1%',
+        takeProfit: '2%',
+    })
+
+    assert.equal(capturedUrl, 'https://example.com/v1/me/sendparentorder')
+    const body = JSON.parse(capturedBody)
+    assert.equal(body.order_method, 'IFDOCO')
+    assert.equal(body.parameters.length, 3)
+    assert.equal(body.parameters[0].condition_type, 'MARKET')
+    assert.equal(body.parameters[1].condition_type, 'STOP')
+    assert.equal(body.parameters[1].trigger_price, 1010000) // stop loss for SELL
+    assert.equal(body.parameters[2].condition_type, 'LIMIT')
+    assert.equal(body.parameters[2].price, 980000) // take profit for SELL
+
+    assert.deepEqual(result, {
+        ok: true,
+        broker: 'bitflyer',
+        providerOrderId: 'JRF-parent-2',
+    })
+})
