@@ -55,7 +55,8 @@ const tradingViewWebhookSchema = z.object({
     price: z.number().optional(),
     interval: z.string().optional(),
     webhook_secret: z.string().min(1),
-    broker: z.enum(['bitflyer', 'dummy', 'auto']).optional(),
+    // broker: z.enum(['bitflyer', 'dummy', 'auto']).optional(),
+    broker: z.string().optional(),
     strategy: z.string().optional(),
     note: z.string().optional(),
     dry_run: z.boolean().optional(),
@@ -457,7 +458,19 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
         const payload = {
             ...parsed.data,
-            broker: resolveBroker(parsed.data.broker as IncomingBroker | undefined, parsed.data.ticker),
+            broker: 'auto', // 後で決定するため一旦空にしておく
+        }
+        if (payload.symbol) {
+            const [symbolBroker, ...symbolParts] = payload.symbol.split(':')
+            const symbolTicker = symbolParts.join(':')
+            if (symbolBroker && symbolTicker) {
+                payload.broker = resolveBroker(symbolBroker as IncomingBroker, symbolTicker)
+                payload.ticker = symbolTicker
+            } else {
+                logger.warn({ "symbol": payload.symbol }, "invalid symbol format, expected 'brokerName:brokerTickerCode'")
+            }
+        } else {
+            payload.broker = resolveBroker(parsed.data.broker as IncomingBroker | undefined, parsed.data.ticker)
         }
 
         const effectiveEventId = payload.event_id ?? [
@@ -467,6 +480,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             payload.strategy ? payload.strategy.replace(/\s+/g, '_') : 'no_strategy',
             payload.side,
         ].join('-')
+        payload.event_id = effectiveEventId
 
         if (payload.webhook_secret !== webhookSecret) {
             logWebhookRejected({
@@ -476,7 +490,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 contentType,
                 rawBody,
                 payload,
-                eventId: effectiveEventId,
                 error: errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid').error,
                 reqLogger,
             })
@@ -487,16 +500,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         try {
-            if (payload.symbol) {
-                const [symbolBroker, ...symbolParts] = payload.symbol.split(':')
-                const symbolTicker = symbolParts.join(':')
-                if (symbolBroker && symbolTicker) {
-                    payload.broker = resolveBroker(symbolBroker as IncomingBroker, symbolTicker)
-                    payload.ticker = symbolTicker
-                } else {
-                    logger.warn({ "symbol": payload.symbol }, "invalid symbol format, expected 'brokerName:brokerTickerCode'")
-                }
-            }
             await createWebhookEvent({
                 event_id: effectiveEventId,
                 source: 'tradingview',
@@ -529,7 +532,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
         const orderResult = await dispatchOrder({
             eventId: effectiveEventId,
-            broker: payload.broker,
+            broker: payload.broker as BrokerName || undefined,
             ticker: payload.ticker,
             side: payload.side,
             size: payload.size,

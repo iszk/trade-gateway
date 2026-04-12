@@ -244,6 +244,52 @@ test('POST /api/webhooks/tradingview accepts payload without order_type', async 
     assert.equal(dispatchCalls[0]?.broker, 'bitflyer')
 })
 
+test('POST /api/webhooks/tradingview accepts ISO8601 string for occurred_at', async () => {
+    const { dispatchOrder } = createDispatchStub()
+    const { createWebhookEvent, seen } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const iso8601 = '2026-04-12T00:00:00.000Z'
+    const payload = {
+        ...makePayload('evt-iso8601-occurred-at'),
+        occurred_at: iso8601,
+    }
+
+    const res = await postWebhook(app, payload)
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(body, {
+        status: 'accepted',
+        event_id: 'evt-iso8601-occurred-at',
+    })
+    assert.ok(seen.has('evt-iso8601-occurred-at'))
+})
+
+test('POST /api/webhooks/tradingview returns 400 for invalid occurred_at string', async () => {
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+    })
+
+    const payload = {
+        ...makePayload('evt-invalid-occurred-at'),
+        occurred_at: 'not-a-date',
+    }
+
+    const res = await postWebhook(app, payload)
+    const body = await res.json()
+
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'INVALID_REQUEST')
+    assert.match(body.error.message, /occurred_at/)
+})
+
 test('POST /api/webhooks/tradingview returns 400 on validation error', async () => {
     const { logger, calls } = createLoggerStub()
     const app = createAppForTests({
@@ -273,7 +319,7 @@ test('POST /api/webhooks/tradingview returns 400 on validation error', async () 
     })
     assert.deepEqual(rejectedLog?.error, {
         code: 'INVALID_REQUEST',
-        message: 'occurred_at: Invalid input: expected number, received NaN',
+        message: 'occurred_at: Invalid input: expected number, received string',
     })
     assert.equal(
         rejectedLog?.rawBody,
@@ -569,7 +615,7 @@ test('GET /api/cron calls slot-scheduler for 10m and 1h tasks', async () => {
     assert.equal(res.status, 200)
 
     const call10m = calls.find(c => c.slotKey === 'last_slot_10m')
-    const call1h  = calls.find(c => c.slotKey === 'last_slot_1h')
+    const call1h = calls.find(c => c.slotKey === 'last_slot_1h')
 
     assert.ok(call10m, 'should have called slot-scheduler for 10m task')
     assert.equal(call10m?.intervalSeconds, 600)
