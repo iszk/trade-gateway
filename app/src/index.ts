@@ -33,7 +33,14 @@ const DEFAULT_ALLOWLIST = [
 
 const tradingViewWebhookSchema = z.object({
     event_id: z.string().min(1),
-    occurred_at: z.coerce.number().int().nonnegative(),
+    // occurred_at: z.coerce.number().int().nonnegative(),
+    occurred_at: z.preprocess((val) => {
+        if (typeof val === 'string' && isNaN(Number(val))) {
+            const d = new Date(val)
+            if (!isNaN(d.getTime())) return d.getTime()
+        }
+        return val
+    }, z.number().int().nonnegative()),
     ticker: z.string().min(1),
     side: z.preprocess((val) => {
         if (typeof val !== 'string') return val
