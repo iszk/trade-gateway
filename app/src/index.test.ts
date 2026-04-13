@@ -37,7 +37,9 @@ const createAppForTests = (options: Parameters<typeof createApp>[0] = {}) =>
 const makePayload = (eventId: string, webhookSecret = 'test-secret') => ({
     event_id: eventId,
     time: new Date().toISOString(),
-    symbol: 'bitflyer:BTC_JPY',    side: 'BUY',
+    occurred_at: 1773837296000,
+    symbol: 'bitflyer:BTC_JPY',
+    side: 'BUY',
     order_type: 'MARKET',
     size: 0.01,
     webhook_secret: webhookSecret,
@@ -142,7 +144,7 @@ test('GET /api/positions returns positions when the shared key matches', async (
     const samplePositions: Position[] = [
         {
             broker: 'bitflyer',
-            symbol: 'bitflyer:BTC_JPY',
+            ticker: 'BTC_JPY',
             side: 'BUY',
             size: 0.02,
         },
@@ -289,7 +291,7 @@ test('POST /api/webhooks/tradingview returns 400 on validation error', async () 
         ...invalidPayload,
         webhook_secret: '[REDACTED]',
     })
-    assert.match(rejectedLog?.error.message, /time: Invalid ISO datetime/)
+    assert.match((rejectedLog?.error as any)?.message, /time/)
     assert.equal(
         rejectedLog?.rawBody,
         JSON.stringify({

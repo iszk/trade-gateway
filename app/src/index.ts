@@ -34,6 +34,13 @@ const DEFAULT_ALLOWLIST = [
 const tradingViewWebhookSchema = z.object({
     event_id: z.string().min(1).optional(),
     time: z.string().datetime(), // ISO 8601形式
+    occurred_at: z.preprocess((val) => {
+        if (typeof val === 'string' && isNaN(Number(val))) {
+            const d = new Date(val)
+            if (!isNaN(d.getTime())) return d.getTime()
+        }
+        return val
+    }, z.number().int().nonnegative()),
     ticker: z.string().min(1).optional(),
     side: z.preprocess((val) => {
         if (typeof val !== 'string') return val
@@ -500,7 +507,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 side: payload.side,
                 order_type: payload.order_type ?? 'MARKET',
                 size: payload.size,
-                occurred_at: new Date(payload.time),
+                occurred_at: new Date(payload.occurred_at),
                 received_at: new Date(),
                 status: 'accepted',
             })
