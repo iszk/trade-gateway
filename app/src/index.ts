@@ -5,8 +5,8 @@ import { Hono } from 'hono'
 import type { Context, Next } from 'hono'
 import { z } from 'zod'
 
-import { createOrderDispatcher, resolveBroker } from './services/order-dispatcher.js'
-import type { DispatchOrderFn, IncomingBroker, BrokerName } from './types/order.js'
+import { createOrderDispatcher } from './services/order-dispatcher.js'
+import type { DispatchOrderFn, BrokerName } from './types/order.js'
 import type { BrokerBalance } from './types/balance.js'
 import type { Position } from './types/position.js'
 import { DuplicateEventError, createDefaultWebhookEventFn } from './services/webhook-events.js'
@@ -33,16 +33,8 @@ const DEFAULT_ALLOWLIST = [
 
 const tradingViewWebhookSchema = z.object({
     event_id: z.string().min(1).optional(),
-    time: z.string().optional(), // ISO 8601形式
-    // occurred_at: z.coerce.number().int().nonnegative(),
-    occurred_at: z.preprocess((val) => {
-        if (typeof val === 'string' && isNaN(Number(val))) {
-            const d = new Date(val)
-            if (!isNaN(d.getTime())) return d.getTime()
-        }
-        return val
-    }, z.number().int().nonnegative()),
-    ticker: z.string().min(1),
+    time: z.string().datetime(), // ISO 8601形式
+    ticker: z.string().min(1).optional(),
     side: z.preprocess((val) => {
         if (typeof val !== 'string') return val
         const upper = val.toUpperCase()
@@ -55,14 +47,13 @@ const tradingViewWebhookSchema = z.object({
     price: z.number().optional(),
     interval: z.string().optional(),
     webhook_secret: z.string().min(1),
-    // broker: z.enum(['bitflyer', 'dummy', 'auto']).optional(),
     broker: z.string().optional(),
     strategy: z.string().optional(),
     note: z.string().optional(),
     dry_run: z.boolean().optional(),
     stop_loss: z.string().optional(),
     take_profit: z.string().optional(),
-    symbol: z.string().optional(), // "brokerName:brokerTickerCode" の形式
+    symbol: z.string().min(1), // "brokerName:brokerTickerCode" の形式
 })
 
 const parseIpAllowlist = (): Set<string> => {
@@ -458,24 +449,25 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
         const payload = {
             ...parsed.data,
-            broker: 'auto', // 後で決定するため一旦空にしておく
+            broker: '',
+            ticker: '',
         }
-        if (payload.symbol) {
-            const [symbolBroker, ...symbolParts] = payload.symbol.split(':')
-            const symbolTicker = symbolParts.join(':')
-            if (symbolBroker && symbolTicker) {
-                payload.broker = resolveBroker(symbolBroker as IncomingBroker, symbolTicker)
-                payload.ticker = symbolTicker
-            } else {
-                logger.warn({ "symbol": payload.symbol }, "invalid symbol format, expected 'brokerName:brokerTickerCode'")
-            }
+        
+        const [symbolBroker, ...symbolParts] = payload.symbol.split(':')
+        const symbolTicker = symbolParts.join(':')
+        if (symbolBroker && symbolTicker) {
+            const normalizedBroker = symbolBroker.toLowerCase()
+            payload.broker = normalizedBroker
+            payload.ticker = symbolTicker
         } else {
-            payload.broker = resolveBroker(parsed.data.broker as IncomingBroker | undefined, parsed.data.ticker)
+            logger.warn({ "symbol": payload.symbol }, "invalid symbol format, expected 'brokerName:brokerTickerCode'")
+            payload.broker = 'unknown'
+            payload.ticker = payload.symbol
         }
 
         const effectiveEventId = payload.event_id ?? [
-            payload.time ? String(new Date(payload.time).getTime()) : randomUUID(),
-            payload.symbol ?? payload.broker + payload.ticker,
+            String(new Date(payload.time).getTime()),
+            payload.symbol,
             payload.interval ?? 'no_interval',
             payload.strategy ? payload.strategy.replace(/\s+/g, '_') : 'no_strategy',
             payload.side,
@@ -508,7 +500,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 side: payload.side,
                 order_type: payload.order_type ?? 'MARKET',
                 size: payload.size,
-                occurred_at: new Date(payload.occurred_at),
+                occurred_at: new Date(payload.time),
                 received_at: new Date(),
                 status: 'accepted',
             })

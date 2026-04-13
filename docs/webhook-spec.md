@@ -21,15 +21,17 @@ TradingView から受信するアラートを正規化し、bitFlyer 向け発�
 ## リクエストスキーマ
 
 ### 必須項目
-- `event_id` (string): 送信元で一意となるイベントID
-- `occurred_at` (integer, unix milliseconds): シグナル発生時刻
-- `ticker` (string): 取引銘柄。1 文字以上の文字列を必須とする
+- `time` (string): シグナル発生時刻。ISO 8601形式の文字列（例: `2026-03-24T12:00:00Z`）
+- `symbol` (string): 取引銘柄。`"brokerName:brokerTickerCode"` の形式（例: `"bitflyer:BTC_JPY"`）を必須とする。ここからブローカーとティッカーが決定される。
 - `side` (string): `BUY` または `SELL`
 - `size` (number): 発注数量。`size > 0`
 - `webhook_secret` (string): 共有シークレット
 
 ### 任意項目
-- `broker` (string): 発注先ブローカー。未指定時は `bitflyer` を適用
+- `event_id` (string): 送信元で一意となるイベントID。未指定時は `time`, `symbol`, `side` などから自動生成される。
+- `broker` (string): 発注先ブローカー。（※ `symbol` に含まれるため実質的に非推奨・無視される）
+- `ticker` (string): 取引銘柄。（※ `symbol` に含まれるため実質的に非推奨・無視される）
+- `occurred_at` (integer): シグナル発生時刻。（※ `time` で代替可能なため廃止予定・無視される）
 - `order_type` (string): 指定時は `MARKET` のみ許可
 - `price` (number): 価格情報。`stop_loss` / `take_profit` を使用する場合は必須
 - `interval` (string): TradingView の時間足
@@ -46,14 +48,13 @@ TradingView から受信するアラートを正規化し、bitFlyer 向け発�
 ## バリデーション
 1. JSON であること
 2. 必須項目が欠落していないこと
-3. `occurred_at` が Unix time（milliseconds）の整数であること
+3. `time` が ISO 8601 形式の文字列であること
 4. `side` が許可値であること
 5. `size` が正の数であること
-6. `ticker` が 1 文字以上であること
+6. `symbol` が 1 文字以上であること（`brokerName:brokerTickerCode` 形式）
 7. `order_type` 指定時は許可値であること（MVP は `MARKET` のみ）
-8. `broker` 指定時は許可値であること（`bitflyer` `dummy` `auto`）
-9. `webhook_secret` がサーバ設定値と一致すること
-10. 送信元 IP が allowlist に含まれること
+8. `webhook_secret` がサーバ設定値と一致すること
+9. 送信元 IP が allowlist に含まれること
 
 ## TradingView 連携制約
 - Webhook の送信は HTTP POST
@@ -83,9 +84,8 @@ Alert の "Message" フィールドに以下の JSON を指定（改行は削除
 
 ```json
 {
-  "event_id": "{{alert.id}}",
-  "occurred_at": {{timenow}},
-  "ticker": "{{ticker}}",
+  "time": "{{time}}",
+  "symbol": "bitflyer:{{ticker}}",
   "side": "{{strategy.order.action}}",
   "size": {{strategy.order.contracts}},
   "webhook_secret": "__YOUR_WEBHOOK_SECRET__",
@@ -99,9 +99,8 @@ Alert の "Message" フィールドに以下の JSON を指定（改行は削除
 ```
 
 > **プレースホルダの説明**:
-> - `{{alert.id}}`: TradingView Alert ID（自動置換）
-> - `{{timenow}}`: 現在時刻の Unix time（milliseconds, 自動置換）
-> - `BTC_JPY`: 取引銘柄に応じて変更
+> - `{{time}}`: 現在時刻の ISO 8601 time（自動置換）
+> - `bitflyer:{{ticker}}`: 取引銘柄に応じて変更
 > - `BUY` / `SELL`: シグナルに応じて変更
 > - `0.01`: 発注単位に応じて変更
 > - `__YOUR_WEBHOOK_SECRET__`: サーバ管理者から支給されたシークレットに置き換え
@@ -115,9 +114,8 @@ Strategy の Alert callback 例：
 strategy.entry("Long", strategy.long, when=longSignal)
 alert(json.stringify(
   object.new(
-    event_id=str.tostring(time),
-    occurred_at=str.tostring(timenow),
-    ticker="BTC_JPY",
+    time=str.tostring(time),
+    symbol="bitflyer:BTC_JPY",
     side="BUY",
     size=0.01,
     webhook_secret="__YOUR_WEBHOOK_SECRET__",
@@ -129,7 +127,8 @@ alert(json.stringify(
 
 ## 重複判定
 - 一意キーは `event_id`
-- `event_id` が既処理なら重複として拒否する
+- `event_id` が未指定の場合は、ペイロードの項目 (`time`, `symbol`, `side` など) から自動的にハッシュ生成される。
+- 生成後または指定された `event_id` が既処理なら重複として拒否する
 
 ## レスポンス
 
@@ -141,7 +140,6 @@ alert(json.stringify(
 ```json
 {
   "status": "accepted",
-  "event_id": "evt-20260318-0001"
 }
 ```
 
@@ -184,9 +182,8 @@ alert(json.stringify(
 
 ```json
 {
-  "event_id": "evt-20260319-00123",
-  "occurred_at": 1773930645000,
-  "ticker": "BTC_JPY",
+  "time": "2026-03-19T00:00:00.000Z",
+  "symbol": "bitflyer:BTC_JPY",
   "side": "BUY",
   "order_type": "MARKET",
   "size": 0.05,
@@ -200,9 +197,8 @@ alert(json.stringify(
 
 ```json
 {
-  "event_id": "evt-20260319-00125",
-  "occurred_at": 1773935200000,
-  "ticker": "FX:NAS100",
+  "time": "2026-03-19T01:00:00.000Z",
+  "symbol": "saxo:FX:NAS100",
   "side": "BUY",
   "size": 1,
   "price": 18500.0,
@@ -218,9 +214,8 @@ alert(json.stringify(
 
 ```json
 {
-  "event_id": "evt-20260319-00124",
-  "occurred_at": 1773935130000,
-  "ticker": "BTC_JPY",
+  "time": "2026-03-19T02:00:00.000Z",
+  "symbol": "bitflyer:BTC_JPY",
   "side": "SELL",
   "size": 0.05,
   "webhook_secret": "sk_webhook_a1b2c3d4e5f6g7h8i9j0k1l2"
@@ -232,7 +227,6 @@ alert(json.stringify(
 ```json
 {
   "status": "accepted",
-  "event_id": "evt-20260319-00123"
 }
 ```
 
@@ -264,6 +258,5 @@ Status: `409 Conflict`
 {
   "status": "conflict",
   "error": "Event already processed",
-  "event_id": "evt-20260319-00123"
 }
 ```
