@@ -84,6 +84,7 @@ type SaxoRelatedOrder = {
     Uic: number
     BuySell: 'Buy' | 'Sell'
     Amount: number
+    ManualOrder: boolean
     OrderType: 'StopIfTraded' | 'Limit'
     OrderPrice: number
     OrderDuration: { DurationType: string }
@@ -329,6 +330,7 @@ export class SaxoClient {
                         Uic: productInfo.Uic,
                         BuySell: closingSide,
                         Amount: order.size,
+                        ManualOrder: false,
                         OrderType: 'StopIfTraded',
                         OrderPrice: stopPrice,
                         OrderDuration: { DurationType: 'GoodTillCancel' },
@@ -352,6 +354,7 @@ export class SaxoClient {
                         Uic: productInfo.Uic,
                         BuySell: closingSide,
                         Amount: order.size,
+                        ManualOrder: false,
                         OrderType: 'Limit',
                         OrderPrice: limitPrice,
                         OrderDuration: { DurationType: 'GoodTillCancel' },
@@ -368,6 +371,7 @@ export class SaxoClient {
             Amount: order.size,
             OrderType: 'Market',
             OrderDuration: { DurationType: 'DayOrder' },
+            ManualOrder: false,
             ...(relatedOrders.length > 0 ? { Orders: relatedOrders } : {}),
         }
 
@@ -396,6 +400,15 @@ export class SaxoClient {
 
             if (!response.ok) {
                 const errorBody = await response.text()
+                this.logger.warn(
+                    {
+                        event: 'saxo:order_failed',
+                        status: response.status,
+                        response: errorBody,
+                        request: { method: 'POST', url: `${this.baseUrl}/trade/v2/orders`, body: JSON.parse(body) },
+                    },
+                    'Saxo order request failed',
+                )
                 return this.buildFailure(
                     'BROKER_REQUEST_FAILED',
                     `Saxo order failed: ${response.status} ${errorBody}`,
