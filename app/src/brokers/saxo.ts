@@ -318,9 +318,11 @@ export class SaxoClient {
                 if (pct === null) {
                     this.logger.warn({ event: 'saxo:invalid_stop_loss', value: order.stopLoss }, 'invalid stop_loss format')
                 } else {
-                    const stopPrice = order.side === 'BUY'
-                        ? refPrice * (1 - pct)
-                        : refPrice * (1 + pct)
+                    const stopPrice = Number((
+                        order.side === 'BUY'
+                            ? refPrice * (1 - pct)
+                            : refPrice * (1 + pct)
+                    ).toFixed(2))
                     relatedOrders.push({
                         AccountKey: account.accountKey,
                         AssetType: productInfo.AssetType,
@@ -339,9 +341,11 @@ export class SaxoClient {
                 if (pct === null) {
                     this.logger.warn({ event: 'saxo:invalid_take_profit', value: order.takeProfit }, 'invalid take_profit format')
                 } else {
-                    const limitPrice = order.side === 'BUY'
-                        ? refPrice * (1 + pct)
-                        : refPrice * (1 - pct)
+                    const limitPrice = Number((
+                        order.side === 'BUY'
+                            ? refPrice * (1 + pct)
+                            : refPrice * (1 - pct)
+                    ).toFixed(2))
                     relatedOrders.push({
                         AccountKey: account.accountKey,
                         AssetType: productInfo.AssetType,
