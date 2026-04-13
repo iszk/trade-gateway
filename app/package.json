@@ -1,5 +1,5 @@
 {
-  "name": "trade-gateway",
+  "name": "@trade-gateway/api",
   "version": "1.0.0",
   "description": "TradingView からの webhook を受けて、実際にブローカーに対して発注を行う web api を提供するアプリケーション。",
   "main": "dist/index.js",
@@ -36,5 +36,12 @@
     "@types/node": "^25.5.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
+  },
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
   }
 }
