@@ -625,3 +625,4 @@ if (isMainModule) {
         port,
     })
 }
+export type AppType = typeof app
