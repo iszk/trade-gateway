@@ -1,22 +1,4 @@
 services:
-  console:
-    container_name: trade-gateway-devcontainer
-    user: vscode
-    build:
-      context: ./console
-      dockerfile: Dockerfile
-    tty: true
-    init: true
-    volumes:
-      - ./:/workspace
-      - console-node-modules:/workspace/app/node_modules
-      - console-config:/home/vscode/.config
-    environment:
-      - FIRESTORE_EMULATOR_HOST=firebase:8080
-      - GOOGLE_CLOUD_PROJECT=trade-gateway
-    entrypoint: ["/workspace/console/entrypoint.sh"]
-    networks:
-      - firebase
 
   app:
     container_name: trade-gateway-app
