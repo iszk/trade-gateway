@@ -1,7 +1,7 @@
 import { createApp } from 'honox/server'
 import { serve } from '@hono/node-server'
 
-const app = createApp()
+const app = createApp({})
 
 export default app
 
