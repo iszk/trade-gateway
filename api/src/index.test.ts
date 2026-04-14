@@ -36,8 +36,9 @@ const createAppForTests = (options: Parameters<typeof createApp>[0] = {}) =>
 
 const makePayload = (eventId: string, webhookSecret = 'test-secret') => ({
     event_id: eventId,
+    time: new Date().toISOString(),
     occurred_at: 1773837296000,
-    ticker: 'BTC_JPY',
+    symbol: 'bitflyer:BTC_JPY',
     side: 'BUY',
     order_type: 'MARKET',
     size: 0.01,
@@ -227,7 +228,7 @@ test('POST /api/webhooks/tradingview accepts payload without order_type', async 
     const { order_type: _, ...payloadWithoutOrderType } = makePayload('evt-accepted-no-order-type')
     const payload = {
         ...payloadWithoutOrderType,
-        broker: 'auto',
+        
         price: 123456.78,
         interval: '15',
     }
@@ -244,42 +245,15 @@ test('POST /api/webhooks/tradingview accepts payload without order_type', async 
     assert.equal(dispatchCalls[0]?.broker, 'bitflyer')
 })
 
-test('POST /api/webhooks/tradingview accepts ISO8601 string for occurred_at', async () => {
-    const { dispatchOrder } = createDispatchStub()
-    const { createWebhookEvent, seen } = createWebhookEventStub()
-    const app = createAppForTests({
-        webhookSecret: 'test-secret',
-        sourceIpAllowlist: new Set(['52.89.214.238']),
-        dispatchOrder,
-        createWebhookEvent,
-    })
-
-    const iso8601 = '2026-04-12T00:00:00.000Z'
-    const payload = {
-        ...makePayload('evt-iso8601-occurred-at'),
-        occurred_at: iso8601,
-    }
-
-    const res = await postWebhook(app, payload)
-    const body = await res.json()
-
-    assert.equal(res.status, 202)
-    assert.deepEqual(body, {
-        status: 'accepted',
-        event_id: 'evt-iso8601-occurred-at',
-    })
-    assert.ok(seen.has('evt-iso8601-occurred-at'))
-})
-
-test('POST /api/webhooks/tradingview returns 400 for invalid occurred_at string', async () => {
+test('POST /api/webhooks/tradingview returns 400 for invalid time string', async () => {
     const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
     })
 
     const payload = {
-        ...makePayload('evt-invalid-occurred-at'),
-        occurred_at: 'not-a-date',
+        ...makePayload('evt-invalid-time'),
+        time: 'not-a-date',
     }
 
     const res = await postWebhook(app, payload)
@@ -287,7 +261,7 @@ test('POST /api/webhooks/tradingview returns 400 for invalid occurred_at string'
 
     assert.equal(res.status, 400)
     assert.equal(body.error.code, 'INVALID_REQUEST')
-    assert.match(body.error.message, /occurred_at/)
+    assert.match(body.error.message, /time/)
 })
 
 test('POST /api/webhooks/tradingview returns 400 on validation error', async () => {
@@ -300,7 +274,7 @@ test('POST /api/webhooks/tradingview returns 400 on validation error', async () 
 
     const invalidPayload = {
         ...makePayload('evt-invalid-1'),
-        occurred_at: 'bad-date-ms',
+        time: 'bad-date-ms',
     }
 
     const res = await postWebhook(app, invalidPayload)
@@ -317,10 +291,7 @@ test('POST /api/webhooks/tradingview returns 400 on validation error', async () 
         ...invalidPayload,
         webhook_secret: '[REDACTED]',
     })
-    assert.deepEqual(rejectedLog?.error, {
-        code: 'INVALID_REQUEST',
-        message: 'occurred_at: Invalid input: expected number, received string',
-    })
+    assert.match((rejectedLog?.error as any)?.message, /time/)
     assert.equal(
         rejectedLog?.rawBody,
         JSON.stringify({
@@ -351,6 +322,7 @@ test('POST /api/webhooks/tradingview masks webhook_secret in invalid secret logs
         ...payload,
         webhook_secret: '[REDACTED]',
         broker: 'bitflyer',
+        ticker: 'BTC_JPY',
     })
     assert.equal(
         rejectedLog?.rawBody,

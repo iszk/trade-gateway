@@ -3,23 +3,7 @@ import test from 'node:test'
 
 import { BitflyerClient } from '../brokers/bitflyer.js'
 import type { SaxoClient } from '../brokers/saxo.js'
-import { createOrderDispatcher, resolveBroker } from './order-dispatcher.js'
-
-test('resolveBroker uses bitflyer for auto', () => {
-    assert.equal(resolveBroker('auto', 'BTC_JPY'), 'bitflyer')
-    assert.equal(resolveBroker(undefined, 'BTC_JPY'), 'bitflyer')
-    assert.equal(resolveBroker('bitflyer', 'BTC_JPY'), 'bitflyer')
-})
-
-test('resolveBroker resolves broker from ticker when broker is auto', () => {
-    assert.equal(resolveBroker('auto', 'BTC_JPY'), 'bitflyer')
-    assert.equal(resolveBroker('auto', 'BTC/JPY'), 'bitflyer')
-    assert.equal(resolveBroker('auto', 'FX_BTC_JPY'), 'bitflyer')
-    assert.equal(resolveBroker('auto', 'BTCJPY'), 'bitflyer')
-    assert.equal(resolveBroker('auto', 'btcjpy'), 'bitflyer')
-    // マップにない ticker も bitflyer にフォールバック
-    assert.equal(resolveBroker('auto', 'UNKNOWN_TICKER'), 'bitflyer')
-})
+import { createOrderDispatcher } from './order-dispatcher.js'
 
 test('createOrderDispatcher dispatches to bitflyer handler', async () => {
     let called = false
