@@ -42,7 +42,7 @@ run = "gcloud builds submit --project $DEPLOY_GOOGLE_CLOUD_PROJECT --tag asia-no
 
 [tasks."api:deploy-from-registry"]
 description = "Deploy to Google Cloud Run from Artifact Registry"
-dir = "app"
+dir = "api"
 run = """
 gcloud run deploy trade-gateway \
   --project $DEPLOY_GOOGLE_CLOUD_PROJECT \
