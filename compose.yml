@@ -1,7 +1,7 @@
 services:
 
-  app:
-    container_name: trade-gateway-app
+  api:
+    container_name: trade-gateway-api
     image: node:24-trixie
     volumes:
       - ./api:/app
@@ -17,9 +17,7 @@ services:
     command: bash -c "npm install && npm run dev"
 
 volumes:
-  console-config:
   api-node-modules:
-  console-node-modules:
 
 networks:
   firebase:
