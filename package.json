@@ -1,0 +1,8 @@
+{
+  "name": "trade-gateway-monorepo",
+  "private": true,
+  "workspaces": [
+    "api",
+    "ui"
+  ]
+}

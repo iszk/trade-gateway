@@ -7,42 +7,42 @@ DEPLOY_GOOGLE_CLOUD_PROJECT = "trade-gateway-1"
 
 [tasks.setup]
 description = "Set up the project by installing dependencies"
-dir = "app"
+dir = "api"
 run = "npm ci"
 
 [tasks.dev]
 description = "Start the development server"
-dir = "app"
+dir = "api"
 run = "npm run dev"
 
 [tasks.build]
 description = "Build the application"
-dir = "app"
+dir = "api"
 run = "npm run build"
 
 [tasks.start]
 description = "Start the production server"
-dir = "app"
+dir = "api"
 run = "npm run start"
 
 [tasks.typecheck]
 description = "Run type checking"
-dir = "app"
+dir = "api"
 run = "npm run typecheck"
 
 [tasks.test]
 description = "Run all tests"
-dir = "app"
+dir = "api"
 run = "npm run test"
 
-[tasks."app:docker-push"]
+[tasks."api:docker-push"]
 description = "Push the project to Google Cloud Artifact Registry"
-dir = "app"
+dir = "api"
 run = "gcloud builds submit --project $DEPLOY_GOOGLE_CLOUD_PROJECT --tag asia-northeast1-docker.pkg.dev/$DEPLOY_GOOGLE_CLOUD_PROJECT/repos/trade-gateway"
 
-[tasks."app:deploy-from-registry"]
+[tasks."api:deploy-from-registry"]
 description = "Deploy to Google Cloud Run from Artifact Registry"
-dir = "app"
+dir = "api"
 run = """
 gcloud run deploy trade-gateway \
   --project $DEPLOY_GOOGLE_CLOUD_PROJECT \
@@ -61,7 +61,7 @@ gcloud run deploy trade-gateway \
 [tasks.deploy]
 description = "Deploy the project to Google Cloud Run"
 # depends = ["app:docker-push", "app:deploy-from-registry"]
-run = "mise run app:docker-push && mise run app:deploy-from-registry"
+run = "mise run api:docker-push && mise run api:deploy-from-registry"
 
 [tasks.test_buy]
 description = "Test the buy webhook"

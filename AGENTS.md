@@ -33,5 +33,5 @@ mise に PATH が通っていない場合は `~/.local/bin/mise` を用いるこ
 4. **Code Style**: プロジェクトの既存のコードスタイルを尊重し、一貫性を保つこと。
 
 ## Project Structure
-- `/app/src`: ソースコード
+- `/api/src`: ソースコード
 - `/docs`: プロジェクト関連ドキュメント
