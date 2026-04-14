@@ -4,21 +4,21 @@ services:
     container_name: trade-gateway-app
     image: node:24-trixie
     volumes:
-      - ./app:/app
-      - app-node-modules:/app/node_modules
+      - ./api:/app
+      - api-node-modules:/app/node_modules
     working_dir: /app
     environment:
       - FIRESTORE_EMULATOR_HOST=firebase:8080
       - GOOGLE_CLOUD_PROJECT=trade-gateway
     env_file:
-      - ./app/.env
+      - ./api/.env
     networks:
       - firebase
     command: bash -c "npm install && npm run dev"
 
 volumes:
   console-config:
-  app-node-modules:
+  api-node-modules:
   console-node-modules:
 
 networks:
