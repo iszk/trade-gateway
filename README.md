@@ -8,6 +8,8 @@ TradingView からの webhook を受けて、実際にブローカーに対し�
 
 データベースにはアクセストークン、リフレッシュトークン、webhook の重複受信対策データを保持する。
 
+Node.js workspace 構成を採用しており、`api` と `ui` をルート `package.json` / `package-lock.json` でまとめて管理する。
+
 ## MVP スコープ
 
 - 対象ブローカー: bitFlyer のみ（現物・成行 BUY/SELL）
@@ -47,7 +49,16 @@ TradingView からの webhook を受けて、実際にブローカーに対し�
 
 ### フロントエンド
 
-- 未定
+- Honox
+- Vite
+
+## セットアップ / 開発
+
+- セットアップ: `mise run setup`
+- テスト: `mise run test`
+- 型チェック: `mise run typecheck`
+- API 開発: `mise run dev`
+- UI 開発: `mise run dev:ui`
 
 ### データベース
 

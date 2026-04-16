@@ -1,23 +1,24 @@
 {
   "name": "@trade-gateway/ui",
+  "version": "1.0.0",
+  "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build --mode client",
-    "start": "tsx src/server.ts"
+    "start": "tsx app/server.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
-  "private": true,
   "dependencies": {
-    "hono": "^4.12.12",
-    "honox": "^0.1.55",
     "@hono/node-server": "^1.19.11",
-    "@trade-gateway/api": "*"
+    "@trade-gateway/api": "1.0.0",
+    "hono": "^4.12.12",
+    "honox": "^0.1.55"
   },
   "devDependencies": {
     "@hono/vite-dev-server": "^0.18.2",
     "@tailwindcss/vite": "^4.0.9",
     "tailwindcss": "^4.0.9",
-    "tsx": "^4.21.0",
     "vite": "^6.3.5"
   }
 }
