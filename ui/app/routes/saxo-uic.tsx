@@ -1,39 +1,22 @@
 import { createRoute } from 'honox/factory'
-import { hc } from 'hono/client'
-import type { AppType } from '@trade-gateway/api'
+import type { SaxoInstrument } from '@trade-gateway/api'
+import { fetchApiJson } from '../lib/api'
+
+type SaxoInstrumentsResponse = {
+  instruments: SaxoInstrument[]
+}
 
 export default createRoute(async (c) => {
-  const apiUrl = process.env.API_URL || 'http://localhost:3000'
-  const apiSecret = process.env.API_SECRET || ''
-
-  const client = hc<AppType>(apiUrl, {
-    headers: {
-      Authorization: `Bearer ${apiSecret}`
-    }
-  })
-
   const keyword = c.req.query('keyword') || ''
   let errorMsg = ''
-  let instruments: any[] = []
+  let instruments: SaxoInstrument[] = []
 
   if (keyword) {
     try {
-      // The RPC endpoint should match what we defined in the API index.ts
-      const res = await client.api.saxo.instruments.$get({
-        query: { keyword }
-      })
-      if (!res.ok) {
-        errorMsg = `Failed to fetch instruments: ${res.status} ${res.statusText}`
-        const errorData = await res.json().catch(() => null);
-        if (errorData && typeof errorData === 'object' && 'error' in errorData) {
-            errorMsg += ` - ${(errorData as any).error.message}`
-        }
-      } else {
-        const data = await res.json()
-        instruments = data.instruments || []
-      }
-    } catch (e: any) {
-      errorMsg = `Error: ${e.message}`
+      const data = await fetchApiJson<SaxoInstrumentsResponse>('/api/saxo/instruments', { keyword })
+      instruments = data.instruments
+    } catch (e) {
+      errorMsg = e instanceof Error ? e.message : 'Unknown error'
     }
   }
 
@@ -44,7 +27,7 @@ export default createRoute(async (c) => {
         <a href="/" class="text-blue-500 hover:underline">Back to Home</a>
       </div>
 
-      <form method="GET" action="/saxo-uic" class="mb-8">
+      <form method="get" action="/saxo-uic" class="mb-8">
         <div class="flex gap-2">
           <input
             type="text"

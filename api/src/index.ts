@@ -641,4 +641,8 @@ if (isMainModule) {
         port,
     })
 }
+
 export type AppType = typeof app
+export type { BrokerBalance } from './types/balance.js'
+export type { Position } from './types/position.js'
+export type { SaxoInstrument } from './brokers/saxo.js'

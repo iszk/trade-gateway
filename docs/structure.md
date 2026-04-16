@@ -2,8 +2,12 @@
 
 ## ディレクトリ構成
 
+- package.json / package-lock.json
+  - npm workspace のルート。依存関係と共通スクリプトを管理する
 - api/
   - APIアプリケーションが入っている
+- ui/
+  - UI アプリケーションが入っている
 
 ## サーバ構成
 

@@ -11,32 +11,30 @@ DEPLOY_GOOGLE_CLOUD_PROJECT = "trade-gateway-1"
 
 [tasks.setup]
 description = "Set up the project by installing dependencies"
-dir = "api"
 run = "npm ci"
 
 [tasks.dev]
-description = "Start the development server"
-dir = "api"
-run = "npm run dev"
+description = "Start the API development server"
+run = "npm run dev:api"
+
+[tasks."dev:ui"]
+description = "Start the UI development server"
+run = "npm run dev:ui"
 
 [tasks.build]
-description = "Build the application"
-dir = "api"
+description = "Build all workspace applications"
 run = "npm run build"
 
 [tasks.start]
-description = "Start the production server"
-dir = "api"
-run = "npm run start"
+description = "Start the API production server"
+run = "npm run start --workspace @trade-gateway/api"
 
 [tasks.typecheck]
-description = "Run type checking"
-dir = "api"
+description = "Run type checking for all workspaces"
 run = "npm run typecheck"
 
 [tasks.test]
-description = "Run all tests"
-dir = "api"
+description = "Run all workspace tests"
 run = "npm run test"
 
 [tasks."api:docker-push"]

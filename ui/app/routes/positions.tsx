@@ -1,29 +1,20 @@
 import { createRoute } from 'honox/factory'
-import { hc } from 'hono/client'
-import type { AppType } from '@trade-gateway/api'
+import type { Position } from '@trade-gateway/api'
+import { fetchApiJson } from '../lib/api'
+
+type PositionsResponse = {
+  positions: Position[]
+  updated_at: number
+}
 
 export default createRoute(async (c) => {
-  const apiUrl = process.env.API_URL || 'http://localhost:3000'
-  const apiSecret = process.env.API_SECRET || ''
-
-  const client = hc<AppType>(apiUrl, {
-    headers: {
-      Authorization: `Bearer ${apiSecret}`
-    }
-  })
-
   let errorMsg = ''
-  let positionsData: any = null
+  let positionsData: PositionsResponse | null = null
 
   try {
-    const res = await client.api.positions.$get()
-    if (!res.ok) {
-      errorMsg = `Failed to fetch positions: ${res.status} ${res.statusText}`
-    } else {
-      positionsData = await res.json()
-    }
-  } catch (e: any) {
-    errorMsg = `Error: ${e.message}`
+    positionsData = await fetchApiJson<PositionsResponse>('/api/positions')
+  } catch (e) {
+    errorMsg = e instanceof Error ? e.message : 'Unknown error'
   }
 
   return c.render(
@@ -61,7 +52,7 @@ export default createRoute(async (c) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {positionsData.positions.map((pos: any, i: number) => (
+                  {positionsData.positions.map((pos, i) => (
                     <tr key={i} class="border-b hover:bg-gray-50">
                       <td class="px-6 py-4 font-medium capitalize">{pos.broker}</td>
                       <td class="px-6 py-4">{pos.ticker}</td>

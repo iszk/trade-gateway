@@ -1,29 +1,20 @@
 import { createRoute } from 'honox/factory'
-import { hc } from 'hono/client'
-import type { AppType } from '@trade-gateway/api'
+import type { BrokerBalance } from '@trade-gateway/api'
+import { fetchApiJson } from '../lib/api'
+
+type BalancesResponse = {
+  balances: BrokerBalance[]
+  updated_at: number
+}
 
 export default createRoute(async (c) => {
-  const apiUrl = process.env.API_URL || 'http://localhost:3000'
-  const apiSecret = process.env.API_SECRET || ''
-
-  const client = hc<AppType>(apiUrl, {
-    headers: {
-      Authorization: `Bearer ${apiSecret}`
-    }
-  })
-
   let errorMsg = ''
-  let balancesData: any = null
+  let balancesData: BalancesResponse | null = null
 
   try {
-    const res = await client.api.balances.$get()
-    if (!res.ok) {
-      errorMsg = `Failed to fetch balances: ${res.status} ${res.statusText}`
-    } else {
-      balancesData = await res.json()
-    }
-  } catch (e: any) {
-    errorMsg = `Error: ${e.message}`
+    balancesData = await fetchApiJson<BalancesResponse>('/api/balances')
+  } catch (e) {
+    errorMsg = e instanceof Error ? e.message : 'Unknown error'
   }
 
   return c.render(
@@ -45,7 +36,7 @@ export default createRoute(async (c) => {
             Last Updated: {new Date(balancesData.updated_at).toLocaleString()}
           </p>
           <div class="space-y-8">
-            {balancesData.balances.map((brokerBal: any) => (
+            {balancesData.balances.map((brokerBal) => (
               <div key={brokerBal.broker} class="bg-white shadow rounded-lg p-4">
                 <h2 class="text-xl font-semibold mb-4 capitalize border-b pb-2">{brokerBal.broker}</h2>
                 {brokerBal.balances.length === 0 ? (
@@ -60,7 +51,7 @@ export default createRoute(async (c) => {
                         </tr>
                       </thead>
                       <tbody>
-                        {brokerBal.balances.map((bal: any, i: number) => (
+                        {brokerBal.balances.map((bal, i) => (
                           <tr key={`${bal.asset}-${i}`} class="border-b hover:bg-gray-50">
                             <td class="px-6 py-4 font-medium">{bal.asset}</td>
                             <td class="px-6 py-4 text-right">{bal.amount}</td>
