@@ -200,6 +200,7 @@ type CreateAppOptions = {
         appKey?: string
         appSecret?: string
         authBaseUrl?: string
+        baseUrl?: string
         redirectUri?: string
     }
     balanceFetcher?: BalanceFetcherLike
@@ -335,6 +336,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         appKey: saxoConfig.appKey,
         appSecret: saxoConfig.appSecret,
         authBaseUrl: saxoConfig.authBaseUrl,
+        baseUrl: saxoConfig.baseUrl,
         redirectUri: saxoConfig.redirectUri,
         logger,
     })
@@ -474,7 +476,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             broker: '',
             ticker: '',
         }
-        
+
         const [symbolBroker, ...symbolParts] = payload.symbol.split(':')
         const symbolTicker = symbolParts.join(':')
         if (symbolBroker && symbolTicker) {

@@ -501,6 +501,15 @@ export class SaxoClient {
 
         if (!response.ok) {
             const body = await response.text()
+            this.logger.warn(
+                {
+                    event: 'saxo:instrument_search_failed',
+                    status: response.status,
+                    response: body,
+                    request: { method: 'GET', url: `${this.baseUrl}/ref/v1/instruments?${params.toString()}` },
+                },
+                'Saxo instrument search failed',
+            )
             throw new Error(`Failed to search Saxo instruments: ${response.status} ${body}`)
         }
 
