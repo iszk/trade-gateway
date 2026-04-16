@@ -271,19 +271,74 @@ export class SaxoClient {
         if (!auth) return null
 
         // Refresh if expiring in less than 1 minute
-        if (auth.accessTokenExpiresAt < Date.now() + 60 * 1000) {
-            if (auth.refreshTokenExpiresAt < Date.now() + 60 * 1000) {
-                return null // Refresh token also expired
-            }
-            try {
-                auth = await this.refreshAccessToken(auth.refreshToken)
-            } catch (error) {
-                this.logger.warn({ event: 'saxo:token_refresh_failed', error }, 'Failed to auto-refresh Saxo token')
-                return null
-            }
+        if (auth.accessTokenExpiresAt >= Date.now() + 60 * 1000) {
+            return auth.accessToken
         }
 
-        return auth.accessToken
+        if (auth.refreshTokenExpiresAt < Date.now() + 60 * 1000) {
+            return null // Refresh token also expired
+        }
+
+        const db = this.getFirestore()
+        const authRef = db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC)
+        let shouldRefresh = false
+
+        try {
+            await db.runTransaction(async (transaction) => {
+                const doc = await transaction.get(authRef)
+                if (!doc.exists) return
+
+                const data = doc.data() as SaxoAuthData & { refreshingUntil?: number }
+
+                if (data.accessTokenExpiresAt >= Date.now() + 60 * 1000) {
+                    return // Already refreshed
+                }
+
+                if (data.refreshingUntil && data.refreshingUntil > Date.now()) {
+                    throw new Error('ALREADY_REFRESHING')
+                }
+
+                // Acquire lock for 30 seconds
+                transaction.update(authRef, { refreshingUntil: Date.now() + 30 * 1000 })
+                shouldRefresh = true
+            })
+        } catch (error) {
+            if (error instanceof Error && error.message === 'ALREADY_REFRESHING') {
+                // Wait for the other process to finish refreshing
+                for (let i = 0; i < 15; i++) {
+                    await new Promise((resolve) => setTimeout(resolve, 1000))
+                    auth = await this.getAuth()
+                    if (auth && auth.accessTokenExpiresAt >= Date.now() + 60 * 1000) {
+                        return auth.accessToken
+                    }
+                }
+                this.logger.warn({ event: 'saxo:token_refresh_timeout' }, 'Timed out waiting for Saxo token refresh lock')
+                return null
+            }
+            throw error
+        }
+
+        if (!shouldRefresh) {
+            // Already refreshed by another process while we were checking
+            auth = await this.getAuth()
+            return auth?.accessToken ?? null
+        }
+
+        try {
+            // Get latest refresh token before calling API
+            auth = await this.getAuth()
+            if (!auth || auth.refreshTokenExpiresAt < Date.now() + 60 * 1000) {
+                return null
+            }
+            const newAuth = await this.refreshAccessToken(auth.refreshToken)
+            // refreshAccessToken calls saveAuth (using .set) which overwrites the whole document, effectively clearing the lock.
+            return newAuth.accessToken
+        } catch (error) {
+            this.logger.warn({ event: 'saxo:token_refresh_failed', error }, 'Failed to auto-refresh Saxo token')
+            // Release lock on failure
+            await authRef.update({ refreshingUntil: Date.now() - 1000 })
+            return null
+        }
     }
 
     async sendMarketOrder(order: OrderRequest): Promise<OrderDispatchResult> {
