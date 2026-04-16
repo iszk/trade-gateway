@@ -3,6 +3,10 @@ gcloud = "latest"
 node = "24"
 
 [env]
+# 基本的にはテスト用の環境変数を記載
+GCLOUD_PROJECT = "tradegatewaytest"
+FIRESTORE_EMULATOR_HOST = "firebase:8080"
+# 本番デプロイ用
 DEPLOY_GOOGLE_CLOUD_PROJECT = "trade-gateway-1"
 
 [tasks.setup]

@@ -1,0 +1,16 @@
+steps:
+  # Dockerビルド
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'build',
+      '-t', 'asia-northeast1-docker.pkg.dev/$PROJECT_ID/repos/trade-gateway',
+      '-f', 'api/Dockerfile',
+      '.'
+    ]
+
+  # Artifact Registry へのプッシュ
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'asia-northeast1-docker.pkg.dev/$PROJECT_ID/repos/trade-gateway']
+
+images:
+  - 'asia-northeast1-docker.pkg.dev/$PROJECT_ID/repos/trade-gateway'
