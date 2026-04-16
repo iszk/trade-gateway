@@ -7,7 +7,7 @@ WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
-COPY tsconfig.json ./
+COPY tsconfig*.json ./
 COPY api/tsconfig.json ./api/
 COPY api/package*.json ./api/
 
@@ -29,7 +29,8 @@ FROM node:24-alpine
 WORKDIR /app
 
 # Copy package files
-COPY api/package*.json ./
+COPY package*.json ./
+COPY api/package*.json ./api/
 
 # update npm
 RUN npm install -g npm@latest
