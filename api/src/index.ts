@@ -331,16 +331,17 @@ export const createApp = (options: CreateAppOptions = {}) => {
         return c.json({ status: 'ok' })
     })
 
-    const saxoClientForAuth = new SaxoClient({
+    const saxoClient = new SaxoClient({
         appKey: saxoConfig.appKey,
         appSecret: saxoConfig.appSecret,
         authBaseUrl: saxoConfig.authBaseUrl,
         redirectUri: saxoConfig.redirectUri,
+        logger,
     })
 
     app.get('/api/auth/saxo/login', (c) => {
         const state = randomUUID()
-        const loginUrl = saxoClientForAuth.getLoginUrl(state)
+        const loginUrl = saxoClient.getLoginUrl(state)
         return c.redirect(loginUrl)
     })
 
@@ -357,11 +358,25 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         try {
-            await saxoClientForAuth.exchangeCodeForToken(code)
+            await saxoClient.exchangeCodeForToken(code)
             return c.json({ status: 'success', message: 'Saxo authentication successful' })
         } catch (err) {
             logger.warn({ event: 'saxo_auth:failed', error: err }, 'Saxo authentication failed')
             return c.json({ error: 'Authentication failed' }, 500)
+        }
+    })
+
+    app.get('/api/saxo/instruments', requireApiSecret, async (c) => {
+        const keyword = c.req.query('keyword')
+        if (!keyword) {
+            return c.json(errorBody('INVALID_REQUEST', 'keyword is required'), 400)
+        }
+        try {
+            const instruments = await saxoClient.searchInstruments(keyword)
+            return c.json({ instruments })
+        } catch (err) {
+            logger.warn({ event: 'saxo_instruments:search_failed', error: err }, 'failed to search Saxo instruments')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to search instruments'), 500)
         }
     })
 

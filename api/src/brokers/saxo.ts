@@ -69,6 +69,18 @@ type SaxoOrderResponse = {
     OrderId: string
 }
 
+export type SaxoInstrument = {
+    Identifier: number
+    Symbol: string
+    Description: string
+    AssetType: string
+    CurrencyCode: string
+}
+
+type SaxoInstrumentResponse = {
+    Data: SaxoInstrument[]
+}
+
 const FIRESTORE_COLLECTION = 'saxo_auth_data'
 const FIRESTORE_DOC = 'saxo_auth'
 
@@ -466,5 +478,33 @@ export class SaxoClient {
             price: item.NetPositionView.AverageOpenPrice,
             pnl: item.NetPositionView.ProfitLossOnTrade,
         }))
+    }
+
+    async searchInstruments(keyword: string): Promise<SaxoInstrument[]> {
+        const accessToken = await this.getValidAccessToken()
+        if (!accessToken) {
+            throw new Error('Saxo auth is missing or expired')
+        }
+
+        const params = new URLSearchParams({
+            Keywords: keyword,
+            $top: '50',
+            // Typically people trade CFD or FX, maybe Stocks. 
+            // We can omit AssetTypes to search all, or restrict it. Let's omit for broader search.
+        })
+
+        const response = await this.fetchImpl(`${this.baseUrl}/ref/v1/instruments?${params.toString()}`, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+        })
+
+        if (!response.ok) {
+            const body = await response.text()
+            throw new Error(`Failed to search Saxo instruments: ${response.status} ${body}`)
+        }
+
+        const data = (await response.json()) as SaxoInstrumentResponse
+        return data.Data
     }
 }
