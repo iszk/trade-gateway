@@ -14,6 +14,9 @@ export default createRoute((c) => {
         <a href="/positions" class="bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-3 px-6 rounded shadow">
           View Positions
         </a>
+        <a href="/saxo-uic" class="bg-teal-500 hover:bg-teal-600 text-white font-semibold py-3 px-6 rounded shadow">
+          Search Saxo UIC
+        </a>
       </div>
 
       <div class="border-t pt-8">
