@@ -6,7 +6,7 @@ import { SaxoClient } from './saxo.js'
 
 const mockFirestore = (data: Record<string, any> = {}) => {
     const store = { ...data }
-    return {
+    const db: any = {
         collection: (collectionPath: string) => ({
             doc: (docPath: string) => ({
                 get: async () => ({
@@ -16,9 +16,26 @@ const mockFirestore = (data: Record<string, any> = {}) => {
                 set: async (newData: any) => {
                     store[`${collectionPath}/${docPath}`] = newData
                 },
+                update: async (updates: any) => {
+                    store[`${collectionPath}/${docPath}`] = {
+                        ...store[`${collectionPath}/${docPath}`],
+                        ...updates,
+                    }
+                },
             }),
         }),
-    } as unknown as Firestore
+        runTransaction: async (updateFunction: (transaction: any) => Promise<any>) => {
+            const transaction = {
+                get: async (ref: any) => ref.get(),
+                update: (ref: any, updates: any) => {
+                    ref.update(updates)
+                    return transaction
+                },
+            }
+            return updateFunction(transaction)
+        },
+    }
+    return db as unknown as Firestore
 }
 
 test('SaxoClient.getLoginUrl returns correct URL', () => {
