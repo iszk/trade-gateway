@@ -134,9 +134,6 @@ const makeFirestoreMock = () => {
     }
 }
 
-// getUnpairedLogsFn のテスト用に import
-import { getUnpairedLogsFn } from './trade-records.js'
-
 test('getUnpairedLogsFn: execution_price あり paired=false のみ返す', async () => {
     const db = makeFirestoreMock()
 
