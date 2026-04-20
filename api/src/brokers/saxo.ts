@@ -570,7 +570,12 @@ export class SaxoClient {
 
             if (!response.ok) {
                 this.logger.warn(
-                    { event: 'saxo:get_execution_price_failed', orderId, status: response.status },
+                    {
+                        event: 'saxo:get_execution_price_failed',
+                        orderId,
+                        response: await response.text(),
+                        status: response.status
+                    },
                     'failed to get execution price from Saxo audit',
                 )
                 return null
