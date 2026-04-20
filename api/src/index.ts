@@ -13,6 +13,8 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn, createDefaultGetPendingExecutionLogsFn, createDefaultUpdateExecutionPriceFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn, GetPendingExecutionLogsFn, UpdateExecutionPriceFn } from './services/order-dispatch-logs.js'
+import { createDefaultGetUnpairedLogsFn, createDefaultCreateTradeRecordFn, createDefaultMarkLogPairedFn } from './services/trade-records.js'
+import type { GetUnpairedLogsFn, CreateTradeRecordFn, MarkLogPairedFn } from './services/trade-records.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
@@ -215,6 +217,9 @@ type CreateAppOptions = {
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
     getPendingExecutionLogs?: GetPendingExecutionLogsFn
     updateExecutionPrice?: UpdateExecutionPriceFn
+    getUnpairedLogs?: GetUnpairedLogsFn
+    createTradeRecord?: CreateTradeRecordFn
+    markLogPaired?: MarkLogPairedFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -235,6 +240,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
     const getPendingExecutionLogs = options.getPendingExecutionLogs ?? createDefaultGetPendingExecutionLogsFn()
     const updateExecutionPrice = options.updateExecutionPrice ?? createDefaultUpdateExecutionPriceFn()
+    const getUnpairedLogs = options.getUnpairedLogs ?? createDefaultGetUnpairedLogsFn()
+    const createTradeRecord = options.createTradeRecord ?? createDefaultCreateTradeRecordFn()
+    const markLogPaired = options.markLogPaired ?? createDefaultMarkLogPairedFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -258,6 +266,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
         executionPriceFetchers: options.executionPriceFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
         getPendingExecutionLogs,
         updateExecutionPrice,
+        getUnpairedLogs,
+        createTradeRecord,
+        markLogPaired,
     }
 
     const logWebhook = (

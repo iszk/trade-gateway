@@ -1,4 +1,6 @@
 import type { GetPendingExecutionLogsFn, UpdateExecutionPriceFn } from './order-dispatch-logs.js'
+import type { GetUnpairedLogsFn, CreateTradeRecordFn, MarkLogPairedFn } from './trade-records.js'
+import { pairLogs } from './trade-records.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -18,7 +20,12 @@ export type CronContext = {
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
     getPendingExecutionLogs?: GetPendingExecutionLogsFn
     updateExecutionPrice?: UpdateExecutionPriceFn
+    getUnpairedLogs?: GetUnpairedLogsFn
+    createTradeRecord?: CreateTradeRecordFn
+    markLogPaired?: MarkLogPairedFn
 }
+
+const PAIRING_TIMEOUT_MS = 30_000
 
 export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:ten_minutely_task' }, '10-minute task executed')
@@ -35,6 +42,17 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             executionPriceFetchers: ctx.executionPriceFetchers,
             getPendingExecutionLogs: ctx.getPendingExecutionLogs,
             updateExecutionPrice: ctx.updateExecutionPrice,
+        })
+    }
+
+    // 取引ペアリング
+    if (ctx.getUnpairedLogs && ctx.createTradeRecord && ctx.markLogPaired) {
+        await pairAndRecordTrades({
+            logger: ctx.logger,
+            getUnpairedLogs: ctx.getUnpairedLogs,
+            createTradeRecord: ctx.createTradeRecord,
+            markLogPaired: ctx.markLogPaired,
+            timeoutMs: PAIRING_TIMEOUT_MS,
         })
     }
 }
@@ -81,4 +99,54 @@ const fetchAndUpdateExecutionPrices = async (ctx: {
 
 export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:hourly_task' }, 'hourly task executed')
+}
+
+const pairAndRecordTrades = async (ctx: {
+    logger: Logger
+    getUnpairedLogs: GetUnpairedLogsFn
+    createTradeRecord: CreateTradeRecordFn
+    markLogPaired: MarkLogPairedFn
+    timeoutMs: number
+}): Promise<void> => {
+    const deadline = Date.now() + ctx.timeoutMs
+
+    const unpairedLogs = await ctx.getUnpairedLogs()
+    const paired = pairLogs(unpairedLogs)
+
+    ctx.logger.info(
+        { event: 'cron:trade_pairing_start', unpairedCount: unpairedLogs.length, pairedCount: paired.length },
+        'trade pairing started',
+    )
+
+    for (const { record, entryDocId, exitDocId } of paired) {
+        if (Date.now() >= deadline) {
+            ctx.logger.info(
+                { event: 'cron:trade_pairing_timeout' },
+                'trade pairing timed out, will resume next cron',
+            )
+            break
+        }
+
+        try {
+            await ctx.createTradeRecord(record)
+            await ctx.markLogPaired(entryDocId)
+            await ctx.markLogPaired(exitDocId)
+
+            ctx.logger.info(
+                {
+                    event: 'cron:trade_record_created',
+                    strategy: record.strategy,
+                    interval: record.interval,
+                    ticker: record.ticker,
+                    pnl: record.pnl,
+                },
+                'trade record created',
+            )
+        } catch (error) {
+            ctx.logger.info(
+                { event: 'cron:trade_record_create_failed', error },
+                'failed to create trade record',
+            )
+        }
+    }
 }
