@@ -166,13 +166,14 @@ test('SaxoClient.getExecutionPrice returns null for DRY_RUN', async () => {
     assert.equal(result, null)
 })
 
-test('SaxoClient.getExecutionPrice returns weighted average from fills', async () => {
+test('SaxoClient.getExecutionPrice returns AveragePrice from audit activities', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'valid-token',
             refreshToken: 'refresh-token',
             accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
             refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ clientKey: 'test-client' }],
         },
     })
 
@@ -186,8 +187,8 @@ test('SaxoClient.getExecutionPrice returns weighted average from fills', async (
             return new Response(
                 JSON.stringify({
                     Data: [
-                        { TradeId: 'T1', OrderId: 'ORD-123', ExecutionPrice: 18000, Amount: 1 },
-                        { TradeId: 'T2', OrderId: 'ORD-123', ExecutionPrice: 18100, Amount: 2 },
+                        { LogId: 'L1', OrderId: 'ORD-123', Status: 'Placed' },
+                        { LogId: 'L2', OrderId: 'ORD-123', Status: 'FinalFill', AveragePrice: 18066.67 },
                     ],
                 }),
                 { status: 200, headers: { 'content-type': 'application/json' } },
@@ -197,13 +198,13 @@ test('SaxoClient.getExecutionPrice returns weighted average from fills', async (
 
     const result = await client.getExecutionPrice('ORD-123')
 
-    assert.ok(capturedUrl.includes('/trade/v1/fills'))
-    assert.ok(capturedUrl.includes('ORD-123'))
-    // (18000*1 + 18100*2) / 3 = 54200/3 ≈ 18066.67
-    assert.ok(result !== null && Math.abs(result - 18066.67) < 0.01)
+    assert.ok(capturedUrl.includes('/cs/v1/audit/orderactivities/'))
+    assert.ok(capturedUrl.includes('OrderId=ORD-123'))
+    assert.ok(capturedUrl.includes('ClientKey=test-client'))
+    assert.equal(result, 18066.67)
 })
 
-test('SaxoClient.getExecutionPrice returns null when fills are empty', async () => {
+test('SaxoClient.getExecutionPrice returns null when activities are empty', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'valid-token',
