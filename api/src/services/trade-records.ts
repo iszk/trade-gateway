@@ -141,7 +141,7 @@ export const getUnpairedLogsFn = (db: Firestore): GetUnpairedLogsFn => {
 
 export const createTradeRecordFn = (db: Firestore): CreateTradeRecordFn => {
     return async (record) => {
-        const expireAt = new Date(record.closed_at.getTime() + 365 * 24 * 60 * 60 * 1000)
+        const expireAt = new Date(record.closed_at.getTime() + 2 * 365 * 24 * 60 * 60 * 1000) // 約2年
         await db.collection('trade_records').add({
             ...record,
             expire_at: expireAt,
