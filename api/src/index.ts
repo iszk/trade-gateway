@@ -11,8 +11,9 @@ import type { BrokerBalance } from './types/balance.js'
 import type { Position } from './types/position.js'
 import { DuplicateEventError, createDefaultWebhookEventFn } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
-import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
-import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
+import { createDefaultOrderDispatchLogFn, createDefaultGetPendingExecutionLogsFn, createDefaultUpdateExecutionPriceFn } from './services/order-dispatch-logs.js'
+import type { CreateOrderDispatchLogFn, GetPendingExecutionLogsFn, UpdateExecutionPriceFn } from './services/order-dispatch-logs.js'
+import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
 import { BalanceFetcher } from './services/balance-fetcher.js'
@@ -20,7 +21,7 @@ import { config } from './config.js'
 import { createDefaultSlotScheduler } from './services/slot-scheduler.js'
 import type { SlotScheduler } from './services/slot-scheduler.js'
 import { executeTenMinutelyTask, executeHourlyTask } from './services/cron-tasks.js'
-import type { CronContext } from './services/cron-tasks.js'
+import type { CronContext, ExecutionPriceFetcherLike } from './services/cron-tasks.js'
 
 import { defaultLogger, type Logger } from './logger.js'
 
@@ -203,9 +204,17 @@ type CreateAppOptions = {
         baseUrl?: string
         redirectUri?: string
     }
+    bitflyerConfig?: {
+        apiKey?: string
+        apiSecret?: string
+        baseUrl?: string
+    }
     balanceFetcher?: BalanceFetcherLike
     positionFetcher?: PositionFetcherLike
     slotScheduler?: SlotScheduler
+    executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
+    getPendingExecutionLogs?: GetPendingExecutionLogsFn
+    updateExecutionPrice?: UpdateExecutionPriceFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -219,11 +228,37 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const logger = options.logger ?? defaultLogger
 
     const saxoConfig = options.saxoConfig ?? config.saxo
+    const bitflyerConfig = options.bitflyerConfig ?? config.bitflyer
     const positionFetcher = options.positionFetcher ?? new PositionFetcher()
     const balanceFetcher = options.balanceFetcher ?? new BalanceFetcher()
     const requireApiSecret = createApiSecretAuthMiddleware(apiSecret)
     const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
-    const cronCtx: CronContext = { logger, positionFetcher }
+    const getPendingExecutionLogs = options.getPendingExecutionLogs ?? createDefaultGetPendingExecutionLogsFn()
+    const updateExecutionPrice = options.updateExecutionPrice ?? createDefaultUpdateExecutionPriceFn()
+
+    const bitflyerClient = new BitflyerClient({
+        apiKey: bitflyerConfig.apiKey,
+        apiSecret: bitflyerConfig.apiSecret,
+        baseUrl: bitflyerConfig.baseUrl,
+        logger,
+    })
+
+    const saxoClient = new SaxoClient({
+        appKey: saxoConfig.appKey,
+        appSecret: saxoConfig.appSecret,
+        authBaseUrl: saxoConfig.authBaseUrl,
+        baseUrl: saxoConfig.baseUrl,
+        redirectUri: saxoConfig.redirectUri,
+        logger,
+    })
+
+    const cronCtx: CronContext = {
+        logger,
+        positionFetcher,
+        executionPriceFetchers: options.executionPriceFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
+        getPendingExecutionLogs,
+        updateExecutionPrice,
+    }
 
     const logWebhook = (
         level: 'info' | 'warn',
@@ -330,15 +365,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         return c.json({ status: 'ok' })
-    })
-
-    const saxoClient = new SaxoClient({
-        appKey: saxoConfig.appKey,
-        appSecret: saxoConfig.appSecret,
-        authBaseUrl: saxoConfig.authBaseUrl,
-        baseUrl: saxoConfig.baseUrl,
-        redirectUri: saxoConfig.redirectUri,
-        logger,
     })
 
     app.get('/api/auth/saxo/login', (c) => {

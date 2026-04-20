@@ -41,3 +41,46 @@ export const createOrderDispatchLogFn = (db: Firestore): CreateOrderDispatchLogF
 
 export const createDefaultOrderDispatchLogFn = (): CreateOrderDispatchLogFn =>
     createOrderDispatchLogFn(getFirestoreClient())
+
+export type PendingExecutionLog = {
+    docId: string
+    broker: string
+    provider_order_id: string
+}
+
+export type GetPendingExecutionLogsFn = () => Promise<PendingExecutionLog[]>
+export type UpdateExecutionPriceFn = (docId: string, executionPrice: number) => Promise<void>
+
+export const getPendingExecutionLogsFn = (db: Firestore): GetPendingExecutionLogsFn => {
+    return async () => {
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1000)
+        const snapshot = await db
+            .collection('order_dispatch_logs')
+            .where('result', '==', 'success')
+            .where('created_at', '>=', since)
+            .get()
+
+        return snapshot.docs
+            .filter((doc) => {
+                const data = doc.data()
+                return data.provider_order_id && data.execution_price === undefined
+            })
+            .map((doc) => ({
+                docId: doc.id,
+                broker: doc.data().broker as string,
+                provider_order_id: doc.data().provider_order_id as string,
+            }))
+    }
+}
+
+export const updateExecutionPriceFn = (db: Firestore): UpdateExecutionPriceFn => {
+    return async (docId, executionPrice) => {
+        await db.collection('order_dispatch_logs').doc(docId).update({ execution_price: executionPrice })
+    }
+}
+
+export const createDefaultGetPendingExecutionLogsFn = (): GetPendingExecutionLogsFn =>
+    getPendingExecutionLogsFn(getFirestoreClient())
+
+export const createDefaultUpdateExecutionPriceFn = (): UpdateExecutionPriceFn =>
+    updateExecutionPriceFn(getFirestoreClient())

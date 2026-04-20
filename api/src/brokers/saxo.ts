@@ -69,6 +69,17 @@ type SaxoOrderResponse = {
     OrderId: string
 }
 
+type SaxoFillItem = {
+    TradeId: string
+    OrderId: string
+    ExecutionPrice: number
+    Amount: number
+}
+
+type SaxoFillsResponse = {
+    Data: SaxoFillItem[]
+}
+
 export type SaxoInstrument = {
     Identifier: number
     Symbol: string
@@ -533,6 +544,42 @@ export class SaxoClient {
             price: item.NetPositionView.AverageOpenPrice,
             pnl: item.NetPositionView.ProfitLossOnTrade,
         }))
+    }
+
+    async getExecutionPrice(orderId: string): Promise<number | null> {
+        if (orderId === 'DRY_RUN') return null
+
+        const accessToken = await this.getValidAccessToken()
+        if (!accessToken) return null
+
+        try {
+            // Saxo の fills エンドポイントで約定情報を取得
+            const url = `${this.baseUrl}/trade/v1/fills?$filter=OrderId eq '${encodeURIComponent(orderId)}'`
+            const response = await this.fetchImpl(url, {
+                headers: { Authorization: `Bearer ${accessToken}` },
+            })
+
+            if (!response.ok) {
+                this.logger.warn(
+                    { event: 'saxo:get_execution_price_failed', orderId, status: response.status },
+                    'failed to get execution price from Saxo fills',
+                )
+                return null
+            }
+
+            const data = (await response.json()) as SaxoFillsResponse
+            if (!data.Data || data.Data.length === 0) return null
+
+            const totalAmount = data.Data.reduce((sum, f) => sum + f.Amount, 0)
+            const totalValue = data.Data.reduce((sum, f) => sum + f.ExecutionPrice * f.Amount, 0)
+            return totalValue / totalAmount
+        } catch (error) {
+            this.logger.warn(
+                { event: 'saxo:get_execution_price_failed', orderId, error },
+                'failed to get execution price',
+            )
+            return null
+        }
     }
 
     async searchInstruments(keyword: string): Promise<SaxoInstrument[]> {

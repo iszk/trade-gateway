@@ -159,3 +159,70 @@ test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
     assert.equal(auth?.accessToken, 'refreshed-token')
     assert.equal(auth?.accounts?.[0]?.accountKey, 'test-account-key')
 })
+
+test('SaxoClient.getExecutionPrice returns null for DRY_RUN', async () => {
+    const client = new SaxoClient({ db: mockFirestore() })
+    const result = await client.getExecutionPrice('DRY_RUN')
+    assert.equal(result, null)
+})
+
+test('SaxoClient.getExecutionPrice returns weighted average from fills', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    let capturedUrl = ''
+
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            capturedUrl = String(url)
+            return new Response(
+                JSON.stringify({
+                    Data: [
+                        { TradeId: 'T1', OrderId: 'ORD-123', ExecutionPrice: 18000, Amount: 1 },
+                        { TradeId: 'T2', OrderId: 'ORD-123', ExecutionPrice: 18100, Amount: 2 },
+                    ],
+                }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPrice('ORD-123')
+
+    assert.ok(capturedUrl.includes('/trade/v1/fills'))
+    assert.ok(capturedUrl.includes('ORD-123'))
+    // (18000*1 + 18100*2) / 3 = 54200/3 ≈ 18066.67
+    assert.ok(result !== null && Math.abs(result - 18066.67) < 0.01)
+})
+
+test('SaxoClient.getExecutionPrice returns null when fills are empty', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () =>
+            new Response(
+                JSON.stringify({ Data: [] }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            ),
+    })
+
+    const result = await client.getExecutionPrice('ORD-123')
+    assert.equal(result, null)
+})

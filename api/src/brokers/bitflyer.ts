@@ -51,11 +51,24 @@ type BitflyerCollateralResponse = {
     keep_rate: number
 }
 
+type BitflyerExecutionEntry = {
+    child_order_acceptance_id: string
+    price: number
+    size: number
+}
+
+type BitflyerChildOrderEntry = {
+    child_order_acceptance_id: string
+    child_order_state: string
+}
+
 const SEND_CHILD_ORDER_PATH = '/v1/me/sendchildorder'
 const SEND_PARENT_ORDER_PATH = '/v1/me/sendparentorder'
 const GET_POSITIONS_PATH = '/v1/me/getpositions'
 const GET_BALANCE_PATH = '/v1/me/getbalance'
 const GET_COLLATERAL_PATH = '/v1/me/getcollateral'
+const GET_EXECUTIONS_PATH = '/v1/me/getexecutions'
+const GET_CHILD_ORDERS_PATH = '/v1/me/getchildorders'
 const DEFAULT_BITFLYER_BASE_URL = 'https://api.bitflyer.com'
 
 type BitflyerParentOrderParameter = {
@@ -354,6 +367,47 @@ export class BitflyerClient {
             return await this.callApi<BitflyerCollateralResponse>('GET', GET_COLLATERAL_PATH)
         } catch (error) {
             this.logger.warn({ event: 'bitflyer:get_collateral_failed', error }, 'Failed to get bitflyer collateral')
+            return null
+        }
+    }
+
+    async getExecutionPrice(providerOrderId: string): Promise<number | null> {
+        if (providerOrderId === 'DRY_RUN') return null
+
+        const weightedAvg = (execs: BitflyerExecutionEntry[]): number | null => {
+            if (execs.length === 0) return null
+            const totalSize = execs.reduce((sum, e) => sum + e.size, 0)
+            const totalValue = execs.reduce((sum, e) => sum + e.price * e.size, 0)
+            return totalValue / totalSize
+        }
+
+        try {
+            // child_order_acceptance_id として照会
+            const directExecs = await this.callApi<BitflyerExecutionEntry[]>(
+                'GET',
+                `${GET_EXECUTIONS_PATH}?child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
+            )
+            const directPrice = weightedAvg(directExecs)
+            if (directPrice !== null) return directPrice
+
+            // parent_order_acceptance_id として照会し、最初のチャイルド（エントリー注文）の約定価格を取得
+            const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
+                'GET',
+                `${GET_CHILD_ORDERS_PATH}?parent_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
+            )
+            if (childOrders.length === 0) return null
+
+            const entryChildId = childOrders[0].child_order_acceptance_id
+            const childExecs = await this.callApi<BitflyerExecutionEntry[]>(
+                'GET',
+                `${GET_EXECUTIONS_PATH}?child_order_acceptance_id=${encodeURIComponent(entryChildId)}`,
+            )
+            return weightedAvg(childExecs)
+        } catch (error) {
+            this.logger.warn(
+                { event: 'bitflyer:get_execution_price_failed', providerOrderId, error },
+                'failed to get execution price',
+            )
             return null
         }
     }

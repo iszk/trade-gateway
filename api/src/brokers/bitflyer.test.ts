@@ -267,3 +267,85 @@ test('BitflyerClient uses IFDOCO when stopLoss and takeProfit are provided with 
         providerOrderId: 'JRF-parent-2',
     })
 })
+
+test('BitflyerClient.getExecutionPrice returns null for DRY_RUN', async () => {
+    const client = new BitflyerClient({ apiKey: 'test-key', apiSecret: 'test-secret' })
+    const result = await client.getExecutionPrice('DRY_RUN')
+    assert.equal(result, null)
+})
+
+test('BitflyerClient.getExecutionPrice returns weighted average price for child order', async () => {
+    const capturedUrls: string[] = []
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            capturedUrls.push(String(url))
+            return new Response(
+                JSON.stringify([
+                    { child_order_acceptance_id: 'JRF-child-1', price: 10000000, size: 0.01 },
+                    { child_order_acceptance_id: 'JRF-child-1', price: 10100000, size: 0.01 },
+                ]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPrice('JRF-child-1')
+
+    assert.ok(capturedUrls[0]?.includes('getexecutions'))
+    assert.ok(capturedUrls[0]?.includes('JRF-child-1'))
+    assert.equal(result, 10050000) // (10000000 * 0.01 + 10100000 * 0.01) / 0.02
+})
+
+test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no executions found', async () => {
+    let callCount = 0
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            callCount++
+            const urlStr = String(url)
+
+            if (callCount === 1) {
+                // 1st: getexecutions?child_order_acceptance_id=JRF-parent-1 → empty
+                assert.ok(urlStr.includes('getexecutions'))
+                return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+            }
+            if (callCount === 2) {
+                // 2nd: getchildorders?parent_order_acceptance_id=JRF-parent-1
+                assert.ok(urlStr.includes('getchildorders'))
+                return new Response(
+                    JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry', child_order_state: 'COMPLETED' }]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            // 3rd: getexecutions?child_order_acceptance_id=JRF-child-entry
+            assert.ok(urlStr.includes('getexecutions'))
+            return new Response(
+                JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry', price: 9500000, size: 0.01 }]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPrice('JRF-parent-1')
+    assert.equal(result, 9500000)
+    assert.equal(callCount, 3)
+})
+
+test('BitflyerClient.getExecutionPrice returns null on API error', async () => {
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response('server error', { status: 500 }),
+    })
+
+    const result = await client.getExecutionPrice('JRF-child-1')
+    assert.equal(result, null)
+})
