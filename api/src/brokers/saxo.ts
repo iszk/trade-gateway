@@ -69,15 +69,15 @@ type SaxoOrderResponse = {
     OrderId: string
 }
 
-type SaxoFillItem = {
-    TradeId: string
+type SaxoOrderActivity = {
+    LogId: string
     OrderId: string
-    ExecutionPrice: number
-    Amount: number
+    Status: string
+    AveragePrice?: number
 }
 
-type SaxoFillsResponse = {
-    Data: SaxoFillItem[]
+type SaxoOrderActivitiesResponse = {
+    Data: SaxoOrderActivity[]
 }
 
 export type SaxoInstrument = {
@@ -553,8 +553,17 @@ export class SaxoClient {
         if (!accessToken) return null
 
         try {
-            // Saxo の fills エンドポイントで約定情報を取得
-            const url = `${this.baseUrl}/trade/v1/fills?$filter=OrderId eq '${encodeURIComponent(orderId)}'`
+            const auth = await this.getAuth()
+            const clientKey = auth?.accounts?.[0]?.clientKey
+
+            const params = new URLSearchParams()
+            params.append('OrderId', orderId)
+            if (clientKey) {
+                params.append('ClientKey', clientKey)
+            }
+
+            // Saxo の audit エンドポイントで約定情報を取得
+            const url = `${this.baseUrl}/cs/v1/audit/orderactivities/?${params.toString()}`
             const response = await this.fetchImpl(url, {
                 headers: { Authorization: `Bearer ${accessToken}` },
             })
@@ -562,17 +571,28 @@ export class SaxoClient {
             if (!response.ok) {
                 this.logger.warn(
                     { event: 'saxo:get_execution_price_failed', orderId, status: response.status },
-                    'failed to get execution price from Saxo fills',
+                    'failed to get execution price from Saxo audit',
                 )
                 return null
             }
 
-            const data = (await response.json()) as SaxoFillsResponse
+            const data = (await response.json()) as SaxoOrderActivitiesResponse
             if (!data.Data || data.Data.length === 0) return null
 
-            const totalAmount = data.Data.reduce((sum, f) => sum + f.Amount, 0)
-            const totalValue = data.Data.reduce((sum, f) => sum + f.ExecutionPrice * f.Amount, 0)
-            return totalValue / totalAmount
+            const fillActivity = data.Data.find((a) =>
+                (a.Status === 'FinalFill' || a.Status === 'Fill') && a.AveragePrice !== undefined
+            )
+
+            if (fillActivity?.AveragePrice !== undefined) {
+                return fillActivity.AveragePrice
+            }
+
+            const anyWithPrice = data.Data.find((a) => a.AveragePrice !== undefined)
+            if (anyWithPrice?.AveragePrice !== undefined) {
+                return anyWithPrice.AveragePrice
+            }
+
+            return null
         } catch (error) {
             this.logger.warn(
                 { event: 'saxo:get_execution_price_failed', orderId, error },
