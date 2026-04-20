@@ -576,6 +576,13 @@ export const createApp = (options: CreateAppOptions = {}) => {
         const dispatchLogData = {
             event_id: effectiveEventId,
             broker: payload.broker,
+            ticker: payload.ticker,
+            side: payload.side,
+            size: payload.size,
+            ...(payload.strategy !== undefined ? { strategy: payload.strategy } : {}),
+            ...(payload.interval !== undefined ? { interval: payload.interval } : {}),
+            ...(payload.price !== undefined ? { price: payload.price } : {}),
+            provider_order_id: orderResult.ok ? orderResult.providerOrderId : undefined,
             request_payload: {
                 eventId: effectiveEventId,
                 broker: payload.broker,

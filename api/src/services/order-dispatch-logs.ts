@@ -4,6 +4,14 @@ import { getFirestoreClient } from '../firestore.js'
 export type OrderDispatchLogInput = {
     event_id: string
     broker: string
+    ticker: string
+    side: 'BUY' | 'SELL'
+    size: number
+    strategy?: string
+    interval?: string
+    price?: number
+    provider_order_id?: string
+    execution_price?: number
     request_payload: Record<string, unknown>
     response_payload?: Record<string, unknown>
     result: 'success' | 'failure'

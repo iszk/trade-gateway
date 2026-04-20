@@ -27,6 +27,9 @@ test('createOrderDispatchLogFn omits undefined fields before saving to Firestore
     await createOrderDispatchLog({
         event_id: 'evt-001',
         broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.01,
         request_payload: {
             eventId: 'evt-001',
         },
@@ -43,4 +46,56 @@ test('createOrderDispatchLogFn omits undefined fields before saving to Firestore
     assert.equal('error_code' in savedDoc, false)
     assert.equal(savedDoc?.event_id, 'evt-001')
     assert.equal(savedDoc?.result, 'success')
+})
+
+test('createOrderDispatchLogFn saves ticker, side, size as structured fields', async () => {
+    const db = makeFirestoreMock()
+    const createOrderDispatchLog = createOrderDispatchLogFn(db)
+
+    await createOrderDispatchLog({
+        event_id: 'evt-002',
+        broker: 'saxo',
+        ticker: 'CfdOnIndex:4912',
+        side: 'SELL',
+        size: 1,
+        strategy: 'MA Crossover',
+        interval: '4H',
+        price: 18000,
+        provider_order_id: 'order-123',
+        request_payload: {},
+        result: 'success',
+    })
+
+    const savedDoc = db.addedDocs[0]
+    assert.equal(savedDoc?.ticker, 'CfdOnIndex:4912')
+    assert.equal(savedDoc?.side, 'SELL')
+    assert.equal(savedDoc?.size, 1)
+    assert.equal(savedDoc?.strategy, 'MA Crossover')
+    assert.equal(savedDoc?.interval, '4H')
+    assert.equal(savedDoc?.price, 18000)
+    assert.equal(savedDoc?.provider_order_id, 'order-123')
+})
+
+test('createOrderDispatchLogFn omits optional fields when not provided', async () => {
+    const db = makeFirestoreMock()
+    const createOrderDispatchLog = createOrderDispatchLogFn(db)
+
+    await createOrderDispatchLog({
+        event_id: 'evt-003',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.05,
+        request_payload: {},
+        result: 'failure',
+        error_code: 'BROKER_REQUEST_FAILED',
+    })
+
+    const savedDoc = db.addedDocs[0]
+    assert.equal('strategy' in savedDoc, false)
+    assert.equal('interval' in savedDoc, false)
+    assert.equal('price' in savedDoc, false)
+    assert.equal('provider_order_id' in savedDoc, false)
+    assert.equal('execution_price' in savedDoc, false)
+    assert.equal(savedDoc?.error_code, 'BROKER_REQUEST_FAILED')
 })
