@@ -13,8 +13,8 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn, createDefaultGetPendingExecutionLogsFn, createDefaultUpdateExecutionPriceFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn, GetPendingExecutionLogsFn, UpdateExecutionPriceFn } from './services/order-dispatch-logs.js'
-import { createDefaultGetUnpairedLogsFn, createDefaultCreateTradeRecordFn, createDefaultMarkLogPairedFn } from './services/trade-records.js'
-import type { GetUnpairedLogsFn, CreateTradeRecordFn, MarkLogPairedFn } from './services/trade-records.js'
+import { createDefaultGetUnpairedLogsFn, createDefaultCreateTradeRecordFn, createDefaultMarkLogPairedFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records.js'
+import type { GetUnpairedLogsFn, CreateTradeRecordFn, MarkLogPairedFn, GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
@@ -220,6 +220,8 @@ type CreateAppOptions = {
     getUnpairedLogs?: GetUnpairedLogsFn
     createTradeRecord?: CreateTradeRecordFn
     markLogPaired?: MarkLogPairedFn
+    getTradeRecords?: GetTradeRecordsFn
+    getTradeStats?: GetTradeStatsFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -243,6 +245,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const getUnpairedLogs = options.getUnpairedLogs ?? createDefaultGetUnpairedLogsFn()
     const createTradeRecord = options.createTradeRecord ?? createDefaultCreateTradeRecordFn()
     const markLogPaired = options.markLogPaired ?? createDefaultMarkLogPairedFn()
+    const getTradeRecords = options.getTradeRecords ?? createDefaultGetTradeRecordsFn()
+    const getTradeStats = options.getTradeStats ?? createDefaultGetTradeStatsFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -416,6 +420,82 @@ export const createApp = (options: CreateAppOptions = {}) => {
         } catch (err) {
             logger.warn({ event: 'saxo_instruments:search_failed', error: err }, 'failed to search Saxo instruments')
             return c.json(errorBody('INTERNAL_ERROR', 'failed to search instruments'), 500)
+        }
+    })
+
+    const parseFilterDates = (
+        fromStr: string | undefined,
+        toStr: string | undefined,
+    ): { from: Date; to: Date } | { error: string } => {
+        const now = new Date()
+        const defaultFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+        const from = fromStr ? new Date(fromStr) : defaultFrom
+        const to = toStr ? new Date(toStr) : now
+        if (isNaN(from.getTime())) return { error: `invalid 'from' date: ${fromStr}` }
+        if (isNaN(to.getTime())) return { error: `invalid 'to' date: ${toStr}` }
+        if (from > to) return { error: "'from' must be before 'to'" }
+        return { from, to }
+    }
+
+    app.get('/api/trade-records/stats', requireApiSecret, async (c) => {
+        const dates = parseFilterDates(c.req.query('from'), c.req.query('to'))
+        if ('error' in dates) {
+            return c.json(errorBody('INVALID_REQUEST', dates.error), 400)
+        }
+        try {
+            const result = await getTradeStats({
+                from: dates.from,
+                to: dates.to,
+                strategy: c.req.query('strategy'),
+                interval: c.req.query('interval'),
+                ticker: c.req.query('ticker'),
+                broker: c.req.query('broker'),
+            })
+            return c.json(result)
+        } catch (err) {
+            logger.warn({ event: 'trade_records:stats_failed', error: err }, 'failed to fetch trade stats')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch trade stats'), 500)
+        }
+    })
+
+    app.get('/api/trade-records', requireApiSecret, async (c) => {
+        const dates = parseFilterDates(c.req.query('from'), c.req.query('to'))
+        if ('error' in dates) {
+            return c.json(errorBody('INVALID_REQUEST', dates.error), 400)
+        }
+
+        const rawLimit = Number(c.req.query('limit') ?? 50)
+        const rawPage = Number(c.req.query('page') ?? 1)
+        const limit = Math.min(Math.max(1, isNaN(rawLimit) ? 50 : rawLimit), 200)
+        const page = Math.max(1, isNaN(rawPage) ? 1 : rawPage)
+
+        try {
+            const allRecords = await getTradeRecords({
+                from: dates.from,
+                to: dates.to,
+                strategy: c.req.query('strategy'),
+                interval: c.req.query('interval'),
+                ticker: c.req.query('ticker'),
+                broker: c.req.query('broker'),
+            })
+
+            const total = allRecords.length
+            const total_pages = Math.max(1, Math.ceil(total / limit))
+            const offset = (page - 1) * limit
+            const records = allRecords.slice(offset, offset + limit)
+
+            return c.json({
+                records,
+                total,
+                page,
+                limit,
+                total_pages,
+                from: dates.from.toISOString(),
+                to: dates.to.toISOString(),
+            })
+        } catch (err) {
+            logger.warn({ event: 'trade_records:fetch_failed', error: err }, 'failed to fetch trade records')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch trade records'), 500)
         }
     })
 
@@ -690,3 +770,4 @@ export type AppType = typeof app
 export type { BrokerBalance } from './types/balance.js'
 export type { Position } from './types/position.js'
 export type { SaxoInstrument } from './brokers/saxo.js'
+export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, TradeRecordsResponse } from './services/trade-records.js'
