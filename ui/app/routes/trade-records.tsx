@@ -16,7 +16,7 @@ export default createRoute(async (c) => {
   const defaultFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
 
   const fromParam = c.req.query('from') || toDateInputValue(defaultFrom)
-  const toParam = c.req.query('to') || toDateInputValue(now)
+  const toParam = c.req.query('to') || toDateInputValue(new Date(now.getTime() + 24 * 60 * 60 * 1000)) // include today by default
   const strategyParam = c.req.query('strategy') || ''
   const intervalParam = c.req.query('interval') || ''
   const tickerParam = c.req.query('ticker') || ''
