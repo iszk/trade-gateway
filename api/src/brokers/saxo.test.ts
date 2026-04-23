@@ -162,7 +162,7 @@ test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
 
 test('SaxoClient.getExecutionPrice returns null for DRY_RUN', async () => {
     const client = new SaxoClient({ db: mockFirestore() })
-    const result = await client.getExecutionPrice('DRY_RUN')
+    const result = await client.getExecutionPrice('DRY_RUN', 'USDJPY')
     assert.equal(result, null)
 })
 
@@ -196,7 +196,7 @@ test('SaxoClient.getExecutionPrice returns AveragePrice from audit activities', 
         },
     })
 
-    const result = await client.getExecutionPrice('ORD-123')
+    const result = await client.getExecutionPrice('ORD-123', 'USDJPY')
 
     assert.ok(capturedUrl.includes('/cs/v1/audit/orderactivities/'))
     assert.ok(capturedUrl.includes('OrderId=ORD-123'))
@@ -224,6 +224,6 @@ test('SaxoClient.getExecutionPrice returns null when activities are empty', asyn
             ),
     })
 
-    const result = await client.getExecutionPrice('ORD-123')
+    const result = await client.getExecutionPrice('ORD-123', 'USDJPY')
     assert.equal(result, null)
 })

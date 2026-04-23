@@ -371,7 +371,7 @@ export class BitflyerClient {
         }
     }
 
-    async getExecutionPrice(providerOrderId: string): Promise<number | null> {
+    async getExecutionPrice(providerOrderId: string, ticker: string): Promise<number | null> {
         if (providerOrderId === 'DRY_RUN') return null
 
         const weightedAvg = (execs: BitflyerExecutionEntry[]): number | null => {
@@ -381,13 +381,16 @@ export class BitflyerClient {
             return totalValue / totalSize
         }
 
-        this.logger.info({ event: 'bitflyer:get_execution_price_start', providerOrderId }, 'fetching execution price for order')
+        this.logger.info({
+            event: 'bitflyer:get_execution_price_start', providerOrderId
+        }, 'fetching execution price for order ' + ticker + ' ' + providerOrderId)
 
         try {
             // child_order_acceptance_id として照会
             const directExecs = await this.callApi<BitflyerExecutionEntry[]>(
                 'GET',
-                `${GET_EXECUTIONS_PATH}?child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
+                // `${GET_EXECUTIONS_PATH}?child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
+                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}`,
             )
             const directPrice = weightedAvg(directExecs)
             if (directPrice !== null) return directPrice
@@ -395,20 +398,20 @@ export class BitflyerClient {
             // parent_order_acceptance_id として照会し、最初のチャイルド（エントリー注文）の約定価格を取得
             const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
                 'GET',
-                `${GET_CHILD_ORDERS_PATH}?parent_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
+                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(ticker)}&parent_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
             )
             if (childOrders.length === 0) return null
 
             const entryChildId = childOrders[0].child_order_acceptance_id
             const childExecs = await this.callApi<BitflyerExecutionEntry[]>(
                 'GET',
-                `${GET_EXECUTIONS_PATH}?child_order_acceptance_id=${encodeURIComponent(entryChildId)}`,
+                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(entryChildId)}`,
             )
             return weightedAvg(childExecs)
         } catch (error) {
             this.logger.warn(
-                { event: 'bitflyer:get_execution_price_failed', providerOrderId, error },
-                'failed to get execution price',
+                { event: 'bitflyer:get_execution_price_failed', providerOrderId, ticker, error },
+                'failed to get execution price for order ' + ticker + ' ' + providerOrderId,
             )
             return null
         }

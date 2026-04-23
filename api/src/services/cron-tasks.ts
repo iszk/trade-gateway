@@ -11,7 +11,7 @@ type PositionFetcherLike = {
 }
 
 export type ExecutionPriceFetcherLike = {
-    getExecutionPrice(providerOrderId: string): Promise<number | null>
+    getExecutionPrice(providerOrderId: string, ticker: string): Promise<number | null>
 }
 
 export type CronContext = {
@@ -80,12 +80,17 @@ const fetchAndUpdateExecutionPrices = async (ctx: {
         }
 
         try {
-            const price = await fetcher.getExecutionPrice(log.provider_order_id)
+            const price = await fetcher.getExecutionPrice(log.provider_order_id, log.ticker)
             if (price !== null) {
                 await ctx.updateExecutionPrice(log.docId, price)
                 ctx.logger.info(
                     { event: 'cron:execution_price_updated', broker: log.broker, docId: log.docId, eventId: log.event_id, price },
                     'execution price updated',
+                )
+            } else {
+                ctx.logger.info(
+                    { event: 'cron:execution_price_not_found', broker: log.broker, docId: log.docId, eventId: log.event_id },
+                    'execution price not found',
                 )
             }
         } catch (error) {

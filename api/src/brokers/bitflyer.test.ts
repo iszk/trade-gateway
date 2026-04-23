@@ -270,7 +270,7 @@ test('BitflyerClient uses IFDOCO when stopLoss and takeProfit are provided with 
 
 test('BitflyerClient.getExecutionPrice returns null for DRY_RUN', async () => {
     const client = new BitflyerClient({ apiKey: 'test-key', apiSecret: 'test-secret' })
-    const result = await client.getExecutionPrice('DRY_RUN')
+    const result = await client.getExecutionPrice('DRY_RUN', 'BTC/JPY')
     assert.equal(result, null)
 })
 
@@ -293,7 +293,7 @@ test('BitflyerClient.getExecutionPrice returns weighted average price for child 
         },
     })
 
-    const result = await client.getExecutionPrice('JRF-child-1')
+    const result = await client.getExecutionPrice('JRF-child-1', 'BTC/JPY')
 
     assert.ok(capturedUrls[0]?.includes('getexecutions'))
     assert.ok(capturedUrls[0]?.includes('JRF-child-1'))
@@ -333,7 +333,7 @@ test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no
         },
     })
 
-    const result = await client.getExecutionPrice('JRF-parent-1')
+    const result = await client.getExecutionPrice('JRF-parent-1', 'BTC/JPY')
     assert.equal(result, 9500000)
     assert.equal(callCount, 3)
 })
@@ -346,6 +346,6 @@ test('BitflyerClient.getExecutionPrice returns null on API error', async () => {
         fetchImpl: async () => new Response('server error', { status: 500 }),
     })
 
-    const result = await client.getExecutionPrice('JRF-child-1')
+    const result = await client.getExecutionPrice('JRF-child-1', 'BTC/JPY')
     assert.equal(result, null)
 })
