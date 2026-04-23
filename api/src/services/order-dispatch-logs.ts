@@ -47,6 +47,7 @@ export type PendingExecutionLog = {
     docId: string
     broker: string
     provider_order_id: string
+    event_id: string
 }
 
 export type GetPendingExecutionLogsFn = () => Promise<PendingExecutionLog[]>
@@ -69,6 +70,7 @@ export const getPendingExecutionLogsFn = (db: Firestore): GetPendingExecutionLog
             .map((doc) => ({
                 docId: doc.id,
                 broker: doc.data().broker as string,
+                event_id: doc.data().event_id as string,
                 provider_order_id: doc.data().provider_order_id as string,
             }))
     }

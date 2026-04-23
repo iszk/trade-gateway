@@ -84,13 +84,13 @@ const fetchAndUpdateExecutionPrices = async (ctx: {
             if (price !== null) {
                 await ctx.updateExecutionPrice(log.docId, price)
                 ctx.logger.info(
-                    { event: 'cron:execution_price_updated', docId: log.docId, price },
+                    { event: 'cron:execution_price_updated', broker: log.broker, docId: log.docId, eventId: log.event_id, price },
                     'execution price updated',
                 )
             }
         } catch (error) {
             ctx.logger.info(
-                { event: 'cron:execution_price_fetch_failed', docId: log.docId, error },
+                { event: 'cron:execution_price_fetch_failed', broker: log.broker, docId: log.docId, eventId: log.event_id, error },
                 'failed to fetch execution price',
             )
         }

@@ -381,6 +381,8 @@ export class BitflyerClient {
             return totalValue / totalSize
         }
 
+        this.logger.info({ event: 'bitflyer:get_execution_price_start', providerOrderId }, 'fetching execution price for order')
+
         try {
             // child_order_acceptance_id として照会
             const directExecs = await this.callApi<BitflyerExecutionEntry[]>(
