@@ -34,6 +34,7 @@ description = "Run type checking for all workspaces"
 run = "npm run typecheck"
 
 [tasks.test]
+depends = ["typecheck"]
 description = "Run all workspace tests"
 run = "npm run test"
 
