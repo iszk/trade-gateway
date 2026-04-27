@@ -9,8 +9,8 @@ deploy: api-deploy
 
 # API をデプロイする
 api-deploy:
-    echo "project = $DEPLOY_GOOGLE_CLOUD_PROJECT"
-    : ${DEPLOY_GOOGLE_CLOUD_PROJECT:?"DEPLOY_GOOGLE_CLOUD_PROJECT が設定されていません。"}
+    @echo "project = $DEPLOY_GOOGLE_CLOUD_PROJECT"
+    @: ${DEPLOY_GOOGLE_CLOUD_PROJECT:?"DEPLOY_GOOGLE_CLOUD_PROJECT が設定されていません。"}
     just api-build-and-push
     just api-deploy-from-registry
 
