@@ -83,29 +83,3 @@ export const createSlotScheduler = (db: Firestore): SlotScheduler => {
 
 export const createDefaultSlotScheduler = (): SlotScheduler =>
     createSlotScheduler(getFirestoreClient())
-
-// ─────────────── マイグレーションフラグ ───────────────
-
-export type CheckMigrationDoneFn = () => Promise<boolean>
-export type SetMigrationDoneFn = () => Promise<void>
-
-export const createCheckMigrationDoneFn = (db: Firestore): CheckMigrationDoneFn => {
-    const docRef = db.collection(CRON_METADATA_COLLECTION).doc(TASK_STATUS_DOCUMENT)
-    return async () => {
-        const doc = await docRef.get()
-        return (doc.data()?.open_trades_migrated as boolean | undefined) === true
-    }
-}
-
-export const createSetMigrationDoneFn = (db: Firestore): SetMigrationDoneFn => {
-    const docRef = db.collection(CRON_METADATA_COLLECTION).doc(TASK_STATUS_DOCUMENT)
-    return async () => {
-        await docRef.set({ open_trades_migrated: true }, { merge: true })
-    }
-}
-
-export const createDefaultCheckMigrationDoneFn = (): CheckMigrationDoneFn =>
-    createCheckMigrationDoneFn(getFirestoreClient())
-
-export const createDefaultSetMigrationDoneFn = (): SetMigrationDoneFn =>
-    createSetMigrationDoneFn(getFirestoreClient())

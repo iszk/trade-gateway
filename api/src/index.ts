@@ -13,15 +13,15 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn, createDefaultGetPendingExecutionLogsFn, createDefaultUpdateExecutionPriceFn, createDefaultGetConfirmedUnpromotedLogsFn, createDefaultMarkOpenTradesWrittenFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn, GetPendingExecutionLogsFn, UpdateExecutionPriceFn, GetConfirmedUnpromotedLogsFn, MarkOpenTradesWrittenFn } from './services/order-dispatch-logs.js'
-import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetUnpairedLogsFn } from './services/trade-records.js'
-import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetUnpairedLogsFn } from './services/trade-records.js'
+import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn } from './services/trade-records.js'
+import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn } from './services/trade-records.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
 import { BalanceFetcher } from './services/balance-fetcher.js'
 import { config } from './config.js'
-import { createDefaultSlotScheduler, createDefaultCheckMigrationDoneFn, createDefaultSetMigrationDoneFn } from './services/slot-scheduler.js'
-import type { SlotScheduler, CheckMigrationDoneFn, SetMigrationDoneFn } from './services/slot-scheduler.js'
+import { createDefaultSlotScheduler } from './services/slot-scheduler.js'
+import type { SlotScheduler } from './services/slot-scheduler.js'
 import { executeTenMinutelyTask, executeHourlyTask } from './services/cron-tasks.js'
 import type { CronContext, ExecutionPriceFetcherLike } from './services/cron-tasks.js'
 
@@ -217,9 +217,6 @@ type CreateAppOptions = {
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
     getPendingExecutionLogs?: GetPendingExecutionLogsFn
     updateExecutionPrice?: UpdateExecutionPriceFn
-    checkMigrationDone?: CheckMigrationDoneFn
-    setMigrationDone?: SetMigrationDoneFn
-    getUnpairedLogsForMigration?: GetUnpairedLogsFn
     getConfirmedUnpromotedLogs?: GetConfirmedUnpromotedLogsFn
     markOpenTradesWritten?: MarkOpenTradesWrittenFn
     getOpenTrades?: GetOpenTradesFn
@@ -248,9 +245,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
     const getPendingExecutionLogs = options.getPendingExecutionLogs ?? createDefaultGetPendingExecutionLogsFn()
     const updateExecutionPrice = options.updateExecutionPrice ?? createDefaultUpdateExecutionPriceFn()
-    const checkMigrationDone = options.checkMigrationDone ?? createDefaultCheckMigrationDoneFn()
-    const setMigrationDone = options.setMigrationDone ?? createDefaultSetMigrationDoneFn()
-    const getUnpairedLogsForMigration = options.getUnpairedLogsForMigration ?? createDefaultGetUnpairedLogsFn()
     const getConfirmedUnpromotedLogs = options.getConfirmedUnpromotedLogs ?? createDefaultGetConfirmedUnpromotedLogsFn()
     const markOpenTradesWritten = options.markOpenTradesWritten ?? createDefaultMarkOpenTradesWrittenFn()
     const getOpenTrades = options.getOpenTrades ?? createDefaultGetOpenTradesFn()
@@ -282,9 +276,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
         executionPriceFetchers: options.executionPriceFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
         getPendingExecutionLogs,
         updateExecutionPrice,
-        checkMigrationDone,
-        setMigrationDone,
-        getUnpairedLogsForMigration,
         getConfirmedUnpromotedLogs,
         markOpenTradesWritten,
         getOpenTrades,

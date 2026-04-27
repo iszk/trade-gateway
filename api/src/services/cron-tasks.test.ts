@@ -3,7 +3,8 @@ import test from 'node:test'
 
 import { executeTenMinutelyTask } from './cron-tasks.js'
 import type { CronContext } from './cron-tasks.js'
-import type { OpenTrade, UnpairedLog } from './trade-records.js'
+import type { OpenTrade } from './trade-records.js'
+import type { ConfirmedUnpromotedLog } from './order-dispatch-logs.js'
 
 const makeLogger = () => {
     const logs: Record<string, unknown>[] = []
@@ -33,7 +34,7 @@ const makeOpenTrade = (overrides: Partial<OpenTrade> & { side: 'BUY' | 'SELL' })
     ...overrides,
 })
 
-const makeUnpairedLog = (overrides: Partial<UnpairedLog> & { side: 'BUY' | 'SELL' }): UnpairedLog => ({
+const makeConfirmedUnpromotedLog = (overrides: Partial<ConfirmedUnpromotedLog> & { side: 'BUY' | 'SELL' }): ConfirmedUnpromotedLog => ({
     docId: `doc-${Math.random()}`,
     event_id: `evt-${Math.random()}`,
     broker: 'bitflyer',
@@ -49,9 +50,6 @@ const makeUnpairedLog = (overrides: Partial<UnpairedLog> & { side: 'BUY' | 'SELL
 const makeBaseCtx = (overrides: Partial<CronContext> = {}): CronContext => ({
     logger: makeLogger().logger,
     positionFetcher: makePositionFetcherStub(),
-    checkMigrationDone: async () => true,
-    setMigrationDone: async () => { },
-    getUnpairedLogsForMigration: async () => [],
     getConfirmedUnpromotedLogs: async () => [],
     markOpenTradesWritten: async () => { },
     getOpenTrades: async () => [],
@@ -61,45 +59,10 @@ const makeBaseCtx = (overrides: Partial<CronContext> = {}): CronContext => ({
     ...overrides,
 })
 
-// ─────────────── runMigrationIfNeeded ───────────────
-
-test('executeTenMinutelyTask: migration 未実施のとき unpaired logs を open_trades に移行する', async () => {
-    const buyLog = makeUnpairedLog({ side: 'BUY', docId: 'doc-buy', event_id: 'evt-buy' })
-    const addedTrades: OpenTrade[] = []
-    let migrationFlagSet = false
-
-    const ctx = makeBaseCtx({
-        checkMigrationDone: async () => false,
-        setMigrationDone: async () => { migrationFlagSet = true },
-        getUnpairedLogsForMigration: async () => [buyLog],
-        addOpenTrade: async (trade) => { addedTrades.push(trade) },
-    })
-
-    await executeTenMinutelyTask(ctx)
-
-    assert.equal(addedTrades.length, 1)
-    assert.equal(addedTrades[0]?.event_id, 'evt-buy')
-    assert.equal(addedTrades[0]?.order_dispatch_log_id, 'doc-buy')
-    assert.equal(migrationFlagSet, true)
-})
-
-test('executeTenMinutelyTask: migration 済みのとき unpaired logs のクエリをしない', async () => {
-    let migrationQueried = false
-
-    const ctx = makeBaseCtx({
-        checkMigrationDone: async () => true,
-        getUnpairedLogsForMigration: async () => { migrationQueried = true; return [] },
-    })
-
-    await executeTenMinutelyTask(ctx)
-
-    assert.equal(migrationQueried, false)
-})
-
 // ─────────────── promoteConfirmedLogsToOpenTrades ───────────────
 
 test('executeTenMinutelyTask: confirmed logs を open_trades に追加し markOpenTradesWritten を呼ぶ', async () => {
-    const confirmedLog = makeUnpairedLog({ side: 'BUY', docId: 'doc-1', event_id: 'evt-1' })
+    const confirmedLog = makeConfirmedUnpromotedLog({ side: 'BUY', docId: 'doc-1', event_id: 'evt-1' })
     const addedTrades: OpenTrade[] = []
     const markedDocIds: string[] = []
 
@@ -172,14 +135,11 @@ test('executeTenMinutelyTask: open_trades フローは全 fn が揃っていな�
     const { logger } = makeLogger()
     let called = false
 
-    // checkMigrationDone を省いた CronContext
+    // 全fnが揁わっていない CronContext
     const ctx: CronContext = {
         logger,
         positionFetcher: makePositionFetcherStub(),
-        // checkMigrationDone は省略
-        setMigrationDone: async () => { },
-        getUnpairedLogsForMigration: async () => [],
-        getConfirmedUnpromotedLogs: async () => [],
+        // getConfirmedUnpromotedLogs は省略
         markOpenTradesWritten: async () => { },
         getOpenTrades: async () => { called = true; return [] },
         addOpenTrade: async () => { },

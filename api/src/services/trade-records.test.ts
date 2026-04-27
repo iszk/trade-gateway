@@ -1,21 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { pairLogs, getUnpairedLogsFn, createTradeRecordFn, markLogPairedFn, computeStats, getTradeRecordsFn, getTradeStatsFn, addOpenTradeFn, getOpenTradesFn, deleteOpenTradeFn } from './trade-records.js'
-import type { UnpairedLog, TradeRecord, OpenTrade } from './trade-records.js'
-
-const makeLog = (overrides: Partial<UnpairedLog> & { side: 'BUY' | 'SELL' }): UnpairedLog => ({
-    docId: `doc-${Math.random()}`,
-    event_id: `evt-${Math.random()}`,
-    broker: 'bitflyer',
-    ticker: 'BTC_JPY',
-    size: 0.01,
-    strategy: 'MA Crossover',
-    interval: '4H',
-    execution_price: 10000000,
-    created_at: new Date('2026-01-01T00:00:00Z'),
-    ...overrides,
-})
+import { pairLogs, createTradeRecordFn, computeStats, getTradeRecordsFn, getTradeStatsFn, addOpenTradeFn, getOpenTradesFn, deleteOpenTradeFn } from './trade-records.js'
+import type { TradeRecord, OpenTrade } from './trade-records.js'
 
 const makeOpenTrade = (overrides: Partial<OpenTrade> & { side: 'BUY' | 'SELL' }): OpenTrade => ({
     event_id: `evt-${Math.random()}`,
@@ -147,37 +134,6 @@ const makeFirestoreMock = () => {
     }
 }
 
-test('getUnpairedLogsFn: execution_price あり paired=false のみ返す', async () => {
-    const db = makeFirestoreMock()
-
-    db.store['doc-1'] = {
-        broker: 'bitflyer', ticker: 'BTC_JPY', side: 'BUY', size: 0.01,
-        strategy: 'MA', interval: '4H', execution_price: 10000000,
-        event_id: 'evt-1', result: 'success', paired: false,
-        created_at: { toDate: () => new Date('2026-01-01') },
-    }
-    // execution_price なし → 対象外
-    db.store['doc-2'] = {
-        broker: 'bitflyer', ticker: 'BTC_JPY', side: 'SELL', size: 0.01,
-        strategy: 'MA', interval: '4H', event_id: 'evt-2',
-        result: 'success', paired: false,
-        created_at: { toDate: () => new Date('2026-01-02') },
-    }
-    // paired=true → 対象外
-    db.store['doc-3'] = {
-        broker: 'bitflyer', ticker: 'BTC_JPY', side: 'SELL', size: 0.01,
-        strategy: 'MA', interval: '4H', execution_price: 11000000,
-        event_id: 'evt-3', result: 'success', paired: true,
-        created_at: { toDate: () => new Date('2026-01-03') },
-    }
-
-    const fn = getUnpairedLogsFn(db)
-    const logs = await fn()
-
-    assert.equal(logs.length, 1)
-    assert.equal(logs[0]?.docId, 'doc-1')
-})
-
 test('createTradeRecordFn: trade_records に保存し expire_at を設定する', async () => {
     const db = makeFirestoreMock()
     const fn = createTradeRecordFn(db)
@@ -197,17 +153,6 @@ test('createTradeRecordFn: trade_records に保存し expire_at を設定する'
     assert.equal(doc.pnl, 10000)
     const expectedExpireAt = new Date(closedAt.getTime() + 2 * 365 * 24 * 60 * 60 * 1000) // 2年後
     assert.equal((doc.expire_at as Date).getTime(), expectedExpireAt.getTime())
-})
-
-test('markLogPairedFn: order_dispatch_logs の paired を true に更新する', async () => {
-    const db = makeFirestoreMock()
-    const fn = markLogPairedFn(db)
-
-    await fn('doc-1')
-
-    assert.equal(db.updatedDocs.length, 1)
-    assert.equal(db.updatedDocs[0]?.id, 'doc-1')
-    assert.equal(db.updatedDocs[0]?.data.paired, true)
 })
 
 // ─────────────── open_trades CRUD ───────────────

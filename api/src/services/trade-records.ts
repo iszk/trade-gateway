@@ -1,19 +1,6 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient } from '../firestore.js'
 
-export type UnpairedLog = {
-    docId: string
-    event_id: string
-    broker: string
-    ticker: string
-    side: 'BUY' | 'SELL'
-    size: number
-    strategy: string
-    interval: string
-    execution_price: number
-    created_at: Date
-}
-
 export type OpenTrade = {
     event_id: string
     broker: string
@@ -43,9 +30,7 @@ export type TradeRecord = {
     closed_at: Date
 }
 
-export type GetUnpairedLogsFn = () => Promise<UnpairedLog[]>
 export type CreateTradeRecordFn = (record: TradeRecord) => Promise<void>
-export type MarkLogPairedFn = (docId: string) => Promise<void>
 
 export type AddOpenTradeFn = (trade: OpenTrade) => Promise<void>
 export type GetOpenTradesFn = () => Promise<OpenTrade[]>
@@ -121,41 +106,6 @@ export const pairLogs = (logs: OpenTrade[]): PairedTrade[] => {
     return paired
 }
 
-export const getUnpairedLogsFn = (db: Firestore): GetUnpairedLogsFn => {
-    return async () => {
-        const snapshot = await db
-            .collection('order_dispatch_logs')
-            .where('result', '==', 'success')
-            .where('paired', '==', false)
-            .get()
-
-        return snapshot.docs
-            .filter((doc) => {
-                const data = doc.data()
-                return (
-                    data.execution_price !== undefined &&
-                    data.strategy !== undefined &&
-                    data.interval !== undefined
-                )
-            })
-            .map((doc) => {
-                const data = doc.data()
-                return {
-                    docId: doc.id,
-                    event_id: data.event_id as string,
-                    broker: data.broker as string,
-                    ticker: data.ticker as string,
-                    side: data.side as 'BUY' | 'SELL',
-                    size: data.size as number,
-                    strategy: data.strategy as string,
-                    interval: data.interval as string,
-                    execution_price: data.execution_price as number,
-                    created_at: (data.created_at as { toDate(): Date }).toDate(),
-                }
-            })
-    }
-}
-
 export const createTradeRecordFn = (db: Firestore): CreateTradeRecordFn => {
     return async (record) => {
         const expireAt = new Date(record.closed_at.getTime() + 2 * 365 * 24 * 60 * 60 * 1000) // 約2年
@@ -166,20 +116,8 @@ export const createTradeRecordFn = (db: Firestore): CreateTradeRecordFn => {
     }
 }
 
-export const markLogPairedFn = (db: Firestore): MarkLogPairedFn => {
-    return async (docId) => {
-        await db.collection('order_dispatch_logs').doc(docId).update({ paired: true })
-    }
-}
-
-export const createDefaultGetUnpairedLogsFn = (): GetUnpairedLogsFn =>
-    getUnpairedLogsFn(getFirestoreClient())
-
 export const createDefaultCreateTradeRecordFn = (): CreateTradeRecordFn =>
     createTradeRecordFn(getFirestoreClient())
-
-export const createDefaultMarkLogPairedFn = (): MarkLogPairedFn =>
-    markLogPairedFn(getFirestoreClient())
 
 // ─────────────── open_trades CRUD ───────────────
 

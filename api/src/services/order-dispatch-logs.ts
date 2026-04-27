@@ -33,7 +33,6 @@ export const createOrderDispatchLogFn = (db: Firestore): CreateOrderDispatchLogF
 
         await db.collection('order_dispatch_logs').add({
             ...omitUndefinedFields(data),
-            paired: false,
             open_trades_written: false,
             created_at: createdAt,
             expire_at: expireAt,

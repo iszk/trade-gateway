@@ -1,7 +1,6 @@
 import type { GetPendingExecutionLogsFn, UpdateExecutionPriceFn, GetConfirmedUnpromotedLogsFn, MarkOpenTradesWrittenFn } from './order-dispatch-logs.js'
-import type { GetUnpairedLogsFn, CreateTradeRecordFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn } from './trade-records.js'
+import type { CreateTradeRecordFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn } from './trade-records.js'
 import { pairLogs } from './trade-records.js'
-import type { CheckMigrationDoneFn, SetMigrationDoneFn } from './slot-scheduler.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -21,9 +20,6 @@ export type CronContext = {
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
     getPendingExecutionLogs?: GetPendingExecutionLogsFn
     updateExecutionPrice?: UpdateExecutionPriceFn
-    checkMigrationDone?: CheckMigrationDoneFn
-    setMigrationDone?: SetMigrationDoneFn
-    getUnpairedLogsForMigration?: GetUnpairedLogsFn
     getConfirmedUnpromotedLogs?: GetConfirmedUnpromotedLogsFn
     markOpenTradesWritten?: MarkOpenTradesWrittenFn
     getOpenTrades?: GetOpenTradesFn
@@ -54,9 +50,6 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
 
     // open_trades フロー（execution_price 確定後に実行）
     if (
-        ctx.checkMigrationDone &&
-        ctx.setMigrationDone &&
-        ctx.getUnpairedLogsForMigration &&
         ctx.getConfirmedUnpromotedLogs &&
         ctx.markOpenTradesWritten &&
         ctx.getOpenTrades &&
@@ -64,13 +57,6 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
         ctx.deleteOpenTrade &&
         ctx.createTradeRecord
     ) {
-        await runMigrationIfNeeded({
-            logger: ctx.logger,
-            checkMigrationDone: ctx.checkMigrationDone,
-            setMigrationDone: ctx.setMigrationDone,
-            getUnpairedLogs: ctx.getUnpairedLogsForMigration,
-            addOpenTrade: ctx.addOpenTrade,
-        })
         await promoteConfirmedLogsToOpenTrades({
             logger: ctx.logger,
             getConfirmedUnpromotedLogs: ctx.getConfirmedUnpromotedLogs,
@@ -134,38 +120,6 @@ const fetchAndUpdateExecutionPrices = async (ctx: {
 
 export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:hourly_task' }, 'hourly task executed')
-}
-
-const runMigrationIfNeeded = async (ctx: {
-    logger: Logger
-    checkMigrationDone: CheckMigrationDoneFn
-    setMigrationDone: SetMigrationDoneFn
-    getUnpairedLogs: GetUnpairedLogsFn
-    addOpenTrade: AddOpenTradeFn
-}): Promise<void> => {
-    const done = await ctx.checkMigrationDone()
-    if (done) return
-
-    ctx.logger.info({ event: 'cron:open_trades_migration_start' }, 'migrating unpaired logs to open_trades')
-
-    const logs = await ctx.getUnpairedLogs()
-    for (const log of logs) {
-        await ctx.addOpenTrade({
-            event_id: log.event_id,
-            broker: log.broker,
-            ticker: log.ticker,
-            side: log.side,
-            size: log.size,
-            strategy: log.strategy,
-            interval: log.interval,
-            execution_price: log.execution_price,
-            created_at: log.created_at,
-            order_dispatch_log_id: log.docId,
-        })
-    }
-
-    await ctx.setMigrationDone()
-    ctx.logger.info({ event: 'cron:open_trades_migration_done', count: logs.length }, 'migration complete')
 }
 
 const promoteConfirmedLogsToOpenTrades = async (ctx: {
