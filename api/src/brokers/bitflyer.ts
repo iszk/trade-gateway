@@ -389,8 +389,7 @@ export class BitflyerClient {
             // child_order_acceptance_id として照会
             const directExecs = await this.callApi<BitflyerExecutionEntry[]>(
                 'GET',
-                // `${GET_EXECUTIONS_PATH}?child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
-                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}`,
+                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
             )
             const directPrice = weightedAvg(directExecs)
             if (directPrice !== null) return directPrice
