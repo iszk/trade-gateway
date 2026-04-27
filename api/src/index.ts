@@ -13,8 +13,8 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn, createDefaultGetPendingExecutionLogsFn, createDefaultUpdateExecutionPriceFn, createDefaultGetConfirmedUnpromotedLogsFn, createDefaultMarkOpenTradesWrittenFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn, GetPendingExecutionLogsFn, UpdateExecutionPriceFn, GetConfirmedUnpromotedLogsFn, MarkOpenTradesWrittenFn } from './services/order-dispatch-logs.js'
-import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn } from './services/trade-records.js'
-import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn } from './services/trade-records.js'
+import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn } from './services/trade-records.js'
+import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn } from './services/trade-records.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
@@ -225,6 +225,9 @@ type CreateAppOptions = {
     createTradeRecord?: CreateTradeRecordFn
     getTradeRecords?: GetTradeRecordsFn
     getTradeStats?: GetTradeStatsFn
+    // 新フロー（Phase 2）
+    getPendingExecutionOpenTrades?: GetPendingExecutionOpenTradesFn
+    updateOpenTradeExecutionPrice?: UpdateOpenTradeExecutionPriceFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -253,6 +256,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const createTradeRecord = options.createTradeRecord ?? createDefaultCreateTradeRecordFn()
     const getTradeRecords = options.getTradeRecords ?? createDefaultGetTradeRecordsFn()
     const getTradeStats = options.getTradeStats ?? createDefaultGetTradeStatsFn()
+    const getPendingExecutionOpenTrades = options.getPendingExecutionOpenTrades ?? createDefaultGetPendingExecutionOpenTradesFn()
+    const updateOpenTradeExecutionPrice = options.updateOpenTradeExecutionPrice ?? createDefaultUpdateOpenTradeExecutionPriceFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -278,6 +283,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
         updateExecutionPrice,
         getConfirmedUnpromotedLogs,
         markOpenTradesWritten,
+        getPendingExecutionOpenTrades,
+        updateOpenTradeExecutionPrice,
         getOpenTrades,
         addOpenTrade,
         deleteOpenTrade,
@@ -707,7 +714,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
             size: payload.size,
             ...(payload.strategy !== undefined ? { strategy: payload.strategy } : {}),
             ...(payload.interval !== undefined ? { interval: payload.interval } : {}),
-            ...(payload.price !== undefined ? { price: payload.price } : {}),
             provider_order_id: orderResult.ok ? orderResult.providerOrderId : undefined,
             request_payload: {
                 eventId: effectiveEventId,
@@ -726,6 +732,25 @@ export const createApp = (options: CreateAppOptions = {}) => {
         createOrderDispatchLog(dispatchLogData).catch((err) => {
             reqLogger.warn({ event: 'dispatch_log:failed', error: err, data: dispatchLogData }, 'failed to write order dispatch log')
         })
+
+        // Phase 2 新フロー: dispatch 成功 & strategy/interval あり時に open_trades を即時作成
+        // execution_price は null で記録し、cron が後から確定させる
+        if (orderResult.ok && payload.strategy !== undefined && payload.interval !== undefined) {
+            addOpenTrade({
+                event_id: effectiveEventId,
+                broker: payload.broker,
+                ticker: payload.ticker,
+                side: payload.side,
+                size: payload.size,
+                strategy: payload.strategy,
+                interval: payload.interval,
+                execution_price: null,
+                created_at: new Date(),
+                provider_order_id: orderResult.providerOrderId,
+            }).catch((err) => {
+                reqLogger.warn({ event: 'open_trade:create_failed', error: err, eventId: effectiveEventId }, 'failed to write open_trade')
+            })
+        }
 
         const { webhook_secret: _, ...safePayload } = payload
         logWebhook('info', 'webhook:accepted', {

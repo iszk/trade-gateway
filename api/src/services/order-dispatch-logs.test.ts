@@ -60,7 +60,6 @@ test('createOrderDispatchLogFn saves ticker, side, size as structured fields', a
         size: 1,
         strategy: 'MA Crossover',
         interval: '4H',
-        price: 18000,
         provider_order_id: 'order-123',
         request_payload: {},
         result: 'success',
@@ -72,7 +71,7 @@ test('createOrderDispatchLogFn saves ticker, side, size as structured fields', a
     assert.equal(savedDoc?.size, 1)
     assert.equal(savedDoc?.strategy, 'MA Crossover')
     assert.equal(savedDoc?.interval, '4H')
-    assert.equal(savedDoc?.price, 18000)
+    assert.equal('price' in savedDoc, false)
     assert.equal(savedDoc?.provider_order_id, 'order-123')
 })
 

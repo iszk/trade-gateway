@@ -1,5 +1,5 @@
 import type { GetPendingExecutionLogsFn, UpdateExecutionPriceFn, GetConfirmedUnpromotedLogsFn, MarkOpenTradesWrittenFn } from './order-dispatch-logs.js'
-import type { CreateTradeRecordFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn } from './trade-records.js'
+import type { CreateTradeRecordFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn } from './trade-records.js'
 import { pairLogs } from './trade-records.js'
 
 type Logger = {
@@ -18,10 +18,14 @@ export type CronContext = {
     logger: Logger
     positionFetcher: PositionFetcherLike
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
+    // 旧フロー（order_dispatch_logs ベース）
     getPendingExecutionLogs?: GetPendingExecutionLogsFn
     updateExecutionPrice?: UpdateExecutionPriceFn
     getConfirmedUnpromotedLogs?: GetConfirmedUnpromotedLogsFn
     markOpenTradesWritten?: MarkOpenTradesWrittenFn
+    // 新フロー（open_trades ベース）
+    getPendingExecutionOpenTrades?: GetPendingExecutionOpenTradesFn
+    updateOpenTradeExecutionPrice?: UpdateOpenTradeExecutionPriceFn
     getOpenTrades?: GetOpenTradesFn
     addOpenTrade?: AddOpenTradeFn
     deleteOpenTrade?: DeleteOpenTradeFn
@@ -39,14 +43,26 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
     ctx.logger.info({ event: 'cron:positions_fetched', broker, count: positions.length }, 'cron fetched positions')
 
     // 約定価格の照会・更新（open_trades フローより先に実行し、migration 時に price 確定済みの状態を保証する）
-    if (ctx.getPendingExecutionLogs && ctx.updateExecutionPrice && ctx.executionPriceFetchers) {
-        await fetchAndUpdateExecutionPrices({
-            logger: ctx.logger,
-            executionPriceFetchers: ctx.executionPriceFetchers,
-            getPendingExecutionLogs: ctx.getPendingExecutionLogs,
-            updateExecutionPrice: ctx.updateExecutionPrice,
-        })
-    }
+    await Promise.all([
+        // 旧フロー: order_dispatch_logs の execution_price を更新
+        ctx.getPendingExecutionLogs && ctx.updateExecutionPrice && ctx.executionPriceFetchers
+            ? fetchAndUpdateExecutionPrices({
+                logger: ctx.logger,
+                executionPriceFetchers: ctx.executionPriceFetchers,
+                getPendingExecutionLogs: ctx.getPendingExecutionLogs,
+                updateExecutionPrice: ctx.updateExecutionPrice,
+            })
+            : Promise.resolve(),
+        // 新フロー: open_trades の execution_price を更新
+        ctx.getPendingExecutionOpenTrades && ctx.updateOpenTradeExecutionPrice && ctx.executionPriceFetchers
+            ? fetchAndUpdateExecutionPricesFromOpenTrades({
+                logger: ctx.logger,
+                executionPriceFetchers: ctx.executionPriceFetchers,
+                getPendingExecutionOpenTrades: ctx.getPendingExecutionOpenTrades,
+                updateOpenTradeExecutionPrice: ctx.updateOpenTradeExecutionPrice,
+            })
+            : Promise.resolve(),
+    ])
 
     // open_trades フロー（execution_price 確定後に実行）
     if (
@@ -120,6 +136,52 @@ const fetchAndUpdateExecutionPrices = async (ctx: {
 
 export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:hourly_task' }, 'hourly task executed')
+}
+
+/** 新フロー: open_trades から execution_price 未確定のものを取得し broker API で更新する */
+const fetchAndUpdateExecutionPricesFromOpenTrades = async (ctx: {
+    logger: Logger
+    executionPriceFetchers: Partial<Record<string, ExecutionPriceFetcherLike>>
+    getPendingExecutionOpenTrades: GetPendingExecutionOpenTradesFn
+    updateOpenTradeExecutionPrice: UpdateOpenTradeExecutionPriceFn
+}): Promise<void> => {
+    const pendingTrades = await ctx.getPendingExecutionOpenTrades()
+    ctx.logger.info(
+        { event: 'cron:open_trades_execution_price_fetch_start', count: pendingTrades.length },
+        'fetching execution prices from open_trades',
+    )
+
+    for (const trade of pendingTrades) {
+        const fetcher = ctx.executionPriceFetchers[trade.broker]
+        if (!fetcher) {
+            ctx.logger.info(
+                { event: 'cron:execution_price_fetcher_missing', broker: trade.broker },
+                'no execution price fetcher for broker',
+            )
+            continue
+        }
+
+        try {
+            const price = await fetcher.getExecutionPrice(trade.provider_order_id, trade.ticker)
+            if (price !== null) {
+                await ctx.updateOpenTradeExecutionPrice(trade.event_id, price)
+                ctx.logger.info(
+                    { event: 'cron:open_trades_execution_price_updated', broker: trade.broker, eventId: trade.event_id, price },
+                    'open_trades execution price updated',
+                )
+            } else {
+                ctx.logger.info(
+                    { event: 'cron:open_trades_execution_price_not_found', broker: trade.broker, eventId: trade.event_id },
+                    'open_trades execution price not found',
+                )
+            }
+        } catch (error) {
+            ctx.logger.info(
+                { event: 'cron:open_trades_execution_price_fetch_failed', broker: trade.broker, eventId: trade.event_id, error },
+                'failed to fetch execution price for open_trade',
+            )
+        }
+    }
 }
 
 const promoteConfirmedLogsToOpenTrades = async (ctx: {

@@ -9,7 +9,6 @@ export type OrderDispatchLogInput = {
     size: number
     strategy?: string
     interval?: string
-    price?: number
     provider_order_id?: string
     execution_price?: number
     request_payload: Record<string, unknown>

@@ -9,9 +9,13 @@ export type OpenTrade = {
     size: number
     strategy: string
     interval: string
-    execution_price: number
+    /** webhook 受信時点では null、cron で確定後に number になる */
+    execution_price: number | null
     created_at: Date
-    order_dispatch_log_id: string
+    /** 旧フロー（cron 昇格）由来の場合のみ設定される */
+    order_dispatch_log_id?: string
+    /** 新フロー（webhook 即時作成）由来の場合のみ設定される */
+    provider_order_id?: string
 }
 
 export type TradeRecord = {
@@ -46,10 +50,14 @@ const PAIRING_KEY = (log: Pick<OpenTrade, 'strategy' | 'interval' | 'ticker' | '
     `${log.strategy}|${log.interval}|${log.ticker}|${log.broker}`
 
 export const pairLogs = (logs: OpenTrade[]): PairedTrade[] => {
-    // pairing key ごとに BUY/SELL を FIFO でマッチング
-    const queues = new Map<string, OpenTrade[]>()
+    // execution_price が未確定（null）のものはペアリング対象外
+    type ConfirmedOpenTrade = OpenTrade & { execution_price: number }
+    const confirmedLogs = logs.filter((log): log is ConfirmedOpenTrade => log.execution_price !== null)
 
-    for (const log of logs) {
+    // pairing key ごとに BUY/SELL を FIFO でマッチング
+    const queues = new Map<string, ConfirmedOpenTrade[]>()
+
+    for (const log of confirmedLogs) {
         const key = PAIRING_KEY(log)
         if (!queues.has(key)) queues.set(key, [])
         queues.get(key)!.push(log)
@@ -63,7 +71,7 @@ export const pairLogs = (logs: OpenTrade[]): PairedTrade[] => {
 
         // 時系列順にスキャンしてペアを作る
         // 先に来た side がエントリー方向となる
-        const openPositions: OpenTrade[] = []
+        const openPositions: ConfirmedOpenTrade[] = []
 
         for (const log of queue) {
             const openIndex = openPositions.findIndex((open) => open.side !== log.side)
@@ -141,9 +149,10 @@ export const getOpenTradesFn = (db: Firestore): GetOpenTradesFn => {
                 size: data.size as number,
                 strategy: data.strategy as string,
                 interval: data.interval as string,
-                execution_price: data.execution_price as number,
+                execution_price: (data.execution_price as number | null) ?? null,
                 created_at: (data.created_at as { toDate(): Date }).toDate(),
-                order_dispatch_log_id: data.order_dispatch_log_id as string,
+                order_dispatch_log_id: data.order_dispatch_log_id as string | undefined,
+                provider_order_id: data.provider_order_id as string | undefined,
             }
         })
     }
@@ -361,3 +370,45 @@ export const createDefaultGetTradeRecordsFn = (): GetTradeRecordsFn =>
 
 export const createDefaultGetTradeStatsFn = (): GetTradeStatsFn =>
     getTradeStatsFn(getFirestoreClient())
+
+// ─────────────── open_trades 約定価格更新（新フロー用） ───────────────
+
+export type PendingExecutionOpenTrade = {
+    event_id: string
+    broker: string
+    ticker: string
+    provider_order_id: string
+}
+
+export type GetPendingExecutionOpenTradesFn = () => Promise<PendingExecutionOpenTrade[]>
+export type UpdateOpenTradeExecutionPriceFn = (eventId: string, executionPrice: number) => Promise<void>
+
+/** open_trades から provider_order_id あり & execution_price=null のものを取得する */
+export const getPendingExecutionOpenTradesFn = (db: Firestore): GetPendingExecutionOpenTradesFn => {
+    return async () => {
+        const snapshot = await db.collection('open_trades').get()
+        return snapshot.docs
+            .filter((doc) => {
+                const data = doc.data()
+                return data.provider_order_id && data.execution_price === null
+            })
+            .map((doc) => ({
+                event_id: doc.id,
+                broker: doc.data().broker as string,
+                ticker: doc.data().ticker as string,
+                provider_order_id: doc.data().provider_order_id as string,
+            }))
+    }
+}
+
+export const updateOpenTradeExecutionPriceFn = (db: Firestore): UpdateOpenTradeExecutionPriceFn => {
+    return async (eventId, executionPrice) => {
+        await db.collection('open_trades').doc(eventId).update({ execution_price: executionPrice })
+    }
+}
+
+export const createDefaultGetPendingExecutionOpenTradesFn = (): GetPendingExecutionOpenTradesFn =>
+    getPendingExecutionOpenTradesFn(getFirestoreClient())
+
+export const createDefaultUpdateOpenTradeExecutionPriceFn = (): UpdateOpenTradeExecutionPriceFn =>
+    updateOpenTradeExecutionPriceFn(getFirestoreClient())

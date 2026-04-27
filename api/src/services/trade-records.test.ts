@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { pairLogs, createTradeRecordFn, computeStats, getTradeRecordsFn, getTradeStatsFn, addOpenTradeFn, getOpenTradesFn, deleteOpenTradeFn } from './trade-records.js'
-import type { TradeRecord, OpenTrade } from './trade-records.js'
+import { pairLogs, createTradeRecordFn, computeStats, getTradeRecordsFn, getTradeStatsFn, addOpenTradeFn, getOpenTradesFn, deleteOpenTradeFn, getPendingExecutionOpenTradesFn, updateOpenTradeExecutionPriceFn } from './trade-records.js'
+import type { TradeRecord, OpenTrade, PendingExecutionOpenTrade } from './trade-records.js'
 
 const makeOpenTrade = (overrides: Partial<OpenTrade> & { side: 'BUY' | 'SELL' }): OpenTrade => ({
     event_id: `evt-${Math.random()}`,
@@ -88,6 +88,27 @@ test('pairLogs: 空配列を渡した場合は空を返す', () => {
     assert.equal(result.length, 0)
 })
 
+test('pairLogs: execution_price が null のトレードはペアリングされない', () => {
+    const buy = makeOpenTrade({ side: 'BUY', execution_price: null, event_id: 'evt-buy-pending' })
+    const sell = makeOpenTrade({ side: 'SELL', execution_price: 11000000, event_id: 'evt-sell-1' })
+
+    const result = pairLogs([buy, sell])
+
+    assert.equal(result.length, 0)
+})
+
+test('pairLogs: execution_price が null でないものだけペアリングされる', () => {
+    const buy = makeOpenTrade({ side: 'BUY', execution_price: 10000000, created_at: new Date('2026-01-01'), event_id: 'evt-buy-confirmed' })
+    const sellPending = makeOpenTrade({ side: 'SELL', execution_price: null, event_id: 'evt-sell-pending' })
+    const sellConfirmed = makeOpenTrade({ side: 'SELL', execution_price: 11000000, created_at: new Date('2026-01-02'), event_id: 'evt-sell-confirmed' })
+
+    const result = pairLogs([buy, sellPending, sellConfirmed])
+
+    assert.equal(result.length, 1)
+    assert.equal(result[0]?.entryEventId, 'evt-buy-confirmed')
+    assert.equal(result[0]?.exitEventId, 'evt-sell-confirmed')
+})
+
 // ─────────────── Firestore 関数 ───────────────
 
 const makeFirestoreMock = () => {
@@ -161,6 +182,7 @@ const makeOpenTradeFirestoreMock = () => {
     const store: Record<string, Record<string, unknown>> = {}
     const setDocs: { id: string; data: Record<string, unknown> }[] = []
     const deletedIds: string[] = []
+    const updatedDocs: { id: string; data: Record<string, unknown> }[] = []
 
     const db = {
         collection: (_name: string) => ({
@@ -179,17 +201,23 @@ const makeOpenTradeFirestoreMock = () => {
                     delete store[id]
                     deletedIds.push(id)
                 },
+                update: async (data: Record<string, unknown>) => {
+                    store[id] = { ...store[id], ...data }
+                    updatedDocs.push({ id, data })
+                },
             }),
         }),
         store,
         setDocs,
         deletedIds,
+        updatedDocs,
     }
 
     return db as unknown as Parameters<typeof addOpenTradeFn>[0] & {
         store: typeof store
         setDocs: typeof setDocs
         deletedIds: typeof deletedIds
+        updatedDocs: typeof updatedDocs
     }
 }
 
@@ -249,6 +277,60 @@ test('deleteOpenTradeFn: open_trades から event_id のドキュメントを削
 
     assert.equal(db.deletedIds.length, 1)
     assert.equal(db.deletedIds[0], 'evt-buy-1')
+})
+
+test('addOpenTradeFn: execution_price が null の open_trade を upsert できる', async () => {
+    const db = makeOpenTradeFirestoreMock()
+    const fn = addOpenTradeFn(db)
+
+    const trade: OpenTrade = {
+        event_id: 'evt-new-1',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.01,
+        strategy: 'MA',
+        interval: '4H',
+        execution_price: null,
+        created_at: new Date('2026-01-01'),
+        provider_order_id: 'JRF-new-1',
+    }
+
+    await fn(trade)
+
+    assert.equal(db.setDocs.length, 1)
+    assert.equal(db.setDocs[0]?.id, 'evt-new-1')
+    assert.equal(db.setDocs[0]?.data.execution_price, null)
+    assert.equal(db.setDocs[0]?.data.provider_order_id, 'JRF-new-1')
+})
+
+test('getPendingExecutionOpenTradesFn: execution_price=null かつ provider_order_id ありのものを返す', async () => {
+    const db = makeOpenTradeFirestoreMock()
+    // execution_price あり → 対象外
+    db.store['evt-confirmed'] = { broker: 'bitflyer', ticker: 'BTC_JPY', execution_price: 9500000, provider_order_id: 'JRF-1' }
+    // execution_price=null & provider_order_id あり → 対象
+    db.store['evt-pending'] = { broker: 'bitflyer', ticker: 'BTC_JPY', execution_price: null, provider_order_id: 'JRF-2' }
+    // provider_order_id なし → 対象外
+    db.store['evt-no-order'] = { broker: 'bitflyer', ticker: 'BTC_JPY', execution_price: null }
+
+    const fn = getPendingExecutionOpenTradesFn(db)
+    const result = await fn()
+
+    assert.equal(result.length, 1)
+    assert.equal(result[0]?.event_id, 'evt-pending')
+    assert.equal(result[0]?.provider_order_id, 'JRF-2')
+})
+
+test('updateOpenTradeExecutionPriceFn: open_trades の execution_price を更新する', async () => {
+    const db = makeOpenTradeFirestoreMock()
+    db.store['evt-1'] = { broker: 'bitflyer', execution_price: null, provider_order_id: 'JRF-1' }
+
+    const fn = updateOpenTradeExecutionPriceFn(db)
+    await fn('evt-1', 9500000)
+
+    assert.equal(db.updatedDocs.length, 1)
+    assert.equal(db.updatedDocs[0]?.id, 'evt-1')
+    assert.equal(db.updatedDocs[0]?.data.execution_price, 9500000)
 })
 
 // ─────────────── computeStats ───────────────

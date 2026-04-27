@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import { executeTenMinutelyTask } from './cron-tasks.js'
 import type { CronContext } from './cron-tasks.js'
-import type { OpenTrade } from './trade-records.js'
+import type { OpenTrade, PendingExecutionOpenTrade } from './trade-records.js'
 import type { ConfirmedUnpromotedLog } from './order-dispatch-logs.js'
 
 const makeLogger = () => {
@@ -150,4 +150,52 @@ test('executeTenMinutelyTask: open_trades フローは全 fn が揃っていな�
     await executeTenMinutelyTask(ctx)
 
     assert.equal(called, false)
+})
+
+// ─────────────── 新フロー: open_trades の execution_price 更新 ───────────────
+
+test('executeTenMinutelyTask: getPendingExecutionOpenTrades から execution_price を取得して open_trades を更新する', async () => {
+    const pendingTrade: PendingExecutionOpenTrade = {
+        event_id: 'evt-pending-1',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        provider_order_id: 'JRF-1',
+    }
+    const updatedTrades: { eventId: string; price: number }[] = []
+
+    const ctx = makeBaseCtx({
+        getPendingExecutionOpenTrades: async () => [pendingTrade],
+        updateOpenTradeExecutionPrice: async (eventId, price) => { updatedTrades.push({ eventId, price }) },
+        executionPriceFetchers: {
+            bitflyer: { getExecutionPrice: async () => 9500000 },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(updatedTrades.length, 1)
+    assert.equal(updatedTrades[0]?.eventId, 'evt-pending-1')
+    assert.equal(updatedTrades[0]?.price, 9500000)
+})
+
+test('executeTenMinutelyTask: open_trades の execution_price が null を返すとき更新しない', async () => {
+    const pendingTrade: PendingExecutionOpenTrade = {
+        event_id: 'evt-pending-2',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        provider_order_id: 'JRF-2',
+    }
+    const updatedTrades: unknown[] = []
+
+    const ctx = makeBaseCtx({
+        getPendingExecutionOpenTrades: async () => [pendingTrade],
+        updateOpenTradeExecutionPrice: async (eventId, price) => { updatedTrades.push({ eventId, price }) },
+        executionPriceFetchers: {
+            bitflyer: { getExecutionPrice: async () => null },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(updatedTrades.length, 0)
 })
