@@ -14,6 +14,19 @@ export type UnpairedLog = {
     created_at: Date
 }
 
+export type OpenTrade = {
+    event_id: string
+    broker: string
+    ticker: string
+    side: 'BUY' | 'SELL'
+    size: number
+    strategy: string
+    interval: string
+    execution_price: number
+    created_at: Date
+    order_dispatch_log_id: string
+}
+
 export type TradeRecord = {
     strategy: string
     interval: string
@@ -34,18 +47,22 @@ export type GetUnpairedLogsFn = () => Promise<UnpairedLog[]>
 export type CreateTradeRecordFn = (record: TradeRecord) => Promise<void>
 export type MarkLogPairedFn = (docId: string) => Promise<void>
 
+export type AddOpenTradeFn = (trade: OpenTrade) => Promise<void>
+export type GetOpenTradesFn = () => Promise<OpenTrade[]>
+export type DeleteOpenTradeFn = (eventId: string) => Promise<void>
+
 export type PairedTrade = {
     record: TradeRecord
-    entryDocId: string
-    exitDocId: string
+    entryEventId: string
+    exitEventId: string
 }
 
-const PAIRING_KEY = (log: Pick<UnpairedLog, 'strategy' | 'interval' | 'ticker' | 'broker'>) =>
+const PAIRING_KEY = (log: Pick<OpenTrade, 'strategy' | 'interval' | 'ticker' | 'broker'>) =>
     `${log.strategy}|${log.interval}|${log.ticker}|${log.broker}`
 
-export const pairLogs = (logs: UnpairedLog[]): PairedTrade[] => {
+export const pairLogs = (logs: OpenTrade[]): PairedTrade[] => {
     // pairing key ごとに BUY/SELL を FIFO でマッチング
-    const queues = new Map<string, UnpairedLog[]>()
+    const queues = new Map<string, OpenTrade[]>()
 
     for (const log of logs) {
         const key = PAIRING_KEY(log)
@@ -61,7 +78,7 @@ export const pairLogs = (logs: UnpairedLog[]): PairedTrade[] => {
 
         // 時系列順にスキャンしてペアを作る
         // 先に来た side がエントリー方向となる
-        const openPositions: UnpairedLog[] = []
+        const openPositions: OpenTrade[] = []
 
         for (const log of queue) {
             const openIndex = openPositions.findIndex((open) => open.side !== log.side)
@@ -91,8 +108,8 @@ export const pairLogs = (logs: UnpairedLog[]): PairedTrade[] => {
                         opened_at: entry.created_at,
                         closed_at: log.created_at,
                     },
-                    entryDocId: entry.docId,
-                    exitDocId: log.docId,
+                    entryEventId: entry.event_id,
+                    exitEventId: log.event_id,
                 })
             } else {
                 // 同じ方向か未決済ポジションなし → 新規エントリー
@@ -163,6 +180,51 @@ export const createDefaultCreateTradeRecordFn = (): CreateTradeRecordFn =>
 
 export const createDefaultMarkLogPairedFn = (): MarkLogPairedFn =>
     markLogPairedFn(getFirestoreClient())
+
+// ─────────────── open_trades CRUD ───────────────
+
+export const addOpenTradeFn = (db: Firestore): AddOpenTradeFn => {
+    return async (trade) => {
+        // event_id をドキュメントIDとして使用（idempotent upsert）
+        await db.collection('open_trades').doc(trade.event_id).set(trade)
+    }
+}
+
+export const getOpenTradesFn = (db: Firestore): GetOpenTradesFn => {
+    return async () => {
+        const snapshot = await db.collection('open_trades').get()
+        return snapshot.docs.map((doc) => {
+            const data = doc.data()
+            return {
+                event_id: doc.id,
+                broker: data.broker as string,
+                ticker: data.ticker as string,
+                side: data.side as 'BUY' | 'SELL',
+                size: data.size as number,
+                strategy: data.strategy as string,
+                interval: data.interval as string,
+                execution_price: data.execution_price as number,
+                created_at: (data.created_at as { toDate(): Date }).toDate(),
+                order_dispatch_log_id: data.order_dispatch_log_id as string,
+            }
+        })
+    }
+}
+
+export const deleteOpenTradeFn = (db: Firestore): DeleteOpenTradeFn => {
+    return async (eventId) => {
+        await db.collection('open_trades').doc(eventId).delete()
+    }
+}
+
+export const createDefaultAddOpenTradeFn = (): AddOpenTradeFn =>
+    addOpenTradeFn(getFirestoreClient())
+
+export const createDefaultGetOpenTradesFn = (): GetOpenTradesFn =>
+    getOpenTradesFn(getFirestoreClient())
+
+export const createDefaultDeleteOpenTradeFn = (): DeleteOpenTradeFn =>
+    deleteOpenTradeFn(getFirestoreClient())
 
 // ─────────────── 統計・一覧クエリ ───────────────
 

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { pairLogs, getUnpairedLogsFn, createTradeRecordFn, markLogPairedFn, computeStats, getTradeRecordsFn, getTradeStatsFn } from './trade-records.js'
-import type { UnpairedLog, TradeRecord } from './trade-records.js'
+import { pairLogs, getUnpairedLogsFn, createTradeRecordFn, markLogPairedFn, computeStats, getTradeRecordsFn, getTradeStatsFn, addOpenTradeFn, getOpenTradesFn, deleteOpenTradeFn } from './trade-records.js'
+import type { UnpairedLog, TradeRecord, OpenTrade } from './trade-records.js'
 
 const makeLog = (overrides: Partial<UnpairedLog> & { side: 'BUY' | 'SELL' }): UnpairedLog => ({
     docId: `doc-${Math.random()}`,
@@ -17,11 +17,24 @@ const makeLog = (overrides: Partial<UnpairedLog> & { side: 'BUY' | 'SELL' }): Un
     ...overrides,
 })
 
+const makeOpenTrade = (overrides: Partial<OpenTrade> & { side: 'BUY' | 'SELL' }): OpenTrade => ({
+    event_id: `evt-${Math.random()}`,
+    broker: 'bitflyer',
+    ticker: 'BTC_JPY',
+    size: 0.01,
+    strategy: 'MA Crossover',
+    interval: '4H',
+    execution_price: 10000000,
+    created_at: new Date('2026-01-01T00:00:00Z'),
+    order_dispatch_log_id: `doc-${Math.random()}`,
+    ...overrides,
+})
+
 // ─────────────── pairLogs ───────────────
 
 test('pairLogs: BUY → SELL をペアリングして PnL を計算する（ロング）', () => {
-    const buy = makeLog({ side: 'BUY', execution_price: 10000000, created_at: new Date('2026-01-01T00:00:00Z'), docId: 'buy-1', event_id: 'evt-buy-1' })
-    const sell = makeLog({ side: 'SELL', execution_price: 11000000, created_at: new Date('2026-01-02T00:00:00Z'), docId: 'sell-1', event_id: 'evt-sell-1' })
+    const buy = makeOpenTrade({ side: 'BUY', execution_price: 10000000, created_at: new Date('2026-01-01T00:00:00Z'), event_id: 'evt-buy-1' })
+    const sell = makeOpenTrade({ side: 'SELL', execution_price: 11000000, created_at: new Date('2026-01-02T00:00:00Z'), event_id: 'evt-sell-1' })
 
     const result = pairLogs([buy, sell])
 
@@ -30,13 +43,13 @@ test('pairLogs: BUY → SELL をペアリングして PnL を計算する（ロ�
     assert.equal(result[0]?.record.entry_price, 10000000)
     assert.equal(result[0]?.record.exit_price, 11000000)
     assert.ok(Math.abs((result[0]?.record.pnl ?? 0) - 10000) < 0.001) // (11000000 - 10000000) * 0.01
-    assert.equal(result[0]?.entryDocId, 'buy-1')
-    assert.equal(result[0]?.exitDocId, 'sell-1')
+    assert.equal(result[0]?.entryEventId, 'evt-buy-1')
+    assert.equal(result[0]?.exitEventId, 'evt-sell-1')
 })
 
 test('pairLogs: SELL → BUY をペアリングして PnL を計算する（ショート）', () => {
-    const sell = makeLog({ side: 'SELL', execution_price: 11000000, created_at: new Date('2026-01-01T00:00:00Z'), docId: 'sell-1', event_id: 'evt-sell-1' })
-    const buy = makeLog({ side: 'BUY', execution_price: 10000000, created_at: new Date('2026-01-02T00:00:00Z'), docId: 'buy-1', event_id: 'evt-buy-1' })
+    const sell = makeOpenTrade({ side: 'SELL', execution_price: 11000000, created_at: new Date('2026-01-01T00:00:00Z'), event_id: 'evt-sell-1' })
+    const buy = makeOpenTrade({ side: 'BUY', execution_price: 10000000, created_at: new Date('2026-01-02T00:00:00Z'), event_id: 'evt-buy-1' })
 
     const result = pairLogs([sell, buy])
 
@@ -48,25 +61,25 @@ test('pairLogs: SELL → BUY をペアリングして PnL を計算する（シ�
 })
 
 test('pairLogs: FIFO でペアリングする（複数注文）', () => {
-    const buy1 = makeLog({ side: 'BUY', execution_price: 10000000, created_at: new Date('2026-01-01T00:00:00Z'), docId: 'buy-1', event_id: 'evt-1' })
-    const sell1 = makeLog({ side: 'SELL', execution_price: 11000000, created_at: new Date('2026-01-02T00:00:00Z'), docId: 'sell-1', event_id: 'evt-3' })
-    const buy2 = makeLog({ side: 'BUY', execution_price: 10500000, created_at: new Date('2026-01-03T00:00:00Z'), docId: 'buy-2', event_id: 'evt-2' })
-    const sell2 = makeLog({ side: 'SELL', execution_price: 12000000, created_at: new Date('2026-01-04T00:00:00Z'), docId: 'sell-2', event_id: 'evt-4' })
+    const buy1 = makeOpenTrade({ side: 'BUY', execution_price: 10000000, created_at: new Date('2026-01-01T00:00:00Z'), event_id: 'evt-1' })
+    const sell1 = makeOpenTrade({ side: 'SELL', execution_price: 11000000, created_at: new Date('2026-01-02T00:00:00Z'), event_id: 'evt-3' })
+    const buy2 = makeOpenTrade({ side: 'BUY', execution_price: 10500000, created_at: new Date('2026-01-03T00:00:00Z'), event_id: 'evt-2' })
+    const sell2 = makeOpenTrade({ side: 'SELL', execution_price: 12000000, created_at: new Date('2026-01-04T00:00:00Z'), event_id: 'evt-4' })
 
     const result = pairLogs([buy2, sell1, buy1, sell2]) // 順不同で渡す
 
     assert.equal(result.length, 2)
     // buy1(古い) と sell1(2番目) がペアになる
-    assert.equal(result[0]?.entryDocId, 'buy-1')
-    assert.equal(result[0]?.exitDocId, 'sell-1')
+    assert.equal(result[0]?.entryEventId, 'evt-1')
+    assert.equal(result[0]?.exitEventId, 'evt-3')
     // buy2 と sell2 がペアになる
-    assert.equal(result[1]?.entryDocId, 'buy-2')
-    assert.equal(result[1]?.exitDocId, 'sell-2')
+    assert.equal(result[1]?.entryEventId, 'evt-2')
+    assert.equal(result[1]?.exitEventId, 'evt-4')
 })
 
 test('pairLogs: strategy+interval+ticker+broker が異なればペアリングしない', () => {
-    const buy = makeLog({ side: 'BUY', strategy: 'Strategy A', interval: '1H', ticker: 'BTC_JPY' })
-    const sell = makeLog({ side: 'SELL', strategy: 'Strategy B', interval: '1H', ticker: 'BTC_JPY' })
+    const buy = makeOpenTrade({ side: 'BUY', strategy: 'Strategy A', interval: '1H', ticker: 'BTC_JPY' })
+    const sell = makeOpenTrade({ side: 'SELL', strategy: 'Strategy B', interval: '1H', ticker: 'BTC_JPY' })
 
     const result = pairLogs([buy, sell])
 
@@ -74,9 +87,9 @@ test('pairLogs: strategy+interval+ticker+broker が異なればペアリング�
 })
 
 test('pairLogs: 余った注文はペアリングされない', () => {
-    const buy1 = makeLog({ side: 'BUY', docId: 'buy-1', event_id: 'evt-1' })
-    const buy2 = makeLog({ side: 'BUY', docId: 'buy-2', event_id: 'evt-2' })
-    const sell1 = makeLog({ side: 'SELL', docId: 'sell-1', event_id: 'evt-3' })
+    const buy1 = makeOpenTrade({ side: 'BUY', event_id: 'evt-1' })
+    const buy2 = makeOpenTrade({ side: 'BUY', event_id: 'evt-2' })
+    const sell1 = makeOpenTrade({ side: 'SELL', event_id: 'evt-3' })
 
     const result = pairLogs([buy1, buy2, sell1])
 
@@ -195,6 +208,102 @@ test('markLogPairedFn: order_dispatch_logs の paired を true に更新する',
     assert.equal(db.updatedDocs.length, 1)
     assert.equal(db.updatedDocs[0]?.id, 'doc-1')
     assert.equal(db.updatedDocs[0]?.data.paired, true)
+})
+
+// ─────────────── open_trades CRUD ───────────────
+
+const makeOpenTradeFirestoreMock = () => {
+    const store: Record<string, Record<string, unknown>> = {}
+    const setDocs: { id: string; data: Record<string, unknown> }[] = []
+    const deletedIds: string[] = []
+
+    const db = {
+        collection: (_name: string) => ({
+            get: async () => ({
+                docs: Object.entries(store).map(([id, data]) => ({
+                    id,
+                    data: () => data,
+                })),
+            }),
+            doc: (id: string) => ({
+                set: async (data: Record<string, unknown>) => {
+                    store[id] = data
+                    setDocs.push({ id, data })
+                },
+                delete: async () => {
+                    delete store[id]
+                    deletedIds.push(id)
+                },
+            }),
+        }),
+        store,
+        setDocs,
+        deletedIds,
+    }
+
+    return db as unknown as Parameters<typeof addOpenTradeFn>[0] & {
+        store: typeof store
+        setDocs: typeof setDocs
+        deletedIds: typeof deletedIds
+    }
+}
+
+test('addOpenTradeFn: open_trades に event_id をドキュメントIDとして upsert する', async () => {
+    const db = makeOpenTradeFirestoreMock()
+    const fn = addOpenTradeFn(db)
+
+    const trade: OpenTrade = {
+        event_id: 'evt-buy-1',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.01,
+        strategy: 'MA',
+        interval: '4H',
+        execution_price: 10000000,
+        created_at: new Date('2026-01-01'),
+        order_dispatch_log_id: 'doc-1',
+    }
+
+    await fn(trade)
+
+    assert.equal(db.setDocs.length, 1)
+    assert.equal(db.setDocs[0]?.id, 'evt-buy-1')
+    assert.equal(db.setDocs[0]?.data.broker, 'bitflyer')
+    assert.equal(db.setDocs[0]?.data.order_dispatch_log_id, 'doc-1')
+})
+
+test('getOpenTradesFn: open_trades の全件を返す', async () => {
+    const db = makeOpenTradeFirestoreMock()
+    db.store['evt-1'] = {
+        broker: 'bitflyer', ticker: 'BTC_JPY', side: 'BUY', size: 0.01,
+        strategy: 'MA', interval: '4H', execution_price: 10000000,
+        order_dispatch_log_id: 'doc-1',
+        created_at: { toDate: () => new Date('2026-01-01') },
+    }
+    db.store['evt-2'] = {
+        broker: 'bitflyer', ticker: 'BTC_JPY', side: 'SELL', size: 0.01,
+        strategy: 'MA', interval: '4H', execution_price: 11000000,
+        order_dispatch_log_id: 'doc-2',
+        created_at: { toDate: () => new Date('2026-01-02') },
+    }
+
+    const fn = getOpenTradesFn(db)
+    const trades = await fn()
+
+    assert.equal(trades.length, 2)
+    const eventIds = trades.map((t) => t.event_id).sort()
+    assert.deepEqual(eventIds, ['evt-1', 'evt-2'])
+})
+
+test('deleteOpenTradeFn: open_trades から event_id のドキュメントを削除する', async () => {
+    const db = makeOpenTradeFirestoreMock()
+    const fn = deleteOpenTradeFn(db)
+
+    await fn('evt-buy-1')
+
+    assert.equal(db.deletedIds.length, 1)
+    assert.equal(db.deletedIds[0], 'evt-buy-1')
 })
 
 // ─────────────── computeStats ───────────────

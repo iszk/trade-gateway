@@ -1,6 +1,7 @@
-import type { GetPendingExecutionLogsFn, UpdateExecutionPriceFn } from './order-dispatch-logs.js'
-import type { GetUnpairedLogsFn, CreateTradeRecordFn, MarkLogPairedFn } from './trade-records.js'
+import type { GetPendingExecutionLogsFn, UpdateExecutionPriceFn, GetConfirmedUnpromotedLogsFn, MarkOpenTradesWrittenFn } from './order-dispatch-logs.js'
+import type { GetUnpairedLogsFn, CreateTradeRecordFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn } from './trade-records.js'
 import { pairLogs } from './trade-records.js'
+import type { CheckMigrationDoneFn, SetMigrationDoneFn } from './slot-scheduler.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -20,9 +21,15 @@ export type CronContext = {
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
     getPendingExecutionLogs?: GetPendingExecutionLogsFn
     updateExecutionPrice?: UpdateExecutionPriceFn
-    getUnpairedLogs?: GetUnpairedLogsFn
+    checkMigrationDone?: CheckMigrationDoneFn
+    setMigrationDone?: SetMigrationDoneFn
+    getUnpairedLogsForMigration?: GetUnpairedLogsFn
+    getConfirmedUnpromotedLogs?: GetConfirmedUnpromotedLogsFn
+    markOpenTradesWritten?: MarkOpenTradesWrittenFn
+    getOpenTrades?: GetOpenTradesFn
+    addOpenTrade?: AddOpenTradeFn
+    deleteOpenTrade?: DeleteOpenTradeFn
     createTradeRecord?: CreateTradeRecordFn
-    markLogPaired?: MarkLogPairedFn
 }
 
 const PAIRING_TIMEOUT_MS = 30_000
@@ -35,7 +42,7 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
     const positions = await ctx.positionFetcher.fetchAllPositions(broker)
     ctx.logger.info({ event: 'cron:positions_fetched', broker, count: positions.length }, 'cron fetched positions')
 
-    // 約定価格の照会・更新
+    // 約定価格の照会・更新（open_trades フローより先に実行し、migration 時に price 確定済みの状態を保証する）
     if (ctx.getPendingExecutionLogs && ctx.updateExecutionPrice && ctx.executionPriceFetchers) {
         await fetchAndUpdateExecutionPrices({
             logger: ctx.logger,
@@ -45,13 +52,36 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
         })
     }
 
-    // 取引ペアリング
-    if (ctx.getUnpairedLogs && ctx.createTradeRecord && ctx.markLogPaired) {
-        await pairAndRecordTrades({
+    // open_trades フロー（execution_price 確定後に実行）
+    if (
+        ctx.checkMigrationDone &&
+        ctx.setMigrationDone &&
+        ctx.getUnpairedLogsForMigration &&
+        ctx.getConfirmedUnpromotedLogs &&
+        ctx.markOpenTradesWritten &&
+        ctx.getOpenTrades &&
+        ctx.addOpenTrade &&
+        ctx.deleteOpenTrade &&
+        ctx.createTradeRecord
+    ) {
+        await runMigrationIfNeeded({
             logger: ctx.logger,
-            getUnpairedLogs: ctx.getUnpairedLogs,
+            checkMigrationDone: ctx.checkMigrationDone,
+            setMigrationDone: ctx.setMigrationDone,
+            getUnpairedLogs: ctx.getUnpairedLogsForMigration,
+            addOpenTrade: ctx.addOpenTrade,
+        })
+        await promoteConfirmedLogsToOpenTrades({
+            logger: ctx.logger,
+            getConfirmedUnpromotedLogs: ctx.getConfirmedUnpromotedLogs,
+            markOpenTradesWritten: ctx.markOpenTradesWritten,
+            addOpenTrade: ctx.addOpenTrade,
+        })
+        await matchAndRecordOpenTrades({
+            logger: ctx.logger,
+            getOpenTrades: ctx.getOpenTrades,
+            deleteOpenTrade: ctx.deleteOpenTrade,
             createTradeRecord: ctx.createTradeRecord,
-            markLogPaired: ctx.markLogPaired,
             timeoutMs: PAIRING_TIMEOUT_MS,
         })
     }
@@ -106,36 +136,98 @@ export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:hourly_task' }, 'hourly task executed')
 }
 
-const pairAndRecordTrades = async (ctx: {
+const runMigrationIfNeeded = async (ctx: {
     logger: Logger
+    checkMigrationDone: CheckMigrationDoneFn
+    setMigrationDone: SetMigrationDoneFn
     getUnpairedLogs: GetUnpairedLogsFn
+    addOpenTrade: AddOpenTradeFn
+}): Promise<void> => {
+    const done = await ctx.checkMigrationDone()
+    if (done) return
+
+    ctx.logger.info({ event: 'cron:open_trades_migration_start' }, 'migrating unpaired logs to open_trades')
+
+    const logs = await ctx.getUnpairedLogs()
+    for (const log of logs) {
+        await ctx.addOpenTrade({
+            event_id: log.event_id,
+            broker: log.broker,
+            ticker: log.ticker,
+            side: log.side,
+            size: log.size,
+            strategy: log.strategy,
+            interval: log.interval,
+            execution_price: log.execution_price,
+            created_at: log.created_at,
+            order_dispatch_log_id: log.docId,
+        })
+    }
+
+    await ctx.setMigrationDone()
+    ctx.logger.info({ event: 'cron:open_trades_migration_done', count: logs.length }, 'migration complete')
+}
+
+const promoteConfirmedLogsToOpenTrades = async (ctx: {
+    logger: Logger
+    getConfirmedUnpromotedLogs: GetConfirmedUnpromotedLogsFn
+    markOpenTradesWritten: MarkOpenTradesWrittenFn
+    addOpenTrade: AddOpenTradeFn
+}): Promise<void> => {
+    const logs = await ctx.getConfirmedUnpromotedLogs()
+    if (logs.length === 0) return
+
+    ctx.logger.info({ event: 'cron:open_trades_promote_start', count: logs.length }, 'promoting logs to open_trades')
+
+    for (const log of logs) {
+        await ctx.addOpenTrade({
+            event_id: log.event_id,
+            broker: log.broker,
+            ticker: log.ticker,
+            side: log.side,
+            size: log.size,
+            strategy: log.strategy,
+            interval: log.interval,
+            execution_price: log.execution_price,
+            created_at: log.created_at,
+            order_dispatch_log_id: log.docId,
+        })
+        await ctx.markOpenTradesWritten(log.docId)
+    }
+
+    ctx.logger.info({ event: 'cron:open_trades_promote_done', count: logs.length }, 'promotion complete')
+}
+
+const matchAndRecordOpenTrades = async (ctx: {
+    logger: Logger
+    getOpenTrades: GetOpenTradesFn
+    deleteOpenTrade: DeleteOpenTradeFn
     createTradeRecord: CreateTradeRecordFn
-    markLogPaired: MarkLogPairedFn
     timeoutMs: number
 }): Promise<void> => {
     const deadline = Date.now() + ctx.timeoutMs
 
-    const unpairedLogs = await ctx.getUnpairedLogs()
-    const paired = pairLogs(unpairedLogs)
+    const openTrades = await ctx.getOpenTrades()
+    const paired = pairLogs(openTrades)
 
     ctx.logger.info(
-        { event: 'cron:trade_pairing_start', unpairedCount: unpairedLogs.length, pairedCount: paired.length },
-        'trade pairing started',
+        { event: 'cron:trade_matching_start', openCount: openTrades.length, pairedCount: paired.length },
+        'trade matching started',
     )
 
-    for (const { record, entryDocId, exitDocId } of paired) {
+    for (const { record, entryEventId, exitEventId } of paired) {
         if (Date.now() >= deadline) {
             ctx.logger.info(
-                { event: 'cron:trade_pairing_timeout' },
-                'trade pairing timed out, will resume next cron',
+                { event: 'cron:trade_matching_timeout' },
+                'trade matching timed out, will resume next cron',
             )
             break
         }
 
         try {
             await ctx.createTradeRecord(record)
-            await ctx.markLogPaired(entryDocId)
-            await ctx.markLogPaired(exitDocId)
+            await ctx.deleteOpenTrade(entryEventId)
+            await ctx.deleteOpenTrade(exitEventId)
 
             ctx.logger.info(
                 {
