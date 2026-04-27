@@ -88,7 +88,102 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `401 Unauthorized`: 認証トークン不足・不正
 - `500 Internal Server Error`: 証券会社との通信エラー等
 
-### 5. ヘルスチェック
+### 5. トレード統計取得
+- Method/Path: `GET /api/trade-records/stats`
+- 認証: 必要（`X-Api-Secret` ヘッダ）
+- 役割: ペアリング済みトレードの統計を strategy/interval/ticker/broker の 4 軸でグループ化して返す
+
+#### Query Parameters
+- `from` (optional, ISO 8601): 期間開始（デフォルト: 直近 30 日）
+- `to` (optional, ISO 8601): 期間終了（デフォルト: 現在）
+- `strategy` (optional): 絞り込み
+- `interval` (optional): 絞り込み
+- `ticker` (optional): 絞り込み
+- `broker` (optional): 絞り込み
+
+#### 成功レスポンス
+- `200 OK`
+
+```json
+[
+  {
+    "strategy": "MA Crossover",
+    "interval": "4H",
+    "ticker": "BTC_JPY",
+    "broker": "bitflyer",
+    "total": 10,
+    "win_count": 7,
+    "loss_count": 3,
+    "win_rate": 0.7,
+    "total_pnl": 50000,
+    "avg_pnl": 5000,
+    "avg_win": 10000,
+    "avg_loss": -3333.33,
+    "profit_factor": 2.33,
+    "max_drawdown": 8000,
+    "sharpe_ratio": 1.5
+  }
+]
+```
+
+#### エラーレスポンス
+- `400 Bad Request`: 日付パラメーターが不正
+- `401 Unauthorized`: 認証トークン不足・不正
+- `500 Internal Server Error`
+
+### 6. トレード記録一覧取得
+- Method/Path: `GET /api/trade-records`
+- 認証: 必要（`X-Api-Secret` ヘッダ）
+- 役割: ペアリング済みトレード記録を一覧取得する（ページネーション付き）
+
+#### Query Parameters
+- `from` (optional, ISO 8601): 期間開始（デフォルト: 直近 30 日）
+- `to` (optional, ISO 8601): 期間終了（デフォルト: 現在）
+- `strategy` (optional): 絞り込み
+- `interval` (optional): 絞り込み
+- `ticker` (optional): 絞り込み
+- `broker` (optional): 絞り込み
+- `limit` (optional, number, 1–200): 1 ページあたり件数（デフォルト: 50）
+- `page` (optional, number): ページ番号（デフォルト: 1）
+
+#### 成功レスポンス
+- `200 OK`
+
+```json
+{
+  "records": [
+    {
+      "docId": "abc123",
+      "strategy": "MA Crossover",
+      "interval": "4H",
+      "ticker": "BTC_JPY",
+      "broker": "bitflyer",
+      "entry_side": "BUY",
+      "entry_price": 10000000,
+      "exit_price": 11000000,
+      "size": 0.01,
+      "pnl": 10000,
+      "entry_event_id": "evt-entry",
+      "exit_event_id": "evt-exit",
+      "opened_at": "2026-01-01T00:00:00.000Z",
+      "closed_at": "2026-01-02T00:00:00.000Z"
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "limit": 50,
+  "total_pages": 1,
+  "from": "2026-03-28T00:00:00.000Z",
+  "to": "2026-04-27T00:00:00.000Z"
+}
+```
+
+#### エラーレスポンス
+- `400 Bad Request`: 日付パラメーターが不正
+- `401 Unauthorized`: 認証トークン不足・不正
+- `500 Internal Server Error`
+
+### 7. ヘルスチェック
 - Method/Path: `GET /api/health`
 - 認証: 不要
 

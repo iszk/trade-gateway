@@ -61,7 +61,7 @@ OpenID 連携情報を保持する。
 - 重複イベント自体は `webhook_events` に新規保存しない（監査はアプリログで補完）
 
 ## 3. `order_dispatch_logs`
-ブローカーへの発注試行を保持する。
+ブローカーへの発注試行を保持する。cron により約定価格の事後取得、および `open_trades` への昇格状態を管理する。
 
 ### ドキュメント ID
 - 自動採番 ID
@@ -69,9 +69,17 @@ OpenID 連携情報を保持する。
 ### フィールド
 - `event_id` (string, required)
 - `broker` (string, required)
-  - MVP: `bitflyer`
-- `request_payload` (map または string, required)
-- `response_payload` (map または string, optional)
+- `ticker` (string, required)
+- `side` (string, required) — `BUY` | `SELL`
+- `size` (number, required)
+- `strategy` (string, optional)
+- `interval` (string, optional)
+- `price` (number, optional) — webhook 受信時点の参考価格
+- `provider_order_id` (string, optional) — ブローカー側の注文 ID
+- `execution_price` (number, optional) — 約定価格（cron で事後取得・更新）
+- `open_trades_written` (boolean, required, default: `false`) — `open_trades` への書き込み済みフラグ
+- `request_payload` (map, required)
+- `response_payload` (map, optional)
 - `result` (string, required)
   - `success` | `failure`
 - `error_code` (string, optional)
@@ -94,21 +102,75 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 - Firestoreトランザクションを使用して読み書きを行い、重複実行を防止する
 - TTLは不要（上書きで管理）
 
+## 5. `open_trades`
+
+ペアリング待ちの未決済トレードを保持する。cron が `order_dispatch_logs` の成功かつ `execution_price` 確定済みレコードを昇格させて生成し、エントリー/エグジットのペアが揃い次第 `trade_records` に変換して削除される。
+
+### ドキュメント ID
+- `event_id`（対応する `webhook_events` の `event_id`）
+
+### フィールド
+- `event_id` (string, required)
+- `broker` (string, required)
+- `ticker` (string, required)
+- `side` (string, required) — `BUY` | `SELL`
+- `size` (number, required)
+- `strategy` (string, required)
+- `interval` (string, required)
+- `execution_price` (number, required)
+- `created_at` (timestamp, required)
+- `order_dispatch_log_id` (string, required) — 紐付く `order_dispatch_logs` のドキュメント ID
+
+### 制約
+- ドキュメント ID = `event_id` で idempotent upsert（`set` 呼び出し）を使用する
+- TTL は設定しない（ペアリング完了時に明示削除）
+
+## 6. `trade_records`
+
+エントリー/エグジットがペアリングされたクローズ済みトレードの記録を保持する。
+
+### ドキュメント ID
+- 自動採番 ID
+
+### フィールド
+- `strategy` (string, required)
+- `interval` (string, required)
+- `ticker` (string, required)
+- `broker` (string, required)
+- `entry_side` (string, required) — `BUY` | `SELL`
+- `entry_price` (number, required) — エントリー約定価格
+- `exit_price` (number, required) — エグジット約定価格
+- `size` (number, required)
+- `pnl` (number, required) — 損益
+- `entry_event_id` (string, required)
+- `exit_event_id` (string, required)
+- `opened_at` (timestamp, required) — エントリー約定時刻
+- `closed_at` (timestamp, required) — エグジット約定時刻
+- `expire_at` (timestamp, required, TTL 用)
+
+### 制約
+- 同じ `entry_event_id` + `exit_event_id` の組み合わせが重複しないようアプリケーションで担保する
+
 ## 保持期間（MVP）
 - `webhook_events`: 90 日
 - `order_dispatch_logs`: 180 日
+- `open_trades`: 無期限（ペアリング完了時に明示削除）
+- `trade_records`: 約 2 年（`closed_at + 730 日`）
 - `oidc_connections`: 連携中は保持、削除要求時に削除
 
 ## TTL 設計（MVP）
 - `webhook_events.expire_at` に `received_at + 90 日` を設定
 - `order_dispatch_logs.expire_at` に `created_at + 180 日` を設定
+- `trade_records.expire_at` に `closed_at + 730 日` を設定
+- `open_trades` は TTL を使用しない（ペアリング完了後に `delete()` で明示削除）
 - `oidc_connections` は通常 TTL 対象外（削除要求時に明示削除）
 - Firestore TTL ポリシーは対象コレクションごとに有効化する
 
 ## インデックス（MVP）
 - Firestore の単一フィールドインデックスはデフォルト利用
 - 追加の複合インデックス（必要時のみ）
-  - `order_dispatch_logs`: `event_id` 昇順 + `created_at` 降順
+  - `order_dispatch_logs`: `result` 昇順 + `open_trades_written` 昇順
+  - `order_dispatch_logs`: `result` 昇順 + `created_at` 降順
 - `oidc_connections` はドキュメント ID 参照を基本とし、複合インデックスは不要
 
 ## 整合性ルール

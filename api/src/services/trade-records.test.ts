@@ -127,7 +127,7 @@ const makeFirestoreMock = () => {
         updatedDocs,
     }
 
-    return db as unknown as Parameters<typeof getUnpairedLogsFn>[0] & {
+    return db as unknown as Parameters<typeof createTradeRecordFn>[0] & {
         store: typeof store
         addedDocs: typeof addedDocs
         updatedDocs: typeof updatedDocs
