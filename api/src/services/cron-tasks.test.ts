@@ -4,7 +4,6 @@ import test from 'node:test'
 import { executeTenMinutelyTask } from './cron-tasks.js'
 import type { CronContext } from './cron-tasks.js'
 import type { OpenTrade, PendingExecutionOpenTrade } from './trade-records.js'
-import type { ConfirmedUnpromotedLog } from './order-dispatch-logs.js'
 
 const makeLogger = () => {
     const logs: Record<string, unknown>[] = []
@@ -34,62 +33,13 @@ const makeOpenTrade = (overrides: Partial<OpenTrade> & { side: 'BUY' | 'SELL' })
     ...overrides,
 })
 
-const makeConfirmedUnpromotedLog = (overrides: Partial<ConfirmedUnpromotedLog> & { side: 'BUY' | 'SELL' }): ConfirmedUnpromotedLog => ({
-    docId: `doc-${Math.random()}`,
-    event_id: `evt-${Math.random()}`,
-    broker: 'bitflyer',
-    ticker: 'BTC_JPY',
-    size: 0.01,
-    strategy: 'MA',
-    interval: '4H',
-    execution_price: 10000000,
-    created_at: new Date('2026-01-01'),
-    ...overrides,
-})
-
 const makeBaseCtx = (overrides: Partial<CronContext> = {}): CronContext => ({
     logger: makeLogger().logger,
     positionFetcher: makePositionFetcherStub(),
-    getConfirmedUnpromotedLogs: async () => [],
-    markOpenTradesWritten: async () => { },
     getOpenTrades: async () => [],
-    addOpenTrade: async () => { },
     deleteOpenTrade: async () => { },
     createTradeRecord: async () => { },
     ...overrides,
-})
-
-// ─────────────── promoteConfirmedLogsToOpenTrades ───────────────
-
-test('executeTenMinutelyTask: confirmed logs を open_trades に追加し markOpenTradesWritten を呼ぶ', async () => {
-    const confirmedLog = makeConfirmedUnpromotedLog({ side: 'BUY', docId: 'doc-1', event_id: 'evt-1' })
-    const addedTrades: OpenTrade[] = []
-    const markedDocIds: string[] = []
-
-    const ctx = makeBaseCtx({
-        getConfirmedUnpromotedLogs: async () => [confirmedLog],
-        markOpenTradesWritten: async (docId) => { markedDocIds.push(docId) },
-        addOpenTrade: async (trade) => { addedTrades.push(trade) },
-    })
-
-    await executeTenMinutelyTask(ctx)
-
-    assert.equal(addedTrades.length, 1)
-    assert.equal(addedTrades[0]?.event_id, 'evt-1')
-    assert.deepEqual(markedDocIds, ['doc-1'])
-})
-
-test('executeTenMinutelyTask: confirmed logs がゼロのとき何も追加しない', async () => {
-    const addedTrades: OpenTrade[] = []
-
-    const ctx = makeBaseCtx({
-        getConfirmedUnpromotedLogs: async () => [],
-        addOpenTrade: async (trade) => { addedTrades.push(trade) },
-    })
-
-    await executeTenMinutelyTask(ctx)
-
-    assert.equal(addedTrades.length, 0)
 })
 
 // ─────────────── matchAndRecordOpenTrades ───────────────
@@ -131,19 +81,15 @@ test('executeTenMinutelyTask: 同一方向のみで open_trades がいっぱい�
     assert.equal(createdRecords.length, 0)
 })
 
-test('executeTenMinutelyTask: open_trades フローは全 fn が揃っていないと実行されない', async () => {
+test('executeTenMinutelyTask: getOpenTrades がないとき matchAndRecord は実行されない', async () => {
     const { logger } = makeLogger()
     let called = false
 
-    // 全fnが揁わっていない CronContext
+    // getOpenTrades は省略
     const ctx: CronContext = {
         logger,
         positionFetcher: makePositionFetcherStub(),
-        // getConfirmedUnpromotedLogs は省略
-        markOpenTradesWritten: async () => { },
-        getOpenTrades: async () => { called = true; return [] },
-        addOpenTrade: async () => { },
-        deleteOpenTrade: async () => { },
+        deleteOpenTrade: async () => { called = true },
         createTradeRecord: async () => { },
     }
 

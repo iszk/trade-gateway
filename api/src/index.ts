@@ -11,8 +11,8 @@ import type { BrokerBalance } from './types/balance.js'
 import type { Position } from './types/position.js'
 import { DuplicateEventError, createDefaultWebhookEventFn } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
-import { createDefaultOrderDispatchLogFn, createDefaultGetPendingExecutionLogsFn, createDefaultUpdateExecutionPriceFn, createDefaultGetConfirmedUnpromotedLogsFn, createDefaultMarkOpenTradesWrittenFn } from './services/order-dispatch-logs.js'
-import type { CreateOrderDispatchLogFn, GetPendingExecutionLogsFn, UpdateExecutionPriceFn, GetConfirmedUnpromotedLogsFn, MarkOpenTradesWrittenFn } from './services/order-dispatch-logs.js'
+import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
+import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn } from './services/trade-records.js'
 import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn } from './services/trade-records.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
@@ -215,10 +215,6 @@ type CreateAppOptions = {
     positionFetcher?: PositionFetcherLike
     slotScheduler?: SlotScheduler
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
-    getPendingExecutionLogs?: GetPendingExecutionLogsFn
-    updateExecutionPrice?: UpdateExecutionPriceFn
-    getConfirmedUnpromotedLogs?: GetConfirmedUnpromotedLogsFn
-    markOpenTradesWritten?: MarkOpenTradesWrittenFn
     getOpenTrades?: GetOpenTradesFn
     addOpenTrade?: AddOpenTradeFn
     deleteOpenTrade?: DeleteOpenTradeFn
@@ -246,10 +242,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const balanceFetcher = options.balanceFetcher ?? new BalanceFetcher()
     const requireApiSecret = createApiSecretAuthMiddleware(apiSecret)
     const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
-    const getPendingExecutionLogs = options.getPendingExecutionLogs ?? createDefaultGetPendingExecutionLogsFn()
-    const updateExecutionPrice = options.updateExecutionPrice ?? createDefaultUpdateExecutionPriceFn()
-    const getConfirmedUnpromotedLogs = options.getConfirmedUnpromotedLogs ?? createDefaultGetConfirmedUnpromotedLogsFn()
-    const markOpenTradesWritten = options.markOpenTradesWritten ?? createDefaultMarkOpenTradesWrittenFn()
     const getOpenTrades = options.getOpenTrades ?? createDefaultGetOpenTradesFn()
     const addOpenTrade = options.addOpenTrade ?? createDefaultAddOpenTradeFn()
     const deleteOpenTrade = options.deleteOpenTrade ?? createDefaultDeleteOpenTradeFn()
@@ -279,14 +271,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
         logger,
         positionFetcher,
         executionPriceFetchers: options.executionPriceFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
-        getPendingExecutionLogs,
-        updateExecutionPrice,
-        getConfirmedUnpromotedLogs,
-        markOpenTradesWritten,
         getPendingExecutionOpenTrades,
         updateOpenTradeExecutionPrice,
         getOpenTrades,
-        addOpenTrade,
         deleteOpenTrade,
         createTradeRecord,
     }
@@ -712,8 +699,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
             ticker: payload.ticker,
             side: payload.side,
             size: payload.size,
-            ...(payload.strategy !== undefined ? { strategy: payload.strategy } : {}),
-            ...(payload.interval !== undefined ? { interval: payload.interval } : {}),
             provider_order_id: orderResult.ok ? orderResult.providerOrderId : undefined,
             request_payload: {
                 eventId: effectiveEventId,

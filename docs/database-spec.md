@@ -61,7 +61,7 @@ OpenID 連携情報を保持する。
 - 重複イベント自体は `webhook_events` に新規保存しない（監査はアプリログで補完）
 
 ## 3. `order_dispatch_logs`
-ブローカーへの発注試行を保持する。cron により約定価格の事後取得、および `open_trades` への昇格状態を管理する。
+ブローカーへの発注試行ログを保持する。
 
 ### ドキュメント ID
 - 自動採番 ID
@@ -72,12 +72,7 @@ OpenID 連携情報を保持する。
 - `ticker` (string, required)
 - `side` (string, required) — `BUY` | `SELL`
 - `size` (number, required)
-- `strategy` (string, optional)
-- `interval` (string, optional)
-- `price` (number, optional) — webhook 受信時点の参考価格
 - `provider_order_id` (string, optional) — ブローカー側の注文 ID
-- `execution_price` (number, optional) — 約定価格（cron で事後取得・更新）
-- `open_trades_written` (boolean, required, default: `false`) — `open_trades` への書き込み済みフラグ
 - `request_payload` (map, required)
 - `response_payload` (map, optional)
 - `result` (string, required)
@@ -104,7 +99,7 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 
 ## 5. `open_trades`
 
-ペアリング待ちの未決済トレードを保持する。cron が `order_dispatch_logs` の成功かつ `execution_price` 確定済みレコードを昇格させて生成し、エントリー/エグジットのペアが揃い次第 `trade_records` に変換して削除される。
+ペアリング待ちの未決済トレードを保持する。webhook 受信時に即時作成し、cron が `execution_price` を確定する。エントリー/エグジットのペアが揃い次第 `trade_records` に変換して削除される。
 
 ### ドキュメント ID
 - `event_id`（対応する `webhook_events` の `event_id`）
@@ -117,9 +112,10 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 - `size` (number, required)
 - `strategy` (string, required)
 - `interval` (string, required)
-- `execution_price` (number, required)
+- `execution_price` (number | null, required) — webhook 受信時は `null`、cron で確定後に数値
+- `provider_order_id` (string, optional) — ブローカー側の注文 ID
 - `created_at` (timestamp, required)
-- `order_dispatch_log_id` (string, required) — 紐付く `order_dispatch_logs` のドキュメント ID
+- `order_dispatch_log_id` (string, optional) — 紐付く `order_dispatch_logs` のドキュメント ID
 
 ### 制約
 - ドキュメント ID = `event_id` で idempotent upsert（`set` 呼び出し）を使用する
@@ -169,7 +165,6 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 ## インデックス（MVP）
 - Firestore の単一フィールドインデックスはデフォルト利用
 - 追加の複合インデックス（必要時のみ）
-  - `order_dispatch_logs`: `result` 昇順 + `open_trades_written` 昇順
   - `order_dispatch_logs`: `result` 昇順 + `created_at` 降順
 - `oidc_connections` はドキュメント ID 参照を基本とし、複合インデックスは不要
 
