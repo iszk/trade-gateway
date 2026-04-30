@@ -92,7 +92,12 @@ const fetchAndUpdateExecutionPricesFromOpenTrades = async (ctx: {
                 )
             } else {
                 ctx.logger.info(
-                    { event: 'cron:open_trades_execution_price_not_found', broker: trade.broker, eventId: trade.event_id },
+                    {
+                        event: 'cron:open_trades_execution_price_not_found',
+                        broker: trade.broker, eventId: trade.event_id,
+                        provider_order_id: trade.provider_order_id,
+                        ticker: trade.ticker,
+                    },
                     'open_trades execution price not found',
                 )
             }

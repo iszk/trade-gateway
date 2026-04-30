@@ -582,7 +582,15 @@ export class SaxoClient {
             }
 
             const data = (await response.json()) as SaxoOrderActivitiesResponse
-            if (!data.Data || data.Data.length === 0) return null
+            if (!data.Data || data.Data.length === 0) {
+                this.logger.warn(
+                    {
+                        event: 'saxo:get_execution_price_no_activities', orderId,
+                    },
+                    'no activities found for order in Saxo audit',
+                )
+                return null
+            }
 
             const fillActivity = data.Data.find((a) =>
                 (a.Status === 'FinalFill' || a.Status === 'Fill') && a.AveragePrice !== undefined
@@ -596,6 +604,14 @@ export class SaxoClient {
             if (anyWithPrice?.AveragePrice !== undefined) {
                 return anyWithPrice.AveragePrice
             }
+
+            this.logger.warn(
+                {
+                    event: 'saxo:get_execution_price_no_fill', orderId,
+                    activities: data.Data.map((a) => ({ LogId: a.LogId, Status: a.Status, AveragePrice: a.AveragePrice })),
+                },
+                'no fill activity with price found for order in Saxo audit',
+            )
 
             return null
         } catch (error) {
