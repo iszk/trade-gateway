@@ -34,7 +34,7 @@ const DEFAULT_ALLOWLIST = [
     '52.32.178.7',
 ]
 
-const tradingViewWebhookSchema = z.object({
+const baseWebhookSchema = z.object({
     event_id: z.string().min(1).optional(),
     time: z.string().datetime(), // ISO 8601形式
     occurred_at: z.preprocess((val) => {
@@ -44,7 +44,6 @@ const tradingViewWebhookSchema = z.object({
         }
         return val
     }, z.number().int().nonnegative()),
-    ticker: z.string().min(1).optional(),
     side: z.preprocess((val) => {
         if (typeof val !== 'string') return val
         const upper = val.toUpperCase()
@@ -56,8 +55,6 @@ const tradingViewWebhookSchema = z.object({
     size: z.number().positive(),
     price: z.number().optional(),
     interval: z.string().optional(),
-    webhook_secret: z.string().min(1),
-    broker: z.string().optional(),
     strategy: z.string().optional(),
     note: z.string().optional(),
     dry_run: z.boolean().optional(),
@@ -65,6 +62,12 @@ const tradingViewWebhookSchema = z.object({
     take_profit: z.string().optional(),
     symbol: z.string().min(1), // "brokerName:brokerTickerCode" の形式
 })
+
+const tradingViewWebhookSchema = baseWebhookSchema.extend({
+    webhook_secret: z.string().min(1),
+})
+
+const fooWebhookSchema = baseWebhookSchema
 
 const parseIpAllowlist = (): Set<string> => {
     const fromEnv = process.env.TRADINGVIEW_IP_ALLOWLIST
@@ -328,6 +331,266 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }, reqLogger)
     }
 
+    type WebhookPayload = z.infer<typeof baseWebhookSchema> & {
+        broker: string
+        ticker: string
+        webhook_secret?: string
+    }
+
+    const createWebhookHandler = ({
+        schema,
+        source,
+        checkSourceIp = false,
+        checkWebhookSecret = false,
+    }: {
+        schema: z.ZodTypeAny
+        source: string
+        checkSourceIp?: boolean
+        checkWebhookSecret?: boolean
+    }) => async (c: Context) => {
+        const requestId = getRequestId(c.req.raw.headers)
+        const sourceIp = extractSourceIp(c.req.raw.headers)
+        const reqLogger = logger.child(extractTraceContext(c.req.raw.headers))
+
+        c.header('x-request-id', requestId)
+
+        if (checkSourceIp && (!sourceIp || !sourceIpAllowlist.has(sourceIp))) {
+            logWebhookRejected({
+                requestId,
+                reason: 'forbidden_source_ip',
+                sourceIp,
+                error: errorBody('FORBIDDEN_SOURCE_IP', 'source ip is not allowed').error,
+                reqLogger,
+            })
+            return c.json(errorBody('FORBIDDEN_SOURCE_IP', 'source ip is not allowed'), 403)
+        }
+
+        const contentType = c.req.header('content-type')
+        if (!contentType || !contentType.includes('application/json')) {
+            const rawBody = await c.req.text()
+            logWebhookRejected({
+                requestId,
+                reason: 'invalid_content_type',
+                sourceIp,
+                contentType,
+                rawBody,
+                error: errorBody('INVALID_REQUEST', 'content-type must be application/json').error,
+                reqLogger,
+            })
+            return c.json(errorBody('INVALID_REQUEST', 'content-type must be application/json'), 400)
+        }
+
+        const rawBody = await c.req.text()
+        let jsonPayload: unknown
+
+        try {
+            jsonPayload = JSON.parse(rawBody)
+        } catch (error) {
+            logWebhookRejected({
+                requestId,
+                reason: 'invalid_json',
+                sourceIp,
+                contentType,
+                rawBody,
+                error: errorBody('INVALID_REQUEST', 'invalid JSON body').error,
+                parseError: error instanceof Error ? error.message : String(error),
+                reqLogger,
+            })
+            return c.json(errorBody('INVALID_REQUEST', 'invalid JSON body'), 400)
+        }
+
+        logWebhook('info', 'webhook:received', {
+            request_id: requestId,
+            sourceIp,
+            contentType,
+            payload: redactSecrets(jsonPayload),
+        }, reqLogger)
+
+        const parsed = schema.safeParse(jsonPayload)
+
+        if (!parsed.success) {
+            const message = parsed.error.issues
+                .map((issue: z.ZodIssue) => `${issue.path.join('.') || 'body'}: ${issue.message}`)
+                .join('; ')
+
+            logWebhookRejected({
+                requestId,
+                reason: 'validation_error',
+                sourceIp,
+                contentType,
+                rawBody,
+                payload: jsonPayload,
+                error: errorBody('INVALID_REQUEST', message).error,
+                reqLogger,
+            })
+            return c.json(errorBody('INVALID_REQUEST', message), 400)
+        }
+
+        const payload: WebhookPayload = {
+            ...(parsed.data as WebhookPayload),
+            broker: '',
+            ticker: '',
+        }
+
+        const [symbolBroker, ...symbolParts] = payload.symbol.split(':')
+        const symbolTicker = symbolParts.join(':')
+        if (symbolBroker && symbolTicker) {
+            payload.broker = symbolBroker.toLowerCase()
+            payload.ticker = symbolTicker
+        } else {
+            logger.warn({ symbol: payload.symbol }, "invalid symbol format, expected 'brokerName:brokerTickerCode'")
+            payload.broker = 'unknown'
+            payload.ticker = payload.symbol
+        }
+
+        const effectiveEventId = payload.event_id ?? [
+            String(new Date(payload.time).getTime()),
+            payload.symbol,
+            payload.interval ?? 'no_interval',
+            payload.strategy ? payload.strategy.replace(/\s+/g, '_') : 'no_strategy',
+            payload.side,
+        ].join('-')
+        payload.event_id = effectiveEventId
+
+        if (checkWebhookSecret && payload.webhook_secret !== webhookSecret) {
+            logWebhookRejected({
+                requestId,
+                reason: 'invalid_webhook_secret',
+                sourceIp,
+                contentType,
+                rawBody,
+                payload,
+                error: errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid').error,
+                reqLogger,
+            })
+            return c.json(errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid'), 401)
+        }
+
+        try {
+            await createWebhookEvent({
+                event_id: effectiveEventId,
+                source,
+                broker: payload.broker,
+                symbol: payload.ticker,
+                side: payload.side,
+                order_type: payload.order_type ?? 'MARKET',
+                size: payload.size,
+                occurred_at: new Date(payload.occurred_at),
+                received_at: new Date(),
+                status: 'accepted',
+            })
+        } catch (error) {
+            if (error instanceof DuplicateEventError) {
+                logWebhookRejected({
+                    requestId,
+                    reason: 'duplicated_event',
+                    sourceIp,
+                    contentType,
+                    rawBody,
+                    payload,
+                    eventId: effectiveEventId,
+                    error: errorBody('DUPLICATED_EVENT', 'event_id is duplicated').error,
+                    reqLogger,
+                })
+                return c.json(errorBody('DUPLICATED_EVENT', 'event_id is duplicated'), 409)
+            }
+            throw error
+        }
+
+        const orderResult = await dispatchOrder({
+            eventId: effectiveEventId,
+            broker: payload.broker as BrokerName || undefined,
+            ticker: payload.ticker,
+            side: payload.side,
+            size: payload.size,
+            requestId,
+            ...(payload.dry_run ? { dryRun: true } : {}),
+            ...(payload.price !== undefined ? { price: payload.price } : {}),
+            ...(payload.stop_loss ? { stopLoss: payload.stop_loss } : {}),
+            ...(payload.take_profit ? { takeProfit: payload.take_profit } : {}),
+        })
+
+        if (!orderResult.ok) {
+            logWebhook('warn', 'webhook:rejected', {
+                request_id: requestId,
+                reason: 'broker_dispatch_failed',
+                sourceIp,
+                event_id: effectiveEventId,
+                error: {
+                    code: orderResult.code,
+                    message: orderResult.message,
+                },
+                payload: redactSecrets(payload),
+            }, reqLogger)
+        }
+
+        const dispatchLogData = {
+            event_id: effectiveEventId,
+            broker: payload.broker,
+            ticker: payload.ticker,
+            side: payload.side,
+            size: payload.size,
+            provider_order_id: orderResult.ok ? orderResult.providerOrderId : undefined,
+            request_payload: {
+                eventId: effectiveEventId,
+                broker: payload.broker,
+                ticker: payload.ticker,
+                side: payload.side,
+                size: payload.size,
+                requestId,
+            },
+            response_payload: orderResult.ok
+                ? { providerOrderId: orderResult.providerOrderId }
+                : undefined,
+            result: (orderResult.ok ? 'success' : 'failure') as 'success' | 'failure',
+            error_code: orderResult.ok ? undefined : orderResult.code,
+        }
+        createOrderDispatchLog(dispatchLogData).catch((err) => {
+            reqLogger.warn({ event: 'dispatch_log:failed', error: err, data: dispatchLogData }, 'failed to write order dispatch log')
+        })
+
+        // Phase 2 新フロー: dispatch 成功 & strategy/interval あり時に open_trades を即時作成
+        // execution_price は null で記録し、cron が後から確定させる
+        if (orderResult.ok && payload.strategy !== undefined && payload.interval !== undefined) {
+            addOpenTrade({
+                event_id: effectiveEventId,
+                broker: payload.broker,
+                ticker: payload.ticker,
+                side: payload.side,
+                size: payload.size,
+                strategy: payload.strategy,
+                interval: payload.interval,
+                execution_price: null,
+                created_at: new Date(),
+                provider_order_id: orderResult.providerOrderId,
+            }).catch((err) => {
+                reqLogger.warn({ event: 'open_trade:create_failed', error: err, eventId: effectiveEventId }, 'failed to write open_trade')
+            })
+        }
+
+        const { webhook_secret: _secret, ...safePayload } = payload
+        logWebhook('info', 'webhook:accepted', {
+            request_id: requestId,
+            sourceIp,
+            payload: {
+                ...safePayload,
+                dispatch_result: orderResult.ok
+                    ? {
+                        status: 'success',
+                        broker: orderResult.broker,
+                        provider_order_id: orderResult.providerOrderId,
+                    }
+                    : {
+                        status: 'failed',
+                        broker: orderResult.broker,
+                        code: orderResult.code,
+                    },
+            },
+        }, reqLogger)
+
+        return c.json({ status: 'accepted', event_id: effectiveEventId }, 202)
+    }
+
     app.get('/', (c) => c.json({ hello: 'world' }))
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
     app.get('/favicon.ico', (c) => c.body(null, 204))
@@ -502,269 +765,17 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
     })
 
-    app.post('/api/webhooks/tradingview', async (c) => {
-        const requestId = getRequestId(c.req.raw.headers)
-        const sourceIp = extractSourceIp(c.req.raw.headers)
-        const reqLogger = logger.child(extractTraceContext(c.req.raw.headers))
+    app.post('/api/webhooks/tradingview', createWebhookHandler({
+        schema: tradingViewWebhookSchema,
+        source: 'tradingview',
+        checkSourceIp: true,
+        checkWebhookSecret: true,
+    }))
 
-        c.header('x-request-id', requestId)
-
-        if (!sourceIp || !sourceIpAllowlist.has(sourceIp)) {
-            logWebhookRejected({
-                requestId,
-                reason: 'forbidden_source_ip',
-                sourceIp,
-                error: errorBody('FORBIDDEN_SOURCE_IP', 'source ip is not allowed').error,
-                reqLogger,
-            })
-            return c.json(
-                errorBody('FORBIDDEN_SOURCE_IP', 'source ip is not allowed'),
-                403,
-            )
-        }
-
-        const contentType = c.req.header('content-type')
-        if (!contentType || !contentType.includes('application/json')) {
-            const rawBody = await c.req.text()
-
-            logWebhookRejected({
-                requestId,
-                reason: 'invalid_content_type',
-                sourceIp,
-                contentType,
-                rawBody,
-                error: errorBody('INVALID_REQUEST', 'content-type must be application/json')
-                    .error,
-                reqLogger,
-            })
-            return c.json(
-                errorBody('INVALID_REQUEST', 'content-type must be application/json'),
-                400,
-            )
-        }
-
-        const rawBody = await c.req.text()
-        let jsonPayload: unknown
-
-        try {
-            jsonPayload = JSON.parse(rawBody)
-        } catch (error) {
-            logWebhookRejected({
-                requestId,
-                reason: 'invalid_json',
-                sourceIp,
-                contentType,
-                rawBody,
-                error: errorBody('INVALID_REQUEST', 'invalid JSON body').error,
-                parseError: error instanceof Error ? error.message : String(error),
-                reqLogger,
-            })
-
-            return c.json(errorBody('INVALID_REQUEST', 'invalid JSON body'), 400)
-        }
-
-        logWebhook('info', 'webhook:received', {
-            request_id: requestId,
-            sourceIp,
-            contentType,
-            payload: redactSecrets(jsonPayload),
-        }, reqLogger)
-
-        const parsed = tradingViewWebhookSchema.safeParse(jsonPayload)
-
-        if (!parsed.success) {
-            const message = parsed.error.issues
-                .map((issue) => `${issue.path.join('.') || 'body'}: ${issue.message}`)
-                .join('; ')
-
-            logWebhookRejected({
-                requestId,
-                reason: 'validation_error',
-                sourceIp,
-                contentType,
-                rawBody,
-                payload: jsonPayload,
-                error: errorBody('INVALID_REQUEST', message).error,
-                reqLogger,
-            })
-
-            return c.json(errorBody('INVALID_REQUEST', message), 400)
-        }
-
-        const payload = {
-            ...parsed.data,
-            broker: '',
-            ticker: '',
-        }
-
-        const [symbolBroker, ...symbolParts] = payload.symbol.split(':')
-        const symbolTicker = symbolParts.join(':')
-        if (symbolBroker && symbolTicker) {
-            const normalizedBroker = symbolBroker.toLowerCase()
-            payload.broker = normalizedBroker
-            payload.ticker = symbolTicker
-        } else {
-            logger.warn({ "symbol": payload.symbol }, "invalid symbol format, expected 'brokerName:brokerTickerCode'")
-            payload.broker = 'unknown'
-            payload.ticker = payload.symbol
-        }
-
-        const effectiveEventId = payload.event_id ?? [
-            String(new Date(payload.time).getTime()),
-            payload.symbol,
-            payload.interval ?? 'no_interval',
-            payload.strategy ? payload.strategy.replace(/\s+/g, '_') : 'no_strategy',
-            payload.side,
-        ].join('-')
-        payload.event_id = effectiveEventId
-
-        if (payload.webhook_secret !== webhookSecret) {
-            logWebhookRejected({
-                requestId,
-                reason: 'invalid_webhook_secret',
-                sourceIp,
-                contentType,
-                rawBody,
-                payload,
-                error: errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid').error,
-                reqLogger,
-            })
-            return c.json(
-                errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid'),
-                401,
-            )
-        }
-
-        try {
-            await createWebhookEvent({
-                event_id: effectiveEventId,
-                source: 'tradingview',
-                broker: payload.broker,
-                symbol: payload.ticker,
-                side: payload.side,
-                order_type: payload.order_type ?? 'MARKET',
-                size: payload.size,
-                occurred_at: new Date(payload.occurred_at),
-                received_at: new Date(),
-                status: 'accepted',
-            })
-        } catch (error) {
-            if (error instanceof DuplicateEventError) {
-                logWebhookRejected({
-                    requestId,
-                    reason: 'duplicated_event',
-                    sourceIp,
-                    contentType,
-                    rawBody,
-                    payload,
-                    eventId: effectiveEventId,
-                    error: errorBody('DUPLICATED_EVENT', 'event_id is duplicated').error,
-                    reqLogger,
-                })
-                return c.json(errorBody('DUPLICATED_EVENT', 'event_id is duplicated'), 409)
-            }
-            throw error
-        }
-
-        const orderResult = await dispatchOrder({
-            eventId: effectiveEventId,
-            broker: payload.broker as BrokerName || undefined,
-            ticker: payload.ticker,
-            side: payload.side,
-            size: payload.size,
-            requestId,
-            ...(payload.dry_run ? { dryRun: true } : {}),
-            ...(payload.price !== undefined ? { price: payload.price } : {}),
-            ...(payload.stop_loss ? { stopLoss: payload.stop_loss } : {}),
-            ...(payload.take_profit ? { takeProfit: payload.take_profit } : {}),
-        })
-
-        if (!orderResult.ok) {
-            logWebhook('warn', 'webhook:rejected', {
-                request_id: requestId,
-                reason: 'broker_dispatch_failed',
-                sourceIp,
-                event_id: effectiveEventId,
-                error: {
-                    code: orderResult.code,
-                    message: orderResult.message,
-                },
-                payload: redactSecrets(payload),
-            }, reqLogger)
-        }
-
-        const dispatchLogData = {
-            event_id: effectiveEventId,
-            broker: payload.broker,
-            ticker: payload.ticker,
-            side: payload.side,
-            size: payload.size,
-            provider_order_id: orderResult.ok ? orderResult.providerOrderId : undefined,
-            request_payload: {
-                eventId: effectiveEventId,
-                broker: payload.broker,
-                ticker: payload.ticker,
-                side: payload.side,
-                size: payload.size,
-                requestId,
-            },
-            response_payload: orderResult.ok
-                ? { providerOrderId: orderResult.providerOrderId }
-                : undefined,
-            result: (orderResult.ok ? 'success' : 'failure') as 'success' | 'failure',
-            error_code: orderResult.ok ? undefined : orderResult.code,
-        }
-        createOrderDispatchLog(dispatchLogData).catch((err) => {
-            reqLogger.warn({ event: 'dispatch_log:failed', error: err, data: dispatchLogData }, 'failed to write order dispatch log')
-        })
-
-        // Phase 2 新フロー: dispatch 成功 & strategy/interval あり時に open_trades を即時作成
-        // execution_price は null で記録し、cron が後から確定させる
-        if (orderResult.ok && payload.strategy !== undefined && payload.interval !== undefined) {
-            addOpenTrade({
-                event_id: effectiveEventId,
-                broker: payload.broker,
-                ticker: payload.ticker,
-                side: payload.side,
-                size: payload.size,
-                strategy: payload.strategy,
-                interval: payload.interval,
-                execution_price: null,
-                created_at: new Date(),
-                provider_order_id: orderResult.providerOrderId,
-            }).catch((err) => {
-                reqLogger.warn({ event: 'open_trade:create_failed', error: err, eventId: effectiveEventId }, 'failed to write open_trade')
-            })
-        }
-
-        const { webhook_secret: _, ...safePayload } = payload
-        logWebhook('info', 'webhook:accepted', {
-            request_id: requestId,
-            sourceIp,
-            payload: {
-                ...safePayload,
-                dispatch_result: orderResult.ok
-                    ? {
-                        status: 'success',
-                        broker: orderResult.broker,
-                        provider_order_id: orderResult.providerOrderId,
-                    }
-                    : {
-                        status: 'failed',
-                        broker: orderResult.broker,
-                        code: orderResult.code,
-                    },
-            },
-        }, reqLogger)
-
-        return c.json(
-            {
-                status: 'accepted',
-                event_id: effectiveEventId,
-            },
-            202,
-        )
-    })
+    app.post('/api/webhooks/foo', requireApiSecret, createWebhookHandler({
+        schema: fooWebhookSchema,
+        source: 'foo',
+    }))
 
     return app
 }

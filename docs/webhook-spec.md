@@ -30,8 +30,6 @@ TradingView から受信するアラートを正規化し、bitFlyer 向け発�
 
 ### 任意項目
 - `event_id` (string): 送信元で一意となるイベントID。未指定時は `time`, `symbol`, `side` などから自動生成される。
-- `broker` (string): 発注先ブローカー。（※ `symbol` に含まれるため実質的に非推奨・無視される）
-- `ticker` (string): 取引銘柄。（※ `symbol` に含まれるため実質的に非推奨・無視される）
 - `order_type` (string): 指定時は `MARKET` のみ許可
 - `price` (number): 価格情報。`stop_loss` / `take_profit` を使用する場合は必須
 - `interval` (string): TradingView の時間足

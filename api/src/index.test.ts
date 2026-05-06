@@ -690,3 +690,187 @@ test('POST /api/webhooks/tradingview: dispatch 失敗時は addOpenTrade を呼�
     assert.equal(res.status, 202)
     assert.equal(addedTrades.length, 0)
 })
+
+// ---------------------------------------------------------------------------
+// /api/webhooks/foo tests
+// ---------------------------------------------------------------------------
+
+const makeFooPayload = (eventId: string) => ({
+    event_id: eventId,
+    time: new Date().toISOString(),
+    occurred_at: 1773837296000,
+    symbol: 'bitflyer:BTC_JPY',
+    side: 'BUY',
+    order_type: 'MARKET',
+    size: 0.01,
+})
+
+const postFooWebhook = async (
+    app: ReturnType<typeof createApp>,
+    payload: unknown,
+    apiSecret = 'test-secret',
+    sourceIp = '1.2.3.4',
+) => {
+    return app.request('/api/webhooks/foo', {
+        method: 'POST',
+        headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': sourceIp,
+            ...(apiSecret ? { Authorization: `Bearer ${apiSecret}` } : {}),
+        },
+        body: JSON.stringify(payload),
+    })
+}
+
+test('POST /api/webhooks/foo returns 401 without Authorization header', async () => {
+    const app = createAppForTests({ apiSecret: 'test-secret' })
+    const res = await app.request('/api/webhooks/foo', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(makeFooPayload('evt-foo-unauth-1')),
+    })
+    const body = await res.json()
+    assert.equal(res.status, 401)
+    assert.equal(body.error.code, 'UNAUTHORIZED')
+})
+
+test('POST /api/webhooks/foo returns 401 with wrong API secret', async () => {
+    const app = createAppForTests({ apiSecret: 'test-secret' })
+    const res = await postFooWebhook(app, makeFooPayload('evt-foo-unauth-2'), 'wrong-secret')
+    const body = await res.json()
+    assert.equal(res.status, 401)
+    assert.equal(body.error.code, 'UNAUTHORIZED')
+})
+
+test('POST /api/webhooks/foo returns 202 on valid payload with correct API secret', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const { logger, calls } = createLoggerStub()
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        dispatchOrder,
+        createWebhookEvent,
+        logger,
+    })
+
+    const payload = makeFooPayload('evt-foo-accepted-1')
+    const res = await postFooWebhook(app, payload)
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(body, { status: 'accepted', event_id: 'evt-foo-accepted-1' })
+    assert.equal(dispatchCalls.length, 1)
+    assert.deepEqual(dispatchCalls[0], {
+        eventId: 'evt-foo-accepted-1',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.01,
+        requestId: calls[0]?.request_id,
+    })
+})
+
+test('POST /api/webhooks/foo accepts any source IP', async () => {
+    const { dispatchOrder } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const res = await postFooWebhook(app, makeFooPayload('evt-foo-any-ip'), 'test-secret', '9.9.9.9')
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.equal(body.status, 'accepted')
+})
+
+test('POST /api/webhooks/foo ignores webhook_secret field in body', async () => {
+    const { dispatchOrder } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        webhookSecret: 'real-secret',
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const payload = { ...makeFooPayload('evt-foo-no-body-secret'), webhook_secret: 'wrong-secret' }
+    const res = await postFooWebhook(app, payload)
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.equal(body.status, 'accepted')
+})
+
+test('POST /api/webhooks/foo returns 400 for invalid content-type', async () => {
+    const app = createAppForTests({ apiSecret: 'test-secret' })
+    const res = await app.request('/api/webhooks/foo', {
+        method: 'POST',
+        headers: {
+            'content-type': 'text/plain',
+            Authorization: 'Bearer test-secret',
+        },
+        body: 'hello',
+    })
+    const body = await res.json()
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'INVALID_REQUEST')
+    assert.match(body.error.message, /application\/json/)
+})
+
+test('POST /api/webhooks/foo returns 400 on validation error', async () => {
+    const app = createAppForTests({ apiSecret: 'test-secret' })
+    const payload = { ...makeFooPayload('evt-foo-invalid'), time: 'bad-date' }
+    const res = await postFooWebhook(app, payload)
+    const body = await res.json()
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'INVALID_REQUEST')
+    assert.match(body.error.message, /time/)
+})
+
+test('POST /api/webhooks/foo returns 409 on duplicate event_id', async () => {
+    const { dispatchOrder } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const first = await postFooWebhook(app, makeFooPayload('evt-foo-dup-1'))
+    const second = await postFooWebhook(app, makeFooPayload('evt-foo-dup-1'))
+    const body = await second.json()
+
+    assert.equal(first.status, 202)
+    assert.equal(second.status, 409)
+    assert.equal(body.error.code, 'DUPLICATED_EVENT')
+})
+
+test('POST /api/webhooks/foo: dispatch 成功 & strategy/interval あり時に addOpenTrade を呼ぶ', async () => {
+    const { createWebhookEvent } = createWebhookEventStub()
+    const { dispatchOrder } = createDispatchStub()
+    const addedTrades: OpenTrade[] = []
+
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        createWebhookEvent,
+        dispatchOrder,
+        addOpenTrade: async (trade) => { addedTrades.push(trade) },
+    })
+
+    const res = await postFooWebhook(app, {
+        ...makeFooPayload('evt-foo-open-trade-1'),
+        strategy: 'MA Crossover',
+        interval: '4H',
+    })
+
+    assert.equal(res.status, 202)
+    assert.equal(addedTrades.length, 1)
+    assert.equal(addedTrades[0]?.event_id, 'evt-foo-open-trade-1')
+    assert.equal(addedTrades[0]?.execution_price, null)
+    assert.equal(addedTrades[0]?.strategy, 'MA Crossover')
+    assert.equal(addedTrades[0]?.interval, '4H')
+})
