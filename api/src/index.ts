@@ -694,12 +694,22 @@ export const createApp = (options: CreateAppOptions = {}) => {
         toStr: string | undefined,
     ): { from: Date; to: Date } | { error: string } => {
         const now = new Date()
-        const defaultFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
-        const from = fromStr ? new Date(fromStr) : defaultFrom
-        const to = toStr ? new Date(toStr) : now
+        const toJSTDateStr = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'Asia/Tokyo' })
+        const defaultFromStr = toJSTDateStr(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000))
+        const defaultToStr = toJSTDateStr(now)
+
+        const fromDateStr = fromStr ?? defaultFromStr
+        const toDateStr = toStr ?? defaultToStr
+
+        // 日付文字列を JST 00:00 として解釈する
+        const from = new Date(`${fromDateStr}T00:00:00+09:00`)
+        // to は「指定日の翌日 00:00 JST」を排他的上限とする
+        const toMidnight = new Date(`${toDateStr}T00:00:00+09:00`)
+        const to = new Date(toMidnight.getTime() + 24 * 60 * 60 * 1000)
+
         if (isNaN(from.getTime())) return { error: `invalid 'from' date: ${fromStr}` }
         if (isNaN(to.getTime())) return { error: `invalid 'to' date: ${toStr}` }
-        if (from > to) return { error: "'from' must be before 'to'" }
+        if (from >= to) return { error: "'from' must be before 'to'" }
         return { from, to }
     }
 

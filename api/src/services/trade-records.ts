@@ -297,7 +297,7 @@ export const getTradeRecordsFn = (db: Firestore): GetTradeRecordsFn => {
         const snapshot = await db
             .collection('trade_records')
             .where('opened_at', '>=', filter.from)
-            .where('opened_at', '<=', filter.to)
+            .where('opened_at', '<', filter.to)
             .orderBy('opened_at', 'desc')
             .get()
 

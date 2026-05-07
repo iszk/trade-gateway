@@ -9,14 +9,15 @@ const fmt = (n: number | null | undefined, digits = 2): string => {
 
 const pct = (n: number): string => `${(n * 100).toFixed(1)}%`
 
-const toDateInputValue = (d: Date): string => d.toISOString().slice(0, 10)
+const toDateInputValue = (d: Date): string =>
+  d.toLocaleDateString('en-CA', { timeZone: 'Asia/Tokyo' })
 
 export default createRoute(async (c) => {
   const now = new Date()
   const defaultFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
 
   const fromParam = c.req.query('from') || toDateInputValue(defaultFrom)
-  const toParam = c.req.query('to') || toDateInputValue(new Date(now.getTime() + 24 * 60 * 60 * 1000)) // include today by default
+  const toParam = c.req.query('to') || toDateInputValue(now)
   const strategyParam = c.req.query('strategy') || ''
   const intervalParam = c.req.query('interval') || ''
   const tickerParam = c.req.query('ticker') || ''
@@ -238,8 +239,8 @@ export default createRoute(async (c) => {
                   <tbody>
                     {recordsData.records.map((r, i) => (
                       <tr key={i} class="border-b hover:bg-gray-50">
-                        <td class="px-4 py-3 text-xs">{new Date(r.opened_at).toLocaleString('ja-JP')}</td>
-                        <td class="px-4 py-3 text-xs">{new Date(r.closed_at).toLocaleString('ja-JP')}</td>
+                        <td class="px-4 py-3 text-xs">{new Date(r.opened_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
+                        <td class="px-4 py-3 text-xs">{new Date(r.closed_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
                         <td class="px-4 py-3">{r.strategy}</td>
                         <td class="px-4 py-3">{r.interval}</td>
                         <td class="px-4 py-3">{r.ticker}</td>
