@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import { executeTenMinutelyTask } from './cron-tasks.js'
 import type { CronContext } from './cron-tasks.js'
+import type { ConfirmedIfdOpenTrade } from './trade-records.js'
 import type { OpenTrade, PendingExecutionOpenTrade } from './trade-records.js'
 
 const makeLogger = () => {
@@ -144,4 +145,118 @@ test('executeTenMinutelyTask: open_trades の execution_price が null を返す
     await executeTenMinutelyTask(ctx)
 
     assert.equal(updatedTrades.length, 0)
+})
+
+// ─────────────── IFD/IFDOCO: resolveIfdLikeTrades ───────────────
+
+const makeConfirmedIfdTrade = (overrides: Partial<ConfirmedIfdOpenTrade> & { side: 'BUY' | 'SELL' }): ConfirmedIfdOpenTrade => ({
+    event_id: `evt-ifd-${Math.random()}`,
+    broker: 'bitflyer',
+    ticker: 'FX_BTC_JPY',
+    size: 0.01,
+    strategy: 'MA',
+    interval: '4H',
+    execution_price: 10000000,
+    created_at: new Date('2026-01-01'),
+    provider_order_id: `PAR-${Math.random()}`,
+    order_method: 'IFDOCO',
+    ...overrides,
+})
+
+test('executeTenMinutelyTask: IFD/IFDOCO の決済約定が確認できたとき trade_record を作成して open_trade を削除する', async () => {
+    const trade = makeConfirmedIfdTrade({
+        side: 'BUY',
+        event_id: 'evt-ifd-1',
+        execution_price: 10000000,
+        size: 0.01,
+    })
+
+    const createdRecords: unknown[] = []
+    const deletedEventIds: string[] = []
+
+    const ctx = makeBaseCtx({
+        getConfirmedIfdOpenTrades: async () => [trade],
+        closingExecutionFetchers: {
+            bitflyer: { getClosingExecution: async () => ({ price: 11000000 }) },
+        },
+        deleteOpenTrade: async (id) => { deletedEventIds.push(id) },
+        createTradeRecord: async (r) => { createdRecords.push(r) },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(createdRecords.length, 1)
+    const record = createdRecords[0] as Record<string, unknown>
+    assert.equal(record.entry_price, 10000000)
+    assert.equal(record.exit_price, 11000000)
+    assert.ok(Math.abs((record.pnl as number) - 10000) < 0.001) // (11000000 - 10000000) * 0.01
+    assert.equal(deletedEventIds.length, 1)
+    assert.ok(deletedEventIds.includes('evt-ifd-1'))
+})
+
+test('executeTenMinutelyTask: IFD/IFDOCO の決済約定がまだのとき何もしない', async () => {
+    const trade = makeConfirmedIfdTrade({ side: 'BUY', event_id: 'evt-ifd-2' })
+
+    const createdRecords: unknown[] = []
+    const deletedEventIds: string[] = []
+
+    const ctx = makeBaseCtx({
+        getConfirmedIfdOpenTrades: async () => [trade],
+        closingExecutionFetchers: {
+            bitflyer: { getClosingExecution: async () => null },
+        },
+        deleteOpenTrade: async (id) => { deletedEventIds.push(id) },
+        createTradeRecord: async (r) => { createdRecords.push(r) },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(createdRecords.length, 0)
+    assert.equal(deletedEventIds.length, 0)
+})
+
+test('executeTenMinutelyTask: IFD ショートの PnL を正しく計算する', async () => {
+    const trade = makeConfirmedIfdTrade({
+        side: 'SELL',
+        event_id: 'evt-ifd-short',
+        execution_price: 11000000,
+        size: 0.01,
+        order_method: 'IFD',
+    })
+
+    const createdRecords: unknown[] = []
+
+    const ctx = makeBaseCtx({
+        getConfirmedIfdOpenTrades: async () => [trade],
+        closingExecutionFetchers: {
+            bitflyer: { getClosingExecution: async () => ({ price: 10000000 }) },
+        },
+        createTradeRecord: async (r) => { createdRecords.push(r) },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(createdRecords.length, 1)
+    const record = createdRecords[0] as Record<string, unknown>
+    assert.equal(record.entry_side, 'SELL')
+    assert.ok(Math.abs((record.pnl as number) - 10000) < 0.001) // (11000000 - 10000000) * 0.01
+})
+
+test('executeTenMinutelyTask: getConfirmedIfdOpenTrades が未設定のとき IFD 解決は実行されない', async () => {
+    let closingFetcherCalled = false
+
+    const ctx = makeBaseCtx({
+        closingExecutionFetchers: {
+            bitflyer: {
+                getClosingExecution: async () => {
+                    closingFetcherCalled = true
+                    return null
+                },
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(closingFetcherCalled, false)
 })

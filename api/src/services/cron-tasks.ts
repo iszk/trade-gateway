@@ -1,8 +1,9 @@
-import type { CreateTradeRecordFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn } from './trade-records.js'
+import type { CreateTradeRecordFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn, ConfirmedIfdOpenTrade } from './trade-records.js'
 import { pairLogs } from './trade-records.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
+    warn(obj: Record<string, unknown>, msg?: string): void
 }
 
 type PositionFetcherLike = {
@@ -11,6 +12,10 @@ type PositionFetcherLike = {
 
 export type ExecutionPriceFetcherLike = {
     getExecutionPrice(providerOrderId: string, ticker: string): Promise<number | null>
+}
+
+export type ClosingExecutionFetcherLike = {
+    getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number } | null>
 }
 
 export type CronContext = {
@@ -22,6 +27,9 @@ export type CronContext = {
     getOpenTrades?: GetOpenTradesFn
     deleteOpenTrade?: DeleteOpenTradeFn
     createTradeRecord?: CreateTradeRecordFn
+    /** IFD/IFDOCO フロー用 */
+    getConfirmedIfdOpenTrades?: GetConfirmedIfdOpenTradesFn
+    closingExecutionFetchers?: Partial<Record<string, ClosingExecutionFetcherLike>>
 }
 
 const PAIRING_TIMEOUT_MS = 30_000
@@ -51,6 +59,17 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             deleteOpenTrade: ctx.deleteOpenTrade,
             createTradeRecord: ctx.createTradeRecord,
             timeoutMs: PAIRING_TIMEOUT_MS,
+        })
+    }
+
+    // IFD/IFDOCO フロー: 決済子注文の約定を確認して trade_record を直接生成
+    if (ctx.getConfirmedIfdOpenTrades && ctx.closingExecutionFetchers && ctx.deleteOpenTrade && ctx.createTradeRecord) {
+        await resolveIfdLikeTrades({
+            logger: ctx.logger,
+            getConfirmedIfdOpenTrades: ctx.getConfirmedIfdOpenTrades,
+            closingExecutionFetchers: ctx.closingExecutionFetchers,
+            deleteOpenTrade: ctx.deleteOpenTrade,
+            createTradeRecord: ctx.createTradeRecord,
         })
     }
 }
@@ -155,6 +174,83 @@ const matchAndRecordOpenTrades = async (ctx: {
             ctx.logger.info(
                 { event: 'cron:trade_record_create_failed', error },
                 'failed to create trade record',
+            )
+        }
+    }
+}
+
+/** IFD/IFDOCO フロー: 決済子注文の約定を確認し、約定済みなら trade_record を直接生成する */
+const resolveIfdLikeTrades = async (ctx: {
+    logger: Logger
+    getConfirmedIfdOpenTrades: GetConfirmedIfdOpenTradesFn
+    closingExecutionFetchers: Partial<Record<string, ClosingExecutionFetcherLike>>
+    deleteOpenTrade: DeleteOpenTradeFn
+    createTradeRecord: CreateTradeRecordFn
+}): Promise<void> => {
+    const trades = await ctx.getConfirmedIfdOpenTrades()
+    ctx.logger.info(
+        { event: 'cron:ifd_resolve_start', count: trades.length },
+        'resolving IFD/IFDOCO trades',
+    )
+
+    for (const trade of trades) {
+        const fetcher = ctx.closingExecutionFetchers[trade.broker]
+        if (!fetcher) {
+            ctx.logger.info(
+                { event: 'cron:ifd_closing_fetcher_missing', broker: trade.broker },
+                'no closing execution fetcher for broker',
+            )
+            continue
+        }
+
+        try {
+            const closing = await fetcher.getClosingExecution(trade.provider_order_id, trade.ticker)
+            if (closing === null) {
+                ctx.logger.info(
+                    { event: 'cron:ifd_closing_not_yet', broker: trade.broker, eventId: trade.event_id },
+                    'closing order not yet executed, will retry next cron',
+                )
+                continue
+            }
+
+            const isLong = trade.side === 'BUY'
+            const pnl = isLong
+                ? (closing.price - trade.execution_price) * trade.size
+                : (trade.execution_price - closing.price) * trade.size
+
+            const now = new Date()
+            await ctx.createTradeRecord({
+                strategy: trade.strategy,
+                interval: trade.interval,
+                ticker: trade.ticker,
+                broker: trade.broker,
+                entry_side: trade.side,
+                entry_price: trade.execution_price,
+                exit_price: closing.price,
+                size: trade.size,
+                pnl,
+                entry_event_id: trade.event_id,
+                exit_event_id: trade.event_id + ':closing',
+                opened_at: trade.created_at,
+                closed_at: now,
+            })
+            await ctx.deleteOpenTrade(trade.event_id)
+
+            ctx.logger.info(
+                {
+                    event: 'cron:ifd_trade_record_created',
+                    strategy: trade.strategy,
+                    interval: trade.interval,
+                    ticker: trade.ticker,
+                    order_method: trade.order_method,
+                    pnl,
+                },
+                'IFD/IFDOCO trade record created',
+            )
+        } catch (error) {
+            ctx.logger.warn(
+                { event: 'cron:ifd_resolve_failed', broker: trade.broker, eventId: trade.event_id, error },
+                'failed to resolve IFD/IFDOCO trade',
             )
         }
     }

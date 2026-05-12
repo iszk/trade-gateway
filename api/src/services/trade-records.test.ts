@@ -109,6 +109,36 @@ test('pairLogs: execution_price が null でないものだけペアリングさ
     assert.equal(result[0]?.exitEventId, 'evt-sell-confirmed')
 })
 
+test('pairLogs: order_method=IFD のトレードはペアリング対象外', () => {
+    const buy = makeOpenTrade({ side: 'BUY', execution_price: 10000000, event_id: 'evt-buy-ifd', order_method: 'IFD' })
+    const sell = makeOpenTrade({ side: 'SELL', execution_price: 11000000, event_id: 'evt-sell-1' })
+
+    const result = pairLogs([buy, sell])
+
+    assert.equal(result.length, 0)
+})
+
+test('pairLogs: order_method=IFDOCO のトレードはペアリング対象外', () => {
+    const buy = makeOpenTrade({ side: 'BUY', execution_price: 10000000, event_id: 'evt-buy-ifdoco', order_method: 'IFDOCO' })
+    const sell = makeOpenTrade({ side: 'SELL', execution_price: 11000000, event_id: 'evt-sell-1' })
+
+    const result = pairLogs([buy, sell])
+
+    assert.equal(result.length, 0)
+})
+
+test('pairLogs: IFD/IFDOCO と通常トレードが混在しても通常トレードだけペアリングされる', () => {
+    const buyIfd = makeOpenTrade({ side: 'BUY', execution_price: 10000000, event_id: 'evt-buy-ifd', order_method: 'IFD' })
+    const buyNormal = makeOpenTrade({ side: 'BUY', execution_price: 10000000, created_at: new Date('2026-01-01'), event_id: 'evt-buy-normal' })
+    const sellNormal = makeOpenTrade({ side: 'SELL', execution_price: 11000000, created_at: new Date('2026-01-02'), event_id: 'evt-sell-normal' })
+
+    const result = pairLogs([buyIfd, buyNormal, sellNormal])
+
+    assert.equal(result.length, 1)
+    assert.equal(result[0]?.entryEventId, 'evt-buy-normal')
+    assert.equal(result[0]?.exitEventId, 'evt-sell-normal')
+})
+
 // ─────────────── Firestore 関数 ───────────────
 
 const makeFirestoreMock = () => {

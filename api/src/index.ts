@@ -13,8 +13,8 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
-import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn } from './services/trade-records.js'
-import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn } from './services/trade-records.js'
+import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn, createDefaultGetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
+import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
@@ -23,7 +23,7 @@ import { config } from './config.js'
 import { createDefaultSlotScheduler } from './services/slot-scheduler.js'
 import type { SlotScheduler } from './services/slot-scheduler.js'
 import { executeTenMinutelyTask, executeHourlyTask } from './services/cron-tasks.js'
-import type { CronContext, ExecutionPriceFetcherLike } from './services/cron-tasks.js'
+import type { CronContext, ExecutionPriceFetcherLike, ClosingExecutionFetcherLike } from './services/cron-tasks.js'
 
 import { defaultLogger, type Logger } from './logger.js'
 
@@ -227,6 +227,9 @@ type CreateAppOptions = {
     // 新フロー（Phase 2）
     getPendingExecutionOpenTrades?: GetPendingExecutionOpenTradesFn
     updateOpenTradeExecutionPrice?: UpdateOpenTradeExecutionPriceFn
+    // IFD/IFDOCO フロー
+    getConfirmedIfdOpenTrades?: GetConfirmedIfdOpenTradesFn
+    closingExecutionFetchers?: Partial<Record<string, ClosingExecutionFetcherLike>>
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -253,6 +256,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const getTradeStats = options.getTradeStats ?? createDefaultGetTradeStatsFn()
     const getPendingExecutionOpenTrades = options.getPendingExecutionOpenTrades ?? createDefaultGetPendingExecutionOpenTradesFn()
     const updateOpenTradeExecutionPrice = options.updateOpenTradeExecutionPrice ?? createDefaultUpdateOpenTradeExecutionPriceFn()
+    const getConfirmedIfdOpenTrades = options.getConfirmedIfdOpenTrades ?? createDefaultGetConfirmedIfdOpenTradesFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -279,6 +283,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
         getOpenTrades,
         deleteOpenTrade,
         createTradeRecord,
+        getConfirmedIfdOpenTrades,
+        closingExecutionFetchers: options.closingExecutionFetchers ?? { bitflyer: bitflyerClient },
     }
 
     const logWebhook = (
@@ -552,6 +558,10 @@ export const createApp = (options: CreateAppOptions = {}) => {
         // Phase 2 新フロー: dispatch 成功 & strategy/interval あり時に open_trades を即時作成
         // execution_price は null で記録し、cron が後から確定させる
         if (orderResult.ok && payload.strategy !== undefined && payload.interval !== undefined) {
+            const orderMethod =
+                payload.stop_loss && payload.take_profit ? 'IFDOCO' as const :
+                    payload.stop_loss || payload.take_profit ? 'IFD' as const :
+                        undefined
             addOpenTrade({
                 event_id: effectiveEventId,
                 broker: payload.broker,
@@ -563,6 +573,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 execution_price: null,
                 created_at: new Date(),
                 provider_order_id: orderResult.providerOrderId,
+                ...(orderMethod ? { order_method: orderMethod } : {}),
             }).catch((err) => {
                 reqLogger.warn({ event: 'open_trade:create_failed', error: err, eventId: effectiveEventId }, 'failed to write open_trade')
             })

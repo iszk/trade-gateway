@@ -110,6 +110,13 @@ const TICKER_PRODUCT_CODE_MAP: Record<string, string> = {
 const resolveProductCode = (ticker: string): string =>
     TICKER_PRODUCT_CODE_MAP[ticker.toUpperCase()] ?? normalizeProductCode(ticker)
 
+const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): number | null => {
+    if (execs.length === 0) return null
+    const totalSize = execs.reduce((sum, e) => sum + e.size, 0)
+    const totalValue = execs.reduce((sum, e) => sum + e.price * e.size, 0)
+    return totalValue / totalSize
+}
+
 export class BitflyerClient {
     private readonly apiKey?: string
     private readonly apiSecret?: string
@@ -374,13 +381,6 @@ export class BitflyerClient {
     async getExecutionPrice(providerOrderId: string, ticker: string): Promise<number | null> {
         if (providerOrderId === 'DRY_RUN') return null
 
-        const weightedAvg = (execs: BitflyerExecutionEntry[]): number | null => {
-            if (execs.length === 0) return null
-            const totalSize = execs.reduce((sum, e) => sum + e.size, 0)
-            const totalValue = execs.reduce((sum, e) => sum + e.price * e.size, 0)
-            return totalValue / totalSize
-        }
-
         this.logger.info({
             event: 'bitflyer:get_execution_price_start', providerOrderId
         }, 'fetching execution price for order ' + ticker + ' ' + providerOrderId)
@@ -391,7 +391,7 @@ export class BitflyerClient {
                 'GET',
                 `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
             )
-            const directPrice = weightedAvg(directExecs)
+            const directPrice = weightedAvgExecs(directExecs)
             if (directPrice !== null) return directPrice
 
             // parent_order_acceptance_id として照会し、最初のチャイルド（エントリー注文）の約定価格を取得
@@ -406,11 +406,49 @@ export class BitflyerClient {
                 'GET',
                 `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(entryChildId)}`,
             )
-            return weightedAvg(childExecs)
+            return weightedAvgExecs(childExecs)
         } catch (error) {
             this.logger.warn(
                 { event: 'bitflyer:get_execution_price_failed', providerOrderId, ticker, error },
                 'failed to get execution price for order ' + ticker + ' ' + providerOrderId,
+            )
+            return null
+        }
+    }
+
+    /**
+     * IFD/IFDOCO の決済子注文（child[1] 以降）を確認し、
+     * COMPLETED の子注文があれば約定価格を返す。
+     * 未約定なら null。
+     */
+    async getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number } | null> {
+        if (parentOrderId === 'DRY_RUN') return null
+
+        try {
+            const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
+                'GET',
+                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(ticker)}&parent_order_acceptance_id=${encodeURIComponent(parentOrderId)}`,
+            )
+
+            // child[0] はエントリー注文なのでスキップ、child[1..] が決済注文
+            const closingChildren = childOrders.slice(1)
+
+            for (const child of closingChildren) {
+                if (child.child_order_state !== 'COMPLETED') continue
+
+                const execs = await this.callApi<BitflyerExecutionEntry[]>(
+                    'GET',
+                    `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(child.child_order_acceptance_id)}`,
+                )
+                const price = weightedAvgExecs(execs)
+                if (price !== null) return { price }
+            }
+
+            return null
+        } catch (error) {
+            this.logger.warn(
+                { event: 'bitflyer:get_closing_execution_failed', parentOrderId, ticker, error },
+                'failed to get closing execution for parent order ' + parentOrderId,
             )
             return null
         }

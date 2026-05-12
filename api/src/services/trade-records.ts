@@ -16,6 +16,8 @@ export type OpenTrade = {
     order_dispatch_log_id?: string
     /** 新フロー（webhook 即時作成）由来の場合のみ設定される */
     provider_order_id?: string
+    /** IFD/IFDOCO 親注文フロー。未設定 = 従来の TradingView exit アラートフロー */
+    order_method?: 'IFD' | 'IFDOCO'
 }
 
 export type TradeRecord = {
@@ -50,9 +52,11 @@ const PAIRING_KEY = (log: Pick<OpenTrade, 'strategy' | 'interval' | 'ticker' | '
     `${log.strategy}|${log.interval}|${log.ticker}|${log.broker}`
 
 export const pairLogs = (logs: OpenTrade[]): PairedTrade[] => {
-    // execution_price が未確定（null）のものはペアリング対象外
+    // execution_price が未確定（null）のもの、および IFD/IFDOCO フローのものはペアリング対象外
     type ConfirmedOpenTrade = OpenTrade & { execution_price: number }
-    const confirmedLogs = logs.filter((log): log is ConfirmedOpenTrade => log.execution_price !== null)
+    const confirmedLogs = logs.filter(
+        (log): log is ConfirmedOpenTrade => log.execution_price !== null && !log.order_method,
+    )
 
     // pairing key ごとに BUY/SELL を FIFO でマッチング
     const queues = new Map<string, ConfirmedOpenTrade[]>()
@@ -153,6 +157,7 @@ export const getOpenTradesFn = (db: Firestore): GetOpenTradesFn => {
                 created_at: (data.created_at as { toDate(): Date }).toDate(),
                 order_dispatch_log_id: data.order_dispatch_log_id as string | undefined,
                 provider_order_id: data.provider_order_id as string | undefined,
+                order_method: data.order_method as 'IFD' | 'IFDOCO' | undefined,
             }
         })
     }
@@ -412,3 +417,56 @@ export const createDefaultGetPendingExecutionOpenTradesFn = (): GetPendingExecut
 
 export const createDefaultUpdateOpenTradeExecutionPriceFn = (): UpdateOpenTradeExecutionPriceFn =>
     updateOpenTradeExecutionPriceFn(getFirestoreClient())
+
+// ─────────────── IFD/IFDOCO フロー: 決済約定済みの open_trades クエリ ───────────────
+
+export type ConfirmedIfdOpenTrade = {
+    event_id: string
+    broker: string
+    ticker: string
+    side: 'BUY' | 'SELL'
+    size: number
+    strategy: string
+    interval: string
+    execution_price: number
+    created_at: Date
+    provider_order_id: string
+    order_method: 'IFD' | 'IFDOCO'
+}
+
+export type GetConfirmedIfdOpenTradesFn = () => Promise<ConfirmedIfdOpenTrade[]>
+
+/** open_trades から IFD/IFDOCO かつ execution_price 確定済みのものを返す */
+export const getConfirmedIfdOpenTradesFn = (db: Firestore): GetConfirmedIfdOpenTradesFn => {
+    return async () => {
+        const snapshot = await db.collection('open_trades').get()
+        return snapshot.docs
+            .filter((doc) => {
+                const data = doc.data()
+                return (
+                    (data.order_method === 'IFD' || data.order_method === 'IFDOCO') &&
+                    data.execution_price !== null &&
+                    data.provider_order_id
+                )
+            })
+            .map((doc) => {
+                const data = doc.data()
+                return {
+                    event_id: doc.id,
+                    broker: data.broker as string,
+                    ticker: data.ticker as string,
+                    side: data.side as 'BUY' | 'SELL',
+                    size: data.size as number,
+                    strategy: data.strategy as string,
+                    interval: data.interval as string,
+                    execution_price: data.execution_price as number,
+                    created_at: (data.created_at as { toDate(): Date }).toDate(),
+                    provider_order_id: data.provider_order_id as string,
+                    order_method: data.order_method as 'IFD' | 'IFDOCO',
+                }
+            })
+    }
+}
+
+export const createDefaultGetConfirmedIfdOpenTradesFn = (): GetConfirmedIfdOpenTradesFn =>
+    getConfirmedIfdOpenTradesFn(getFirestoreClient())
