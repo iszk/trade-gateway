@@ -4,7 +4,7 @@ services:
     container_name: trade-gateway-api
     image: node:24-trixie
     volumes:
-      - ./api:/app
+      - .:/app
       - api-node-modules:/app/node_modules
     working_dir: /app
     environment:
@@ -13,13 +13,56 @@ services:
     env_file:
       - ./api/.env
     networks:
+      - default
       - firebase
-    command: bash -c "npm install && npm run dev"
+    command: bash -c "npm install && npm run dev:api"
+
+  ui:
+    container_name: trade-gateway-ui
+    image: node:24-trixie
+    volumes:
+      - .:/app
+      - ui-node-modules:/app/node_modules
+    working_dir: /app
+    networks:
+      - default
+    command: bash -c "npm install && npm run dev:ui"
+
+  ui-prod:
+    container_name: trade-gateway-ui-prod
+    image: node:24-trixie
+    volumes:
+      - .:/app
+      - ui-node-modules:/app/node_modules
+    working_dir: /app
+    env_file:
+      - ./ui/.env.production
+    networks:
+      - default
+      - reverse-proxy
+    command: bash -c "npm install && npm run dev:ui"
+
+  ui-prodx:
+    # まだ作り中
+    # ちゃんとやりたい
+    container_name: trade-gateway-ui-prodxx
+    build:
+      context: .
+      dockerfile: ui/Dockerfile
+    env_file:
+      - ./ui/.env.production
+    networks:
+      - reverse-proxy
+    command: 'npm run dev:ui'
 
 volumes:
   api-node-modules:
+  ui-node-modules:
 
 networks:
   firebase:
     name: firebase
+    external: true
+  reverse-proxy:
+    name: reverse-proxy
     external: true
