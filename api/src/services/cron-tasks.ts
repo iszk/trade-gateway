@@ -1,5 +1,8 @@
-import type { CreateTradeRecordFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn, ConfirmedIfdOpenTrade } from './trade-records.js'
-import { pairLogs } from './trade-records.js'
+import { randomUUID } from 'node:crypto'
+import type { GetPendingDispatchLogsFn, ConfirmDispatchLogFn } from './order-dispatch-logs.js'
+import type { AddOrderExecutionFn, GetMarketOrderExecutionsFn, GetIfdocoEntriesFn, GetIfdocoExitsFn, DeleteOrderExecutionFn } from '../types/execution.js'
+import type { AddTradeFn } from '../types/trade.js'
+import { matchMarketExecutions, matchIfdocoExecutions, buildTrade } from './trade-matcher.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -21,55 +24,58 @@ export type ClosingExecutionFetcherLike = {
 export type CronContext = {
     logger: Logger
     positionFetcher: PositionFetcherLike
+    /** Step 1: dispatch_logs[pending] → broker 約定確認 → order_executions 作成 */
+    getPendingDispatchLogs?: GetPendingDispatchLogsFn
+    confirmDispatchLog?: ConfirmDispatchLogFn
+    addOrderExecution?: AddOrderExecutionFn
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
-    getPendingExecutionOpenTrades?: GetPendingExecutionOpenTradesFn
-    updateOpenTradeExecutionPrice?: UpdateOpenTradeExecutionPriceFn
-    getOpenTrades?: GetOpenTradesFn
-    deleteOpenTrade?: DeleteOpenTradeFn
-    createTradeRecord?: CreateTradeRecordFn
-    /** IFD/IFDOCO フロー用 */
-    getConfirmedIfdOpenTrades?: GetConfirmedIfdOpenTradesFn
+    /** Step 2: IFDOCO エントリー → 決済子注文の約定確認 → order_executions に exit を追加 */
+    getIfdocoEntries?: GetIfdocoEntriesFn
     closingExecutionFetchers?: Partial<Record<string, ClosingExecutionFetcherLike>>
+    /** Step 3: order_executions → マッチング → trades 作成 */
+    getMarketOrderExecutions?: GetMarketOrderExecutionsFn
+    getIfdocoExits?: GetIfdocoExitsFn
+    deleteOrderExecution?: DeleteOrderExecutionFn
+    addTrade?: AddTradeFn
 }
-
-const PAIRING_TIMEOUT_MS = 30_000
 
 export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:ten_minutely_task' }, '10-minute task executed')
 
-    // saxo の oauth token リフレッシュ用
-    const broker = 'saxo'
-    const positions = await ctx.positionFetcher.fetchAllPositions(broker)
-    ctx.logger.info({ event: 'cron:positions_fetched', broker, count: positions.length }, 'cron fetched positions')
+    // Saxo の oauth token リフレッシュ用
+    const positions = await ctx.positionFetcher.fetchAllPositions('saxo')
+    ctx.logger.info({ event: 'cron:positions_fetched', broker: 'saxo', count: positions.length }, 'cron fetched positions')
 
-    // open_trades の execution_price 照会・更新
-    if (ctx.getPendingExecutionOpenTrades && ctx.updateOpenTradeExecutionPrice && ctx.executionPriceFetchers) {
-        await fetchAndUpdateExecutionPricesFromOpenTrades({
+    // Step 1: pending dispatch_logs → broker 約定確認 → order_executions 作成
+    if (ctx.getPendingDispatchLogs && ctx.confirmDispatchLog && ctx.addOrderExecution && ctx.executionPriceFetchers) {
+        await confirmPendingExecutions({
             logger: ctx.logger,
+            getPendingDispatchLogs: ctx.getPendingDispatchLogs,
+            confirmDispatchLog: ctx.confirmDispatchLog,
+            addOrderExecution: ctx.addOrderExecution,
             executionPriceFetchers: ctx.executionPriceFetchers,
-            getPendingExecutionOpenTrades: ctx.getPendingExecutionOpenTrades,
-            updateOpenTradeExecutionPrice: ctx.updateOpenTradeExecutionPrice,
         })
     }
 
-    if (ctx.getOpenTrades && ctx.deleteOpenTrade && ctx.createTradeRecord) {
-        await matchAndRecordOpenTrades({
+    // Step 2: IFDOCO エントリー → 決済子注文の約定確認 → order_executions に exit 追加
+    if (ctx.getIfdocoEntries && ctx.addOrderExecution && ctx.closingExecutionFetchers) {
+        await confirmIfdocoExits({
             logger: ctx.logger,
-            getOpenTrades: ctx.getOpenTrades,
-            deleteOpenTrade: ctx.deleteOpenTrade,
-            createTradeRecord: ctx.createTradeRecord,
-            timeoutMs: PAIRING_TIMEOUT_MS,
-        })
-    }
-
-    // IFD/IFDOCO フロー: 決済子注文の約定を確認して trade_record を直接生成
-    if (ctx.getConfirmedIfdOpenTrades && ctx.closingExecutionFetchers && ctx.deleteOpenTrade && ctx.createTradeRecord) {
-        await resolveIfdLikeTrades({
-            logger: ctx.logger,
-            getConfirmedIfdOpenTrades: ctx.getConfirmedIfdOpenTrades,
+            getIfdocoEntries: ctx.getIfdocoEntries,
+            addOrderExecution: ctx.addOrderExecution,
             closingExecutionFetchers: ctx.closingExecutionFetchers,
-            deleteOpenTrade: ctx.deleteOpenTrade,
-            createTradeRecord: ctx.createTradeRecord,
+        })
+    }
+
+    // Step 3: order_executions → マッチング → trades 作成・約定削除
+    if (ctx.getMarketOrderExecutions && ctx.getIfdocoEntries && ctx.getIfdocoExits && ctx.deleteOrderExecution && ctx.addTrade) {
+        await matchAndSaveTrades({
+            logger: ctx.logger,
+            getMarketOrderExecutions: ctx.getMarketOrderExecutions,
+            getIfdocoEntries: ctx.getIfdocoEntries,
+            getIfdocoExits: ctx.getIfdocoExits,
+            deleteOrderExecution: ctx.deleteOrderExecution,
+            addTrade: ctx.addTrade,
         })
     }
 }
@@ -78,179 +84,204 @@ export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:hourly_task' }, 'hourly task executed')
 }
 
-/** 新フロー: open_trades から execution_price 未確定のものを取得し broker API で更新する */
-const fetchAndUpdateExecutionPricesFromOpenTrades = async (ctx: {
+// ─────────────── Step 1: pending dispatch_logs の約定確認 ───────────────
+
+const confirmPendingExecutions = async (ctx: {
     logger: Logger
+    getPendingDispatchLogs: GetPendingDispatchLogsFn
+    confirmDispatchLog: ConfirmDispatchLogFn
+    addOrderExecution: AddOrderExecutionFn
     executionPriceFetchers: Partial<Record<string, ExecutionPriceFetcherLike>>
-    getPendingExecutionOpenTrades: GetPendingExecutionOpenTradesFn
-    updateOpenTradeExecutionPrice: UpdateOpenTradeExecutionPriceFn
 }): Promise<void> => {
-    const pendingTrades = await ctx.getPendingExecutionOpenTrades()
+    const pending = await ctx.getPendingDispatchLogs()
     ctx.logger.info(
-        { event: 'cron:open_trades_execution_price_fetch_start', count: pendingTrades.length },
-        'fetching execution prices from open_trades',
+        { event: 'cron:confirm_pending_start', count: pending.length },
+        'confirming pending executions',
     )
 
-    for (const trade of pendingTrades) {
-        const fetcher = ctx.executionPriceFetchers[trade.broker]
+    for (const log of pending) {
+        const fetcher = ctx.executionPriceFetchers[log.broker]
         if (!fetcher) {
-            ctx.logger.info(
-                { event: 'cron:execution_price_fetcher_missing', broker: trade.broker },
+            ctx.logger.warn(
+                { event: 'cron:execution_price_fetcher_missing', broker: log.broker },
                 'no execution price fetcher for broker',
             )
             continue
         }
 
         try {
-            const price = await fetcher.getExecutionPrice(trade.provider_order_id, trade.ticker)
-            if (price !== null) {
-                await ctx.updateOpenTradeExecutionPrice(trade.event_id, price)
+            const price = await fetcher.getExecutionPrice(log.provider_order_id, log.ticker)
+            if (price === null) {
                 ctx.logger.info(
-                    { event: 'cron:open_trades_execution_price_updated', broker: trade.broker, eventId: trade.event_id, price },
-                    'open_trades execution price updated',
+                    { event: 'cron:execution_price_not_found', broker: log.broker, event_id: log.event_id },
+                    'execution price not yet available',
                 )
-            } else {
-                ctx.logger.info(
-                    {
-                        event: 'cron:open_trades_execution_price_not_found',
-                        broker: trade.broker, eventId: trade.event_id,
-                        provider_order_id: trade.provider_order_id,
-                        ticker: trade.ticker,
-                    },
-                    'open_trades execution price not found',
-                )
+                continue
             }
-        } catch (error) {
+
+            await ctx.addOrderExecution({
+                id: log.event_id,
+                strategy: log.strategy,
+                symbol: log.ticker,
+                interval: log.interval,
+                broker: log.broker as Parameters<typeof ctx.addOrderExecution>[0]['broker'],
+                side: log.side,
+                size: log.size,
+                price,
+                executed_at: new Date(),
+                provider_order_id: log.provider_order_id,
+            })
+            await ctx.confirmDispatchLog(log.docId)
+
             ctx.logger.info(
-                { event: 'cron:open_trades_execution_price_fetch_failed', broker: trade.broker, eventId: trade.event_id, error },
-                'failed to fetch execution price for open_trade',
+                { event: 'cron:execution_confirmed', broker: log.broker, event_id: log.event_id, price },
+                'order execution confirmed',
+            )
+        } catch (error) {
+            ctx.logger.warn(
+                { event: 'cron:confirm_execution_failed', broker: log.broker, event_id: log.event_id, error },
+                'failed to confirm execution',
             )
         }
     }
 }
 
-const matchAndRecordOpenTrades = async (ctx: {
+// ─────────────── Step 2: IFDOCO 決済子注文の約定確認 ───────────────
+
+const confirmIfdocoExits = async (ctx: {
     logger: Logger
-    getOpenTrades: GetOpenTradesFn
-    deleteOpenTrade: DeleteOpenTradeFn
-    createTradeRecord: CreateTradeRecordFn
-    timeoutMs: number
-}): Promise<void> => {
-    const deadline = Date.now() + ctx.timeoutMs
-
-    const openTrades = await ctx.getOpenTrades()
-    const paired = pairLogs(openTrades)
-
-    ctx.logger.info(
-        { event: 'cron:trade_matching_start', openCount: openTrades.length, pairedCount: paired.length },
-        'trade matching started',
-    )
-
-    for (const { record, entryEventId, exitEventId } of paired) {
-        if (Date.now() >= deadline) {
-            ctx.logger.info(
-                { event: 'cron:trade_matching_timeout' },
-                'trade matching timed out, will resume next cron',
-            )
-            break
-        }
-
-        try {
-            await ctx.createTradeRecord(record)
-            await ctx.deleteOpenTrade(entryEventId)
-            await ctx.deleteOpenTrade(exitEventId)
-
-            ctx.logger.info(
-                {
-                    event: 'cron:trade_record_created',
-                    strategy: record.strategy,
-                    interval: record.interval,
-                    ticker: record.ticker,
-                    pnl: record.pnl,
-                },
-                'trade record created',
-            )
-        } catch (error) {
-            ctx.logger.info(
-                { event: 'cron:trade_record_create_failed', error },
-                'failed to create trade record',
-            )
-        }
-    }
-}
-
-/** IFD/IFDOCO フロー: 決済子注文の約定を確認し、約定済みなら trade_record を直接生成する */
-const resolveIfdLikeTrades = async (ctx: {
-    logger: Logger
-    getConfirmedIfdOpenTrades: GetConfirmedIfdOpenTradesFn
+    getIfdocoEntries: GetIfdocoEntriesFn
+    addOrderExecution: AddOrderExecutionFn
     closingExecutionFetchers: Partial<Record<string, ClosingExecutionFetcherLike>>
-    deleteOpenTrade: DeleteOpenTradeFn
-    createTradeRecord: CreateTradeRecordFn
 }): Promise<void> => {
-    const trades = await ctx.getConfirmedIfdOpenTrades()
+    const entries = await ctx.getIfdocoEntries()
     ctx.logger.info(
-        { event: 'cron:ifd_resolve_start', count: trades.length },
-        'resolving IFD/IFDOCO trades',
+        { event: 'cron:ifdoco_exit_check_start', count: entries.length },
+        'checking IFDOCO closing executions',
     )
 
-    for (const trade of trades) {
-        const fetcher = ctx.closingExecutionFetchers[trade.broker]
+    for (const entry of entries) {
+        if (!entry.provider_order_id) continue
+
+        const fetcher = ctx.closingExecutionFetchers[entry.broker]
         if (!fetcher) {
-            ctx.logger.info(
-                { event: 'cron:ifd_closing_fetcher_missing', broker: trade.broker },
+            ctx.logger.warn(
+                { event: 'cron:closing_fetcher_missing', broker: entry.broker },
                 'no closing execution fetcher for broker',
             )
             continue
         }
 
         try {
-            const closing = await fetcher.getClosingExecution(trade.provider_order_id, trade.ticker)
+            const closing = await fetcher.getClosingExecution(entry.provider_order_id, entry.symbol)
             if (closing === null) {
                 ctx.logger.info(
-                    { event: 'cron:ifd_closing_not_yet', broker: trade.broker, eventId: trade.event_id },
-                    'closing order not yet executed, will retry next cron',
+                    { event: 'cron:ifdoco_exit_not_yet', broker: entry.broker, entry_id: entry.id },
+                    'closing order not yet executed',
                 )
                 continue
             }
 
-            const isLong = trade.side === 'BUY'
-            const pnl = isLong
-                ? (closing.price - trade.execution_price) * trade.size
-                : (trade.execution_price - closing.price) * trade.size
-
-            const now = new Date()
-            await ctx.createTradeRecord({
-                strategy: trade.strategy,
-                interval: trade.interval,
-                ticker: trade.ticker,
-                broker: trade.broker,
-                entry_side: trade.side,
-                entry_price: trade.execution_price,
-                exit_price: closing.price,
-                size: trade.size,
-                pnl,
-                entry_event_id: trade.event_id,
-                exit_event_id: trade.event_id + ':closing',
-                opened_at: trade.created_at,
-                closed_at: now,
+            const exitSide = entry.side === 'BUY' ? 'SELL' : 'BUY'
+            await ctx.addOrderExecution({
+                id: randomUUID(),
+                strategy: entry.strategy,
+                symbol: entry.symbol,
+                interval: entry.interval,
+                broker: entry.broker,
+                side: exitSide,
+                size: entry.size,
+                price: closing.price,
+                executed_at: new Date(),
+                entry_id: entry.id,
             })
-            await ctx.deleteOpenTrade(trade.event_id)
 
             ctx.logger.info(
-                {
-                    event: 'cron:ifd_trade_record_created',
-                    strategy: trade.strategy,
-                    interval: trade.interval,
-                    ticker: trade.ticker,
-                    order_method: trade.order_method,
-                    pnl,
-                },
-                'IFD/IFDOCO trade record created',
+                { event: 'cron:ifdoco_exit_confirmed', broker: entry.broker, entry_id: entry.id, price: closing.price },
+                'IFDOCO closing execution confirmed',
             )
         } catch (error) {
             ctx.logger.warn(
-                { event: 'cron:ifd_resolve_failed', broker: trade.broker, eventId: trade.event_id, error },
-                'failed to resolve IFD/IFDOCO trade',
+                { event: 'cron:ifdoco_exit_failed', broker: entry.broker, entry_id: entry.id, error },
+                'failed to confirm IFDOCO exit',
+            )
+        }
+    }
+}
+
+// ─────────────── Step 3: マッチングして trades を保存 ───────────────
+
+const matchAndSaveTrades = async (ctx: {
+    logger: Logger
+    getMarketOrderExecutions: GetMarketOrderExecutionsFn
+    getIfdocoEntries: GetIfdocoEntriesFn
+    getIfdocoExits: GetIfdocoExitsFn
+    deleteOrderExecution: DeleteOrderExecutionFn
+    addTrade: AddTradeFn
+}): Promise<void> => {
+    // マーケット注文のマッチング
+    const marketExecutions = await ctx.getMarketOrderExecutions()
+    const marketResult = matchMarketExecutions(marketExecutions)
+
+    ctx.logger.info(
+        {
+            event: 'cron:market_matching',
+            total: marketExecutions.length,
+            matched: marketResult.matched.length,
+            remaining: marketResult.remaining.length,
+        },
+        'market order matching completed',
+    )
+
+    for (const pair of marketResult.matched) {
+        try {
+            const trade = buildTrade(pair)
+            await ctx.addTrade(trade)
+            await ctx.deleteOrderExecution(pair.entry.id)
+            await ctx.deleteOrderExecution(pair.exit.id)
+
+            ctx.logger.info(
+                { event: 'cron:trade_saved', strategy: trade.strategy, symbol: trade.symbol, interval: trade.interval, pnl: trade.pnl },
+                'trade saved',
+            )
+        } catch (error) {
+            ctx.logger.warn(
+                { event: 'cron:trade_save_failed', entry_id: pair.entry.id, error },
+                'failed to save trade',
+            )
+        }
+    }
+
+    // IFDOCO のマッチング
+    const ifdocoEntries = await ctx.getIfdocoEntries()
+    const ifdocoExits = await ctx.getIfdocoExits()
+    const ifdocoResult = matchIfdocoExecutions(ifdocoEntries, ifdocoExits)
+
+    ctx.logger.info(
+        {
+            event: 'cron:ifdoco_matching',
+            entries: ifdocoEntries.length,
+            exits: ifdocoExits.length,
+            matched: ifdocoResult.matched.length,
+        },
+        'IFDOCO matching completed',
+    )
+
+    for (const pair of ifdocoResult.matched) {
+        try {
+            const trade = buildTrade(pair)
+            await ctx.addTrade(trade)
+            await ctx.deleteOrderExecution(pair.entry.id)
+            await ctx.deleteOrderExecution(pair.exit.id)
+
+            ctx.logger.info(
+                { event: 'cron:ifdoco_trade_saved', strategy: trade.strategy, symbol: trade.symbol, interval: trade.interval, pnl: trade.pnl },
+                'IFDOCO trade saved',
+            )
+        } catch (error) {
+            ctx.logger.warn(
+                { event: 'cron:ifdoco_trade_save_failed', entry_id: pair.entry.id, error },
+                'failed to save IFDOCO trade',
             )
         }
     }

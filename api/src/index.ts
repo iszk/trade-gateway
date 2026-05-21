@@ -11,10 +11,12 @@ import type { BrokerBalance } from './types/balance.js'
 import type { Position } from './types/position.js'
 import { DuplicateEventError, createDefaultWebhookEventFn } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
-import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
-import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
-import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn, createDefaultGetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
-import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
+import { createDefaultOrderDispatchLogFn, createDefaultGetPendingDispatchLogsFn, createDefaultConfirmDispatchLogFn } from './services/order-dispatch-logs.js'
+import type { CreateOrderDispatchLogFn, GetPendingDispatchLogsFn, ConfirmDispatchLogFn } from './services/order-dispatch-logs.js'
+import { createDefaultAddOrderExecutionFn, createDefaultGetMarketOrderExecutionsFn, createDefaultGetIfdocoEntriesFn, createDefaultGetIfdocoExitsFn, createDefaultDeleteOrderExecutionFn } from './services/order-executions.js'
+import type { AddOrderExecutionFn, GetMarketOrderExecutionsFn, GetIfdocoEntriesFn, GetIfdocoExitsFn, DeleteOrderExecutionFn } from './types/execution.js'
+import { createDefaultAddTradeFn, createDefaultGetTradesFn, createDefaultGetTradeStatsFn } from './services/trades.js'
+import type { AddTradeFn, GetTradesFn, GetTradeStatsFn } from './types/trade.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
@@ -218,18 +220,19 @@ type CreateAppOptions = {
     positionFetcher?: PositionFetcherLike
     slotScheduler?: SlotScheduler
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
-    getOpenTrades?: GetOpenTradesFn
-    addOpenTrade?: AddOpenTradeFn
-    deleteOpenTrade?: DeleteOpenTradeFn
-    createTradeRecord?: CreateTradeRecordFn
-    getTradeRecords?: GetTradeRecordsFn
-    getTradeStats?: GetTradeStatsFn
-    // 新フロー（Phase 2）
-    getPendingExecutionOpenTrades?: GetPendingExecutionOpenTradesFn
-    updateOpenTradeExecutionPrice?: UpdateOpenTradeExecutionPriceFn
-    // IFD/IFDOCO フロー
-    getConfirmedIfdOpenTrades?: GetConfirmedIfdOpenTradesFn
     closingExecutionFetchers?: Partial<Record<string, ClosingExecutionFetcherLike>>
+    // order_executions
+    getPendingDispatchLogs?: GetPendingDispatchLogsFn
+    confirmDispatchLog?: ConfirmDispatchLogFn
+    addOrderExecution?: AddOrderExecutionFn
+    getMarketOrderExecutions?: GetMarketOrderExecutionsFn
+    getIfdocoEntries?: GetIfdocoEntriesFn
+    getIfdocoExits?: GetIfdocoExitsFn
+    deleteOrderExecution?: DeleteOrderExecutionFn
+    // trades
+    addTrade?: AddTradeFn
+    getTrades?: GetTradesFn
+    getTradeStats?: GetTradeStatsFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -248,15 +251,16 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const balanceFetcher = options.balanceFetcher ?? new BalanceFetcher()
     const requireApiSecret = createApiSecretAuthMiddleware(apiSecret)
     const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
-    const getOpenTrades = options.getOpenTrades ?? createDefaultGetOpenTradesFn()
-    const addOpenTrade = options.addOpenTrade ?? createDefaultAddOpenTradeFn()
-    const deleteOpenTrade = options.deleteOpenTrade ?? createDefaultDeleteOpenTradeFn()
-    const createTradeRecord = options.createTradeRecord ?? createDefaultCreateTradeRecordFn()
-    const getTradeRecords = options.getTradeRecords ?? createDefaultGetTradeRecordsFn()
+    const getPendingDispatchLogs = options.getPendingDispatchLogs ?? createDefaultGetPendingDispatchLogsFn()
+    const confirmDispatchLog = options.confirmDispatchLog ?? createDefaultConfirmDispatchLogFn()
+    const addOrderExecution = options.addOrderExecution ?? createDefaultAddOrderExecutionFn()
+    const getMarketOrderExecutions = options.getMarketOrderExecutions ?? createDefaultGetMarketOrderExecutionsFn()
+    const getIfdocoEntries = options.getIfdocoEntries ?? createDefaultGetIfdocoEntriesFn()
+    const getIfdocoExits = options.getIfdocoExits ?? createDefaultGetIfdocoExitsFn()
+    const deleteOrderExecution = options.deleteOrderExecution ?? createDefaultDeleteOrderExecutionFn()
+    const addTrade = options.addTrade ?? createDefaultAddTradeFn()
+    const getTrades = options.getTrades ?? createDefaultGetTradesFn()
     const getTradeStats = options.getTradeStats ?? createDefaultGetTradeStatsFn()
-    const getPendingExecutionOpenTrades = options.getPendingExecutionOpenTrades ?? createDefaultGetPendingExecutionOpenTradesFn()
-    const updateOpenTradeExecutionPrice = options.updateOpenTradeExecutionPrice ?? createDefaultUpdateOpenTradeExecutionPriceFn()
-    const getConfirmedIfdOpenTrades = options.getConfirmedIfdOpenTrades ?? createDefaultGetConfirmedIfdOpenTradesFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -278,13 +282,15 @@ export const createApp = (options: CreateAppOptions = {}) => {
         logger,
         positionFetcher,
         executionPriceFetchers: options.executionPriceFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
-        getPendingExecutionOpenTrades,
-        updateOpenTradeExecutionPrice,
-        getOpenTrades,
-        deleteOpenTrade,
-        createTradeRecord,
-        getConfirmedIfdOpenTrades,
         closingExecutionFetchers: options.closingExecutionFetchers ?? { bitflyer: bitflyerClient },
+        getPendingDispatchLogs,
+        confirmDispatchLog,
+        addOrderExecution,
+        getIfdocoEntries,
+        getMarketOrderExecutions,
+        getIfdocoExits,
+        deleteOrderExecution,
+        addTrade,
     }
 
     const logWebhook = (
@@ -530,6 +536,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
             }, reqLogger)
         }
 
+        // dispatch 成功 & strategy/interval あり時に execution_status='pending' を設定
+        // cron が broker API で約定価格を確認して order_executions に昇格させる
+        const isTracked = orderResult.ok && payload.strategy !== undefined && payload.interval !== undefined
         const dispatchLogData = {
             event_id: effectiveEventId,
             broker: payload.broker,
@@ -550,34 +559,12 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 : undefined,
             result: (orderResult.ok ? 'success' : 'failure') as 'success' | 'failure',
             error_code: orderResult.ok ? undefined : orderResult.code,
+            execution_status: isTracked ? 'pending' as const : 'not_tracked' as const,
+            ...(isTracked ? { strategy: payload.strategy, interval: payload.interval } : {}),
         }
         createOrderDispatchLog(dispatchLogData).catch((err) => {
             reqLogger.warn({ event: 'dispatch_log:failed', error: err, data: dispatchLogData }, 'failed to write order dispatch log')
         })
-
-        // Phase 2 新フロー: dispatch 成功 & strategy/interval あり時に open_trades を即時作成
-        // execution_price は null で記録し、cron が後から確定させる
-        if (orderResult.ok && payload.strategy !== undefined && payload.interval !== undefined) {
-            const orderMethod =
-                payload.stop_loss && payload.take_profit ? 'IFDOCO' as const :
-                    payload.stop_loss || payload.take_profit ? 'IFD' as const :
-                        undefined
-            addOpenTrade({
-                event_id: effectiveEventId,
-                broker: payload.broker,
-                ticker: payload.ticker,
-                side: payload.side,
-                size: payload.size,
-                strategy: payload.strategy,
-                interval: payload.interval,
-                execution_price: null,
-                created_at: new Date(),
-                provider_order_id: orderResult.providerOrderId,
-                ...(orderMethod ? { order_method: orderMethod } : {}),
-            }).catch((err) => {
-                reqLogger.warn({ event: 'open_trade:create_failed', error: err, eventId: effectiveEventId }, 'failed to write open_trade')
-            })
-        }
 
         const { webhook_secret: _secret, ...safePayload } = payload
         logWebhook('info', 'webhook:accepted', {
@@ -735,7 +722,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 to: dates.to,
                 strategy: c.req.query('strategy'),
                 interval: c.req.query('interval'),
-                ticker: c.req.query('ticker'),
+                symbol: c.req.query('ticker') ?? c.req.query('symbol'),
                 broker: c.req.query('broker'),
             })
             return c.json(result)
@@ -757,19 +744,19 @@ export const createApp = (options: CreateAppOptions = {}) => {
         const page = Math.max(1, isNaN(rawPage) ? 1 : rawPage)
 
         try {
-            const allRecords = await getTradeRecords({
+            const allTrades = await getTrades({
                 from: dates.from,
                 to: dates.to,
                 strategy: c.req.query('strategy'),
                 interval: c.req.query('interval'),
-                ticker: c.req.query('ticker'),
+                symbol: c.req.query('ticker') ?? c.req.query('symbol'),
                 broker: c.req.query('broker'),
             })
 
-            const total = allRecords.length
+            const total = allTrades.length
             const total_pages = Math.max(1, Math.ceil(total / limit))
             const offset = (page - 1) * limit
-            const records = allRecords.slice(offset, offset + limit)
+            const records = allTrades.slice(offset, offset + limit)
 
             return c.json({
                 records,
@@ -821,4 +808,4 @@ export type AppType = typeof app
 export type { BrokerBalance } from './types/balance.js'
 export type { Position } from './types/position.js'
 export type { SaxoInstrument } from './brokers/saxo.js'
-export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, TradeRecordsResponse } from './services/trade-records.js'
+export type { GroupStats, TradeStatsResponse, TradesResponse } from './types/trade.js'

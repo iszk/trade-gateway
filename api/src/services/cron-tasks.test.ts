@@ -3,8 +3,8 @@ import test from 'node:test'
 
 import { executeTenMinutelyTask } from './cron-tasks.js'
 import type { CronContext } from './cron-tasks.js'
-import type { ConfirmedIfdOpenTrade } from './trade-records.js'
-import type { OpenTrade, PendingExecutionOpenTrade } from './trade-records.js'
+import type { OrderExecution } from '../types/execution.js'
+import type { PendingDispatchLog } from './order-dispatch-logs.js'
 
 const makeLogger = () => {
     const logs: Record<string, unknown>[] = []
@@ -21,122 +21,79 @@ const makePositionFetcherStub = () => ({
     fetchAllPositions: async () => [],
 })
 
-const makeOpenTrade = (overrides: Partial<OpenTrade> & { side: 'BUY' | 'SELL' }): OpenTrade => ({
-    event_id: `evt-${Math.random()}`,
-    broker: 'bitflyer',
-    ticker: 'BTC_JPY',
-    size: 0.01,
+const makeExecution = (overrides: Partial<OrderExecution> & { side: 'BUY' | 'SELL' }): OrderExecution => ({
+    id: `exec-${Math.random().toString(36).slice(2)}`,
     strategy: 'MA',
+    symbol: 'BTC_JPY',
     interval: '4H',
-    execution_price: 10000000,
-    created_at: new Date('2026-01-01'),
-    order_dispatch_log_id: `doc-${Math.random()}`,
+    broker: 'bitflyer',
+    size: 0.01,
+    price: 10_000_000,
+    executed_at: new Date('2026-01-01'),
     ...overrides,
 })
 
 const makeBaseCtx = (overrides: Partial<CronContext> = {}): CronContext => ({
     logger: makeLogger().logger,
     positionFetcher: makePositionFetcherStub(),
-    getOpenTrades: async () => [],
-    deleteOpenTrade: async () => { },
-    createTradeRecord: async () => { },
     ...overrides,
 })
 
-// ─────────────── matchAndRecordOpenTrades ───────────────
+// ─────────────── Step 1: confirmPendingExecutions ───────────────
 
-test('executeTenMinutelyTask: BUY/SELL がマッチしたとき trade_records を作成して open_trades から削除する', async () => {
-    const buy = makeOpenTrade({ side: 'BUY', event_id: 'evt-buy', execution_price: 10000000, created_at: new Date('2026-01-01') })
-    const sell = makeOpenTrade({ side: 'SELL', event_id: 'evt-sell', execution_price: 11000000, created_at: new Date('2026-01-02') })
-
-    const createdRecords: unknown[] = []
-    const deletedEventIds: string[] = []
-
-    const ctx = makeBaseCtx({
-        getOpenTrades: async () => [buy, sell],
-        deleteOpenTrade: async (eventId) => { deletedEventIds.push(eventId) },
-        createTradeRecord: async (record) => { createdRecords.push(record) },
-    })
-
-    await executeTenMinutelyTask(ctx)
-
-    assert.equal(createdRecords.length, 1)
-    assert.equal(deletedEventIds.length, 2)
-    assert.ok(deletedEventIds.includes('evt-buy'))
-    assert.ok(deletedEventIds.includes('evt-sell'))
-})
-
-test('executeTenMinutelyTask: 同一方向のみで open_trades がいっぱいのとき何もマッチしない', async () => {
-    const buy1 = makeOpenTrade({ side: 'BUY', event_id: 'evt-1' })
-    const buy2 = makeOpenTrade({ side: 'BUY', event_id: 'evt-2' })
-
-    const createdRecords: unknown[] = []
-
-    const ctx = makeBaseCtx({
-        getOpenTrades: async () => [buy1, buy2],
-        createTradeRecord: async (record) => { createdRecords.push(record) },
-    })
-
-    await executeTenMinutelyTask(ctx)
-
-    assert.equal(createdRecords.length, 0)
-})
-
-test('executeTenMinutelyTask: getOpenTrades がないとき matchAndRecord は実行されない', async () => {
-    const { logger } = makeLogger()
-    let called = false
-
-    // getOpenTrades は省略
-    const ctx: CronContext = {
-        logger,
-        positionFetcher: makePositionFetcherStub(),
-        deleteOpenTrade: async () => { called = true },
-        createTradeRecord: async () => { },
-    }
-
-    await executeTenMinutelyTask(ctx)
-
-    assert.equal(called, false)
-})
-
-// ─────────────── 新フロー: open_trades の execution_price 更新 ───────────────
-
-test('executeTenMinutelyTask: getPendingExecutionOpenTrades から execution_price を取得して open_trades を更新する', async () => {
-    const pendingTrade: PendingExecutionOpenTrade = {
-        event_id: 'evt-pending-1',
+test('executeTenMinutelyTask: pending dispatch_log の約定価格が確認できたとき order_execution を作成して confirmed に更新する', async () => {
+    const pendingLog: PendingDispatchLog = {
+        docId: 'log-doc-1',
+        event_id: 'evt-1',
         broker: 'bitflyer',
         ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.01,
+        strategy: 'MA',
+        interval: '4H',
         provider_order_id: 'JRF-1',
     }
-    const updatedTrades: { eventId: string; price: number }[] = []
+
+    const addedExecutions: OrderExecution[] = []
+    const confirmedDocIds: string[] = []
 
     const ctx = makeBaseCtx({
-        getPendingExecutionOpenTrades: async () => [pendingTrade],
-        updateOpenTradeExecutionPrice: async (eventId, price) => { updatedTrades.push({ eventId, price }) },
+        getPendingDispatchLogs: async () => [pendingLog],
+        confirmDispatchLog: async (docId) => { confirmedDocIds.push(docId) },
+        addOrderExecution: async (e) => { addedExecutions.push(e) },
         executionPriceFetchers: {
-            bitflyer: { getExecutionPrice: async () => 9500000 },
+            bitflyer: { getExecutionPrice: async () => 9_500_000 },
         },
     })
 
     await executeTenMinutelyTask(ctx)
 
-    assert.equal(updatedTrades.length, 1)
-    assert.equal(updatedTrades[0]?.eventId, 'evt-pending-1')
-    assert.equal(updatedTrades[0]?.price, 9500000)
+    assert.equal(addedExecutions.length, 1)
+    assert.equal(addedExecutions[0]!.id, 'evt-1')
+    assert.equal(addedExecutions[0]!.price, 9_500_000)
+    assert.equal(confirmedDocIds.length, 1)
+    assert.equal(confirmedDocIds[0], 'log-doc-1')
 })
 
-test('executeTenMinutelyTask: open_trades の execution_price が null を返すとき更新しない', async () => {
-    const pendingTrade: PendingExecutionOpenTrade = {
-        event_id: 'evt-pending-2',
+test('executeTenMinutelyTask: 約定価格が null のとき order_execution を作成しない', async () => {
+    const pendingLog: PendingDispatchLog = {
+        docId: 'log-doc-2',
+        event_id: 'evt-2',
         broker: 'bitflyer',
         ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.01,
+        strategy: 'MA',
+        interval: '4H',
         provider_order_id: 'JRF-2',
     }
-    const updatedTrades: unknown[] = []
+
+    const addedExecutions: OrderExecution[] = []
 
     const ctx = makeBaseCtx({
-        getPendingExecutionOpenTrades: async () => [pendingTrade],
-        updateOpenTradeExecutionPrice: async (eventId, price) => { updatedTrades.push({ eventId, price }) },
+        getPendingDispatchLogs: async () => [pendingLog],
+        confirmDispatchLog: async () => { },
+        addOrderExecution: async (e) => { addedExecutions.push(e) },
         executionPriceFetchers: {
             bitflyer: { getExecutionPrice: async () => null },
         },
@@ -144,119 +101,143 @@ test('executeTenMinutelyTask: open_trades の execution_price が null を返す
 
     await executeTenMinutelyTask(ctx)
 
-    assert.equal(updatedTrades.length, 0)
+    assert.equal(addedExecutions.length, 0)
 })
 
-// ─────────────── IFD/IFDOCO: resolveIfdLikeTrades ───────────────
+// ─────────────── Step 2: confirmIfdocoExits ───────────────
 
-const makeConfirmedIfdTrade = (overrides: Partial<ConfirmedIfdOpenTrade> & { side: 'BUY' | 'SELL' }): ConfirmedIfdOpenTrade => ({
-    event_id: `evt-ifd-${Math.random()}`,
-    broker: 'bitflyer',
-    ticker: 'FX_BTC_JPY',
-    size: 0.01,
-    strategy: 'MA',
-    interval: '4H',
-    execution_price: 10000000,
-    created_at: new Date('2026-01-01'),
-    provider_order_id: `PAR-${Math.random()}`,
-    order_method: 'IFDOCO',
-    ...overrides,
-})
+test('executeTenMinutelyTask: IFDOCO エントリーの決済約定が確認できたとき exit の order_execution を作成する', async () => {
+    const entry = makeExecution({ id: 'entry-1', side: 'BUY', provider_order_id: 'prov-1' })
 
-test('executeTenMinutelyTask: IFD/IFDOCO の決済約定が確認できたとき trade_record を作成して open_trade を削除する', async () => {
-    const trade = makeConfirmedIfdTrade({
-        side: 'BUY',
-        event_id: 'evt-ifd-1',
-        execution_price: 10000000,
-        size: 0.01,
-    })
-
-    const createdRecords: unknown[] = []
-    const deletedEventIds: string[] = []
+    const addedExecutions: OrderExecution[] = []
 
     const ctx = makeBaseCtx({
-        getConfirmedIfdOpenTrades: async () => [trade],
+        getIfdocoEntries: async () => [entry],
+        addOrderExecution: async (e) => { addedExecutions.push(e) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 11000000 }) },
+            bitflyer: { getClosingExecution: async () => ({ price: 11_000_000 }) },
         },
-        deleteOpenTrade: async (id) => { deletedEventIds.push(id) },
-        createTradeRecord: async (r) => { createdRecords.push(r) },
     })
 
     await executeTenMinutelyTask(ctx)
 
-    assert.equal(createdRecords.length, 1)
-    const record = createdRecords[0] as Record<string, unknown>
-    assert.equal(record.entry_price, 10000000)
-    assert.equal(record.exit_price, 11000000)
-    assert.ok(Math.abs((record.pnl as number) - 10000) < 0.001) // (11000000 - 10000000) * 0.01
-    assert.equal(deletedEventIds.length, 1)
-    assert.ok(deletedEventIds.includes('evt-ifd-1'))
+    const exits = addedExecutions.filter((e) => e.entry_id === 'entry-1')
+    assert.equal(exits.length, 1)
+    assert.equal(exits[0]!.side, 'SELL')
+    assert.equal(exits[0]!.price, 11_000_000)
+    assert.equal(exits[0]!.entry_id, 'entry-1')
 })
 
-test('executeTenMinutelyTask: IFD/IFDOCO の決済約定がまだのとき何もしない', async () => {
-    const trade = makeConfirmedIfdTrade({ side: 'BUY', event_id: 'evt-ifd-2' })
+test('executeTenMinutelyTask: IFDOCO 決済約定がまだのとき exit を作成しない', async () => {
+    const entry = makeExecution({ id: 'entry-2', side: 'BUY', provider_order_id: 'prov-2' })
 
-    const createdRecords: unknown[] = []
-    const deletedEventIds: string[] = []
+    const addedExecutions: OrderExecution[] = []
 
     const ctx = makeBaseCtx({
-        getConfirmedIfdOpenTrades: async () => [trade],
+        getIfdocoEntries: async () => [entry],
+        addOrderExecution: async (e) => { addedExecutions.push(e) },
         closingExecutionFetchers: {
             bitflyer: { getClosingExecution: async () => null },
         },
-        deleteOpenTrade: async (id) => { deletedEventIds.push(id) },
-        createTradeRecord: async (r) => { createdRecords.push(r) },
     })
 
     await executeTenMinutelyTask(ctx)
 
-    assert.equal(createdRecords.length, 0)
-    assert.equal(deletedEventIds.length, 0)
+    assert.equal(addedExecutions.length, 0)
 })
 
-test('executeTenMinutelyTask: IFD ショートの PnL を正しく計算する', async () => {
-    const trade = makeConfirmedIfdTrade({
-        side: 'SELL',
-        event_id: 'evt-ifd-short',
-        execution_price: 11000000,
-        size: 0.01,
-        order_method: 'IFD',
-    })
+// ─────────────── Step 3: matchAndSaveTrades (market) ───────────────
 
-    const createdRecords: unknown[] = []
+test('executeTenMinutelyTask: BUY/SELL がマッチしたとき trade を保存して order_executions を削除する', async () => {
+    const buy = makeExecution({ id: 'buy-1', side: 'BUY', price: 10_000_000, executed_at: new Date('2026-01-01') })
+    const sell = makeExecution({ id: 'sell-1', side: 'SELL', price: 11_000_000, executed_at: new Date('2026-01-02') })
+
+    const savedTrades: unknown[] = []
+    const deletedIds: string[] = []
 
     const ctx = makeBaseCtx({
-        getConfirmedIfdOpenTrades: async () => [trade],
-        closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 10000000 }) },
-        },
-        createTradeRecord: async (r) => { createdRecords.push(r) },
+        getMarketOrderExecutions: async () => [buy, sell],
+        getIfdocoEntries: async () => [],
+        getIfdocoExits: async () => [],
+        deleteOrderExecution: async (id) => { deletedIds.push(id) },
+        addTrade: async (t) => { savedTrades.push(t) },
     })
 
     await executeTenMinutelyTask(ctx)
 
-    assert.equal(createdRecords.length, 1)
-    const record = createdRecords[0] as Record<string, unknown>
-    assert.equal(record.entry_side, 'SELL')
-    assert.ok(Math.abs((record.pnl as number) - 10000) < 0.001) // (11000000 - 10000000) * 0.01
+    assert.equal(savedTrades.length, 1)
+    const trade = savedTrades[0] as Record<string, unknown>
+    assert.equal(trade.entry_side, 'BUY')
+    assert.ok(Math.abs((trade.pnl as number) - 10_000) < 0.001)
+    assert.equal(deletedIds.length, 2)
+    assert.ok(deletedIds.includes('buy-1'))
+    assert.ok(deletedIds.includes('sell-1'))
 })
 
-test('executeTenMinutelyTask: getConfirmedIfdOpenTrades が未設定のとき IFD 解決は実行されない', async () => {
-    let closingFetcherCalled = false
+test('executeTenMinutelyTask: 同一方向のみで何もマッチしない', async () => {
+    const buy1 = makeExecution({ id: 'buy-1', side: 'BUY' })
+    const buy2 = makeExecution({ id: 'buy-2', side: 'BUY' })
+
+    const savedTrades: unknown[] = []
 
     const ctx = makeBaseCtx({
-        closingExecutionFetchers: {
-            bitflyer: {
-                getClosingExecution: async () => {
-                    closingFetcherCalled = true
-                    return null
-                },
-            },
-        },
+        getMarketOrderExecutions: async () => [buy1, buy2],
+        getIfdocoEntries: async () => [],
+        getIfdocoExits: async () => [],
+        deleteOrderExecution: async () => { },
+        addTrade: async (t) => { savedTrades.push(t) },
     })
 
     await executeTenMinutelyTask(ctx)
 
-    assert.equal(closingFetcherCalled, false)
+    assert.equal(savedTrades.length, 0)
+})
+
+// ─────────────── Step 3: matchAndSaveTrades (IFDOCO) ───────────────
+
+test('executeTenMinutelyTask: IFDOCO entry+exit がマッチしたとき trade を保存して削除する', async () => {
+    const entry = makeExecution({
+        id: 'entry-1', side: 'BUY', price: 10_000_000,
+        provider_order_id: 'prov-1',
+        executed_at: new Date('2026-01-01'),
+    })
+    const exit = makeExecution({
+        id: 'exit-1', side: 'SELL', price: 11_000_000,
+        entry_id: 'entry-1',
+        executed_at: new Date('2026-01-02'),
+    })
+
+    const savedTrades: unknown[] = []
+    const deletedIds: string[] = []
+
+    const ctx = makeBaseCtx({
+        getMarketOrderExecutions: async () => [],
+        getIfdocoEntries: async () => [entry],
+        getIfdocoExits: async () => [exit],
+        deleteOrderExecution: async (id) => { deletedIds.push(id) },
+        addTrade: async (t) => { savedTrades.push(t) },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(savedTrades.length, 1)
+    const trade = savedTrades[0] as Record<string, unknown>
+    assert.equal(trade.entry_side, 'BUY')
+    assert.ok(Math.abs((trade.pnl as number) - 10_000) < 0.001)
+    assert.equal(deletedIds.length, 2)
+    assert.ok(deletedIds.includes('entry-1'))
+    assert.ok(deletedIds.includes('exit-1'))
+})
+
+test('executeTenMinutelyTask: Step 3 に必要な関数が未設定のとき matchAndSaveTrades は実行されない', async () => {
+    let called = false
+
+    const ctx = makeBaseCtx({
+        // getMarketOrderExecutions を省略 → Step 3 がスキップされる
+        addTrade: async () => { called = true },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(called, false)
 })
