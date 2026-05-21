@@ -268,6 +268,46 @@ test('BitflyerClient uses IFDOCO when stopLoss and takeProfit are provided with 
     })
 })
 
+test('BitflyerClient uses IFD with LIMIT when only takeProfit is provided with price', async () => {
+    let capturedUrl = ''
+    let capturedBody = ''
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url, init) => {
+            capturedUrl = String(url)
+            capturedBody = String(init?.body)
+            return new Response(
+                JSON.stringify({ parent_order_acceptance_id: 'JRF-parent-3' }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.sendMarketOrder({
+        ...makeOrder(),
+        price: 1000000,
+        takeProfit: '2%',
+    })
+
+    assert.equal(capturedUrl, 'https://example.com/v1/me/sendparentorder')
+    const body = JSON.parse(capturedBody)
+    assert.equal(body.order_method, 'IFD')
+    assert.equal(body.parameters.length, 2)
+    assert.equal(body.parameters[0].condition_type, 'MARKET')
+    assert.equal(body.parameters[1].condition_type, 'LIMIT')
+    assert.equal(body.parameters[1].price, 1020000) // take profit for BUY: ceil(1000000 * 1.02)
+    assert.equal(body.parameters[1].side, 'SELL')
+
+    assert.deepEqual(result, {
+        ok: true,
+        broker: 'bitflyer',
+        providerOrderId: 'JRF-parent-3',
+    })
+})
+
 test('BitflyerClient.getExecutionPrice returns null for DRY_RUN', async () => {
     const client = new BitflyerClient({ apiKey: 'test-key', apiSecret: 'test-secret' })
     const result = await client.getExecutionPrice('DRY_RUN', 'BTC/JPY')
