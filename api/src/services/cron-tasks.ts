@@ -3,6 +3,7 @@ import type { GetPendingDispatchLogsFn, ConfirmDispatchLogFn } from './order-dis
 import type { AddOrderExecutionFn, GetMarketOrderExecutionsFn, GetIfdocoEntriesFn, GetIfdocoExitsFn, DeleteOrderExecutionFn } from '../types/execution.js'
 import type { AddTradeFn } from '../types/trade.js'
 import { matchMarketExecutions, matchIfdocoExecutions, buildTrade } from './trade-matcher.js'
+import type { AddExecutionRecordFn } from './execution-records.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -37,6 +38,8 @@ export type CronContext = {
     getIfdocoExits?: GetIfdocoExitsFn
     deleteOrderExecution?: DeleteOrderExecutionFn
     addTrade?: AddTradeFn
+    /** 約定確認時に execution_records へ永続保存 */
+    addExecutionRecord?: AddExecutionRecordFn
 }
 
 export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> => {
@@ -54,6 +57,7 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             confirmDispatchLog: ctx.confirmDispatchLog,
             addOrderExecution: ctx.addOrderExecution,
             executionPriceFetchers: ctx.executionPriceFetchers,
+            addExecutionRecord: ctx.addExecutionRecord,
         })
     }
 
@@ -64,6 +68,7 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             getIfdocoEntries: ctx.getIfdocoEntries,
             addOrderExecution: ctx.addOrderExecution,
             closingExecutionFetchers: ctx.closingExecutionFetchers,
+            addExecutionRecord: ctx.addExecutionRecord,
         })
     }
 
@@ -92,6 +97,7 @@ const confirmPendingExecutions = async (ctx: {
     confirmDispatchLog: ConfirmDispatchLogFn
     addOrderExecution: AddOrderExecutionFn
     executionPriceFetchers: Partial<Record<string, ExecutionPriceFetcherLike>>
+    addExecutionRecord?: AddExecutionRecordFn
 }): Promise<void> => {
     const pending = await ctx.getPendingDispatchLogs()
     ctx.logger.info(
@@ -119,7 +125,7 @@ const confirmPendingExecutions = async (ctx: {
                 continue
             }
 
-            await ctx.addOrderExecution({
+            const execution = {
                 id: log.event_id,
                 strategy: log.strategy,
                 symbol: log.ticker,
@@ -130,7 +136,9 @@ const confirmPendingExecutions = async (ctx: {
                 price: result.price,
                 executed_at: result.executed_at,
                 provider_order_id: log.provider_order_id,
-            })
+            }
+            await ctx.addOrderExecution(execution)
+            await ctx.addExecutionRecord?.(execution)
             await ctx.confirmDispatchLog(log.docId)
 
             ctx.logger.info(
@@ -153,6 +161,7 @@ const confirmIfdocoExits = async (ctx: {
     getIfdocoEntries: GetIfdocoEntriesFn
     addOrderExecution: AddOrderExecutionFn
     closingExecutionFetchers: Partial<Record<string, ClosingExecutionFetcherLike>>
+    addExecutionRecord?: AddExecutionRecordFn
 }): Promise<void> => {
     const entries = await ctx.getIfdocoEntries()
     ctx.logger.info(
@@ -182,8 +191,8 @@ const confirmIfdocoExits = async (ctx: {
                 continue
             }
 
-            const exitSide = entry.side === 'BUY' ? 'SELL' : 'BUY'
-            await ctx.addOrderExecution({
+            const exitSide = (entry.side === 'BUY' ? 'SELL' : 'BUY') as 'BUY' | 'SELL'
+            const exitExecution = {
                 id: randomUUID(),
                 strategy: entry.strategy,
                 symbol: entry.symbol,
@@ -194,7 +203,9 @@ const confirmIfdocoExits = async (ctx: {
                 price: closing.price,
                 executed_at: closing.executed_at,
                 entry_id: entry.id,
-            })
+            }
+            await ctx.addOrderExecution(exitExecution)
+            await ctx.addExecutionRecord?.(exitExecution)
 
             ctx.logger.info(
                 { event: 'cron:ifdoco_exit_confirmed', broker: entry.broker, entry_id: entry.id, price: closing.price },

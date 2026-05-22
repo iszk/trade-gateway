@@ -17,6 +17,8 @@ import { createDefaultAddOrderExecutionFn, createDefaultGetMarketOrderExecutions
 import type { AddOrderExecutionFn, GetMarketOrderExecutionsFn, GetIfdocoEntriesFn, GetIfdocoExitsFn, DeleteOrderExecutionFn } from './types/execution.js'
 import { createDefaultAddTradeFn, createDefaultGetTradesFn, createDefaultGetTradeStatsFn } from './services/trades.js'
 import type { AddTradeFn, GetTradesFn, GetTradeStatsFn } from './types/trade.js'
+import { createDefaultAddExecutionRecordFn } from './services/execution-records.js'
+import type { AddExecutionRecordFn } from './services/execution-records.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
@@ -233,6 +235,8 @@ type CreateAppOptions = {
     addTrade?: AddTradeFn
     getTrades?: GetTradesFn
     getTradeStats?: GetTradeStatsFn
+    // execution_records
+    addExecutionRecord?: AddExecutionRecordFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -261,6 +265,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const addTrade = options.addTrade ?? createDefaultAddTradeFn()
     const getTrades = options.getTrades ?? createDefaultGetTradesFn()
     const getTradeStats = options.getTradeStats ?? createDefaultGetTradeStatsFn()
+    const addExecutionRecord = options.addExecutionRecord ?? createDefaultAddExecutionRecordFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -291,6 +296,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         getIfdocoExits,
         deleteOrderExecution,
         addTrade,
+        addExecutionRecord,
     }
 
     const logWebhook = (

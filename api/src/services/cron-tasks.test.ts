@@ -243,3 +243,101 @@ test('executeTenMinutelyTask: Step 3 に必要な関数が未設定のとき mat
 
     assert.equal(called, false)
 })
+
+// ─────────────── execution_records への保存 ───────────────
+
+test('executeTenMinutelyTask: pending の約定確認時に addExecutionRecord が呼ばれる', async () => {
+    const pendingLog: PendingDispatchLog = {
+        docId: 'log-doc-er1',
+        event_id: 'evt-er1',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        size: 0.01,
+        strategy: 'MA',
+        interval: '4H',
+        provider_order_id: 'JRF-er1',
+    }
+
+    const executionRecords: OrderExecution[] = []
+
+    const ctx = makeBaseCtx({
+        getPendingDispatchLogs: async () => [pendingLog],
+        confirmDispatchLog: async () => { },
+        addOrderExecution: async () => { },
+        executionPriceFetchers: {
+            bitflyer: { getExecutionPrice: async () => ({ price: 9_000_000, executed_at: new Date('2026-02-01T10:00:00Z') }) },
+        },
+        addExecutionRecord: async (e) => { executionRecords.push(e) },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(executionRecords.length, 1)
+    const rec = executionRecords[0]!
+    assert.equal(rec.id, 'evt-er1')
+    assert.equal(rec.strategy, 'MA')
+    assert.equal(rec.symbol, 'BTC_JPY')
+    assert.equal(rec.interval, '4H')
+    assert.equal(rec.broker, 'bitflyer')
+    assert.equal(rec.side, 'BUY')
+    assert.equal(rec.price, 9_000_000)
+    assert.deepEqual(rec.executed_at, new Date('2026-02-01T10:00:00Z'))
+})
+
+test('executeTenMinutelyTask: addExecutionRecord が未設定のとき約定確認は正常に動作する', async () => {
+    const pendingLog: PendingDispatchLog = {
+        docId: 'log-doc-er2',
+        event_id: 'evt-er2',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'SELL',
+        size: 0.01,
+        strategy: 'MA',
+        interval: '1H',
+        provider_order_id: 'JRF-er2',
+    }
+
+    const addedExecutions: OrderExecution[] = []
+
+    const ctx = makeBaseCtx({
+        getPendingDispatchLogs: async () => [pendingLog],
+        confirmDispatchLog: async () => { },
+        addOrderExecution: async (e) => { addedExecutions.push(e) },
+        executionPriceFetchers: {
+            bitflyer: { getExecutionPrice: async () => ({ price: 8_000_000, executed_at: new Date('2026-02-01T12:00:00Z') }) },
+        },
+        // addExecutionRecord を省略
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(addedExecutions.length, 1)
+})
+
+test('executeTenMinutelyTask: IFDOCO exit 確認時に addExecutionRecord が呼ばれる', async () => {
+    const entry = makeExecution({ id: 'entry-er1', side: 'BUY', provider_order_id: 'prov-er1', strategy: 'RS', interval: '1D' })
+
+    const executionRecords: OrderExecution[] = []
+
+    const ctx = makeBaseCtx({
+        getIfdocoEntries: async () => [entry],
+        addOrderExecution: async () => { },
+        closingExecutionFetchers: {
+            bitflyer: { getClosingExecution: async () => ({ price: 12_000_000, executed_at: new Date('2026-02-02T10:00:00Z') }) },
+        },
+        addExecutionRecord: async (e) => { executionRecords.push(e) },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(executionRecords.length, 1)
+    const rec = executionRecords[0]!
+    assert.equal(rec.side, 'SELL')
+    assert.equal(rec.strategy, 'RS')
+    assert.equal(rec.symbol, entry.symbol)
+    assert.equal(rec.interval, '1D')
+    assert.equal(rec.broker, 'bitflyer')
+    assert.equal(rec.price, 12_000_000)
+    assert.equal(rec.entry_id, 'entry-er1')
+})
