@@ -788,14 +788,13 @@ export const createApp = (options: CreateAppOptions = {}) => {
     return app
 }
 
-export const app = createApp()
-
 const port = Number(process.env.PORT ?? 3000)
 const isMainModule = process.argv[1]
     ? import.meta.url === pathToFileURL(process.argv[1]).href
     : false
 
 if (isMainModule) {
+    const app = createApp()
     defaultLogger.info({ port }, 'trade-gateway listening')
 
     serve({
@@ -804,7 +803,7 @@ if (isMainModule) {
     })
 }
 
-export type AppType = typeof app
+export type AppType = ReturnType<typeof createApp>
 export type { BrokerBalance } from './types/balance.js'
 export type { Position } from './types/position.js'
 export type { SaxoInstrument } from './brokers/saxo.js'
