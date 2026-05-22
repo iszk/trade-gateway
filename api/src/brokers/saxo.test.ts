@@ -188,7 +188,7 @@ test('SaxoClient.getExecutionPrice returns AveragePrice from audit activities', 
                 JSON.stringify({
                     Data: [
                         { LogId: 'L1', OrderId: 'ORD-123', Status: 'Placed' },
-                        { LogId: 'L2', OrderId: 'ORD-123', Status: 'FinalFill', AveragePrice: 18066.67 },
+                        { LogId: 'L2', OrderId: 'ORD-123', Status: 'FinalFill', AveragePrice: 18066.67, ActivityTime: '2026-01-01T10:00:00Z' },
                     ],
                 }),
                 { status: 200, headers: { 'content-type': 'application/json' } },
@@ -201,7 +201,7 @@ test('SaxoClient.getExecutionPrice returns AveragePrice from audit activities', 
     assert.ok(capturedUrl.includes('/cs/v1/audit/orderactivities/'))
     assert.ok(capturedUrl.includes('OrderId=ORD-123'))
     assert.ok(capturedUrl.includes('ClientKey=test-client'))
-    assert.equal(result, 18066.67)
+    assert.deepEqual(result, { price: 18066.67, executed_at: new Date('2026-01-01T10:00:00Z') })
 })
 
 test('SaxoClient.getExecutionPrice returns null when activities are empty', async () => {

@@ -74,6 +74,7 @@ type SaxoOrderActivity = {
     OrderId: string
     Status: string
     AveragePrice?: number
+    ActivityTime?: string
 }
 
 type SaxoOrderActivitiesResponse = {
@@ -546,7 +547,7 @@ export class SaxoClient {
         }))
     }
 
-    async getExecutionPrice(orderId: string, ticker: string): Promise<number | null> {
+    async getExecutionPrice(orderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null> {
         if (orderId === 'DRY_RUN') return null
 
         const accessToken = await this.getValidAccessToken()
@@ -597,12 +598,18 @@ export class SaxoClient {
             )
 
             if (fillActivity?.AveragePrice !== undefined) {
-                return fillActivity.AveragePrice
+                return {
+                    price: fillActivity.AveragePrice,
+                    executed_at: fillActivity.ActivityTime ? new Date(fillActivity.ActivityTime) : new Date(),
+                }
             }
 
             const anyWithPrice = data.Data.find((a) => a.AveragePrice !== undefined)
             if (anyWithPrice?.AveragePrice !== undefined) {
-                return anyWithPrice.AveragePrice
+                return {
+                    price: anyWithPrice.AveragePrice,
+                    executed_at: anyWithPrice.ActivityTime ? new Date(anyWithPrice.ActivityTime) : new Date(),
+                }
             }
 
             this.logger.warn(

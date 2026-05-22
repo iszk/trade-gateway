@@ -325,8 +325,8 @@ test('BitflyerClient.getExecutionPrice returns weighted average price for child 
             capturedUrls.push(String(url))
             return new Response(
                 JSON.stringify([
-                    { child_order_acceptance_id: 'JRF-child-1', price: 10000000, size: 0.01 },
-                    { child_order_acceptance_id: 'JRF-child-1', price: 10100000, size: 0.01 },
+                    { child_order_acceptance_id: 'JRF-child-1', price: 10000000, size: 0.01, exec_date: '2026-01-01T10:00:00Z' },
+                    { child_order_acceptance_id: 'JRF-child-1', price: 10100000, size: 0.01, exec_date: '2026-01-01T10:01:00Z' },
                 ]),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             )
@@ -337,7 +337,7 @@ test('BitflyerClient.getExecutionPrice returns weighted average price for child 
 
     assert.ok(capturedUrls[0]?.includes('getexecutions'))
     assert.ok(capturedUrls[0]?.includes('JRF-child-1'))
-    assert.equal(result, 10050000) // (10000000 * 0.01 + 10100000 * 0.01) / 0.02
+    assert.deepEqual(result, { price: 10050000, executed_at: new Date('2026-01-01T10:01:00Z') }) // (10000000 * 0.01 + 10100000 * 0.01) / 0.02
 })
 
 test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no executions found', async () => {
@@ -367,14 +367,14 @@ test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no
             // 3rd: getexecutions?child_order_acceptance_id=JRF-child-entry
             assert.ok(urlStr.includes('getexecutions'))
             return new Response(
-                JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry', price: 9500000, size: 0.01 }]),
+                JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry', price: 9500000, size: 0.01, exec_date: '2026-01-02T10:00:00Z' }]),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             )
         },
     })
 
     const result = await client.getExecutionPrice('JRF-parent-1', 'BTC/JPY')
-    assert.equal(result, 9500000)
+    assert.deepEqual(result, { price: 9500000, executed_at: new Date('2026-01-02T10:00:00Z') })
     assert.equal(callCount, 3)
 })
 
@@ -425,14 +425,14 @@ test('BitflyerClient.getClosingExecution returns price when closing child order 
             assert.ok(urlStr.includes('getexecutions'))
             assert.ok(urlStr.includes('JRF-stop'))
             return new Response(
-                JSON.stringify([{ child_order_acceptance_id: 'JRF-stop', price: 9500000, size: 0.01 }]),
+                JSON.stringify([{ child_order_acceptance_id: 'JRF-stop', price: 9500000, size: 0.01, exec_date: '2026-01-03T10:00:00Z' }]),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             )
         },
     })
 
     const result = await client.getClosingExecution('PAR-1', 'BTC/JPY')
-    assert.deepEqual(result, { price: 9500000 })
+    assert.deepEqual(result, { price: 9500000, executed_at: new Date('2026-01-03T10:00:00Z') })
     assert.equal(callCount, 2)
 })
 

@@ -55,6 +55,7 @@ type BitflyerExecutionEntry = {
     child_order_acceptance_id: string
     price: number
     size: number
+    exec_date: string
 }
 
 type BitflyerChildOrderEntry = {
@@ -110,11 +111,13 @@ const TICKER_PRODUCT_CODE_MAP: Record<string, string> = {
 const resolveProductCode = (ticker: string): string =>
     TICKER_PRODUCT_CODE_MAP[ticker.toUpperCase()] ?? normalizeProductCode(ticker)
 
-const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): number | null => {
+const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): { price: number; executed_at: Date } | null => {
     if (execs.length === 0) return null
     const totalSize = execs.reduce((sum, e) => sum + e.size, 0)
     const totalValue = execs.reduce((sum, e) => sum + e.price * e.size, 0)
-    return totalValue / totalSize
+    // 最後の約定時刻（最新）を使用
+    const executed_at = new Date(execs[execs.length - 1].exec_date)
+    return { price: totalValue / totalSize, executed_at }
 }
 
 export class BitflyerClient {
@@ -378,7 +381,7 @@ export class BitflyerClient {
         }
     }
 
-    async getExecutionPrice(providerOrderId: string, ticker: string): Promise<number | null> {
+    async getExecutionPrice(providerOrderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null> {
         if (providerOrderId === 'DRY_RUN') return null
 
         this.logger.info({
@@ -421,7 +424,7 @@ export class BitflyerClient {
      * COMPLETED の子注文があれば約定価格を返す。
      * 未約定なら null。
      */
-    async getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number } | null> {
+    async getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null> {
         if (parentOrderId === 'DRY_RUN') return null
 
         try {
@@ -440,8 +443,8 @@ export class BitflyerClient {
                     'GET',
                     `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(child.child_order_acceptance_id)}`,
                 )
-                const price = weightedAvgExecs(execs)
-                if (price !== null) return { price }
+                const result = weightedAvgExecs(execs)
+                if (result !== null) return result
             }
 
             return null

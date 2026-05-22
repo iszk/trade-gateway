@@ -14,11 +14,11 @@ type PositionFetcherLike = {
 }
 
 export type ExecutionPriceFetcherLike = {
-    getExecutionPrice(providerOrderId: string, ticker: string): Promise<number | null>
+    getExecutionPrice(providerOrderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null>
 }
 
 export type ClosingExecutionFetcherLike = {
-    getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number } | null>
+    getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null>
 }
 
 export type CronContext = {
@@ -110,8 +110,8 @@ const confirmPendingExecutions = async (ctx: {
         }
 
         try {
-            const price = await fetcher.getExecutionPrice(log.provider_order_id, log.ticker)
-            if (price === null) {
+            const result = await fetcher.getExecutionPrice(log.provider_order_id, log.ticker)
+            if (result === null) {
                 ctx.logger.info(
                     { event: 'cron:execution_price_not_found', broker: log.broker, event_id: log.event_id },
                     'execution price not yet available',
@@ -127,14 +127,14 @@ const confirmPendingExecutions = async (ctx: {
                 broker: log.broker as Parameters<typeof ctx.addOrderExecution>[0]['broker'],
                 side: log.side,
                 size: log.size,
-                price,
-                executed_at: new Date(),
+                price: result.price,
+                executed_at: result.executed_at,
                 provider_order_id: log.provider_order_id,
             })
             await ctx.confirmDispatchLog(log.docId)
 
             ctx.logger.info(
-                { event: 'cron:execution_confirmed', broker: log.broker, event_id: log.event_id, price },
+                { event: 'cron:execution_confirmed', broker: log.broker, event_id: log.event_id, price: result.price },
                 'order execution confirmed',
             )
         } catch (error) {
@@ -192,7 +192,7 @@ const confirmIfdocoExits = async (ctx: {
                 side: exitSide,
                 size: entry.size,
                 price: closing.price,
-                executed_at: new Date(),
+                executed_at: closing.executed_at,
                 entry_id: entry.id,
             })
 

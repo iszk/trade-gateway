@@ -62,7 +62,7 @@ test('executeTenMinutelyTask: pending dispatch_log の約定価格が確認で�
         confirmDispatchLog: async (docId) => { confirmedDocIds.push(docId) },
         addOrderExecution: async (e) => { addedExecutions.push(e) },
         executionPriceFetchers: {
-            bitflyer: { getExecutionPrice: async () => 9_500_000 },
+            bitflyer: { getExecutionPrice: async () => ({ price: 9_500_000, executed_at: new Date('2026-01-01T10:00:00Z') }) },
         },
     })
 
@@ -71,6 +71,7 @@ test('executeTenMinutelyTask: pending dispatch_log の約定価格が確認で�
     assert.equal(addedExecutions.length, 1)
     assert.equal(addedExecutions[0]!.id, 'evt-1')
     assert.equal(addedExecutions[0]!.price, 9_500_000)
+    assert.deepEqual(addedExecutions[0]!.executed_at, new Date('2026-01-01T10:00:00Z'))
     assert.equal(confirmedDocIds.length, 1)
     assert.equal(confirmedDocIds[0], 'log-doc-1')
 })
@@ -115,7 +116,7 @@ test('executeTenMinutelyTask: IFDOCO エントリーの決済約定が確認で�
         getIfdocoEntries: async () => [entry],
         addOrderExecution: async (e) => { addedExecutions.push(e) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 11_000_000 }) },
+            bitflyer: { getClosingExecution: async () => ({ price: 11_000_000, executed_at: new Date('2026-01-02T10:00:00Z') }) },
         },
     })
 
@@ -125,6 +126,7 @@ test('executeTenMinutelyTask: IFDOCO エントリーの決済約定が確認で�
     assert.equal(exits.length, 1)
     assert.equal(exits[0]!.side, 'SELL')
     assert.equal(exits[0]!.price, 11_000_000)
+    assert.deepEqual(exits[0]!.executed_at, new Date('2026-01-02T10:00:00Z'))
     assert.equal(exits[0]!.entry_id, 'entry-1')
 })
 
