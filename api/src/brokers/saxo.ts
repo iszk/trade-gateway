@@ -547,7 +547,7 @@ export class SaxoClient {
         }))
     }
 
-    async getExecutionPrice(orderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null> {
+    async getExecutionPrice(orderId: string, ticker: string, _side?: 'BUY' | 'SELL'): Promise<{ price: number; executed_at: Date } | null> {
         if (orderId === 'DRY_RUN') return null
 
         const accessToken = await this.getValidAccessToken()

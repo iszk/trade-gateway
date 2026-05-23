@@ -15,11 +15,11 @@ type PositionFetcherLike = {
 }
 
 export type ExecutionPriceFetcherLike = {
-    getExecutionPrice(providerOrderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null>
+    getExecutionPrice(providerOrderId: string, ticker: string, side: 'BUY' | 'SELL'): Promise<{ price: number; executed_at: Date } | null>
 }
 
 export type ClosingExecutionFetcherLike = {
-    getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null>
+    getClosingExecution(parentOrderId: string, ticker: string, entrySide: 'BUY' | 'SELL'): Promise<{ price: number; executed_at: Date } | null>
 }
 
 export type CronContext = {
@@ -116,7 +116,7 @@ const confirmPendingExecutions = async (ctx: {
         }
 
         try {
-            const result = await fetcher.getExecutionPrice(log.provider_order_id, log.ticker)
+            const result = await fetcher.getExecutionPrice(log.provider_order_id, log.ticker, log.side)
             if (result === null) {
                 ctx.logger.info(
                     { event: 'cron:execution_price_not_found', broker: log.broker, event_id: log.event_id },
@@ -182,7 +182,7 @@ const confirmIfdocoExits = async (ctx: {
         }
 
         try {
-            const closing = await fetcher.getClosingExecution(entry.provider_order_id, entry.symbol)
+            const closing = await fetcher.getClosingExecution(entry.provider_order_id, entry.symbol, entry.side)
             if (closing === null) {
                 ctx.logger.info(
                     { event: 'cron:ifdoco_exit_not_yet', broker: entry.broker, entry_id: entry.id },

@@ -61,6 +61,7 @@ type BitflyerExecutionEntry = {
 type BitflyerChildOrderEntry = {
     child_order_acceptance_id: string
     child_order_state: string
+    side: 'BUY' | 'SELL'
 }
 
 const SEND_CHILD_ORDER_PATH = '/v1/me/sendchildorder'
@@ -381,7 +382,7 @@ export class BitflyerClient {
         }
     }
 
-    async getExecutionPrice(providerOrderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null> {
+    async getExecutionPrice(providerOrderId: string, ticker: string, side: 'BUY' | 'SELL'): Promise<{ price: number; executed_at: Date } | null> {
         if (providerOrderId === 'DRY_RUN') return null
 
         this.logger.info({
@@ -397,14 +398,17 @@ export class BitflyerClient {
             const directPrice = weightedAvgExecs(directExecs)
             if (directPrice !== null) return directPrice
 
-            // parent_order_acceptance_id として照会し、最初のチャイルド（エントリー注文）の約定価格を取得
+            // parent_order_acceptance_id として照会し、side が一致するチャイルド（エントリー注文）の約定価格を取得
             const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
                 'GET',
                 `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(ticker)}&parent_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
             )
             if (childOrders.length === 0) return null
 
-            const entryChildId = childOrders[0].child_order_acceptance_id
+            const entryChild = childOrders.find(c => c.side === side)
+            if (!entryChild) return null
+
+            const entryChildId = entryChild.child_order_acceptance_id
             const childExecs = await this.callApi<BitflyerExecutionEntry[]>(
                 'GET',
                 `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(entryChildId)}`,
@@ -420,11 +424,11 @@ export class BitflyerClient {
     }
 
     /**
-     * IFD/IFDOCO の決済子注文（child[1] 以降）を確認し、
+     * IFD/IFDOCO の決済子注文（エントリーと逆 side）を確認し、
      * COMPLETED の子注文があれば約定価格を返す。
      * 未約定なら null。
      */
-    async getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number; executed_at: Date } | null> {
+    async getClosingExecution(parentOrderId: string, ticker: string, entrySide: 'BUY' | 'SELL'): Promise<{ price: number; executed_at: Date } | null> {
         if (parentOrderId === 'DRY_RUN') return null
 
         try {
@@ -433,8 +437,9 @@ export class BitflyerClient {
                 `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(ticker)}&parent_order_acceptance_id=${encodeURIComponent(parentOrderId)}`,
             )
 
-            // child[0] はエントリー注文なのでスキップ、child[1..] が決済注文
-            const closingChildren = childOrders.slice(1)
+            // エントリーと逆 side が決済注文
+            const closingSide = entrySide === 'BUY' ? 'SELL' : 'BUY'
+            const closingChildren = childOrders.filter(c => c.side === closingSide)
 
             for (const child of closingChildren) {
                 if (child.child_order_state !== 'COMPLETED') continue
