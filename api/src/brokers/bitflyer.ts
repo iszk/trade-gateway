@@ -439,7 +439,8 @@ export class BitflyerClient {
             )
 
             // child[0] はエントリー注文なのでスキップ、child[1..] が決済注文
-            const closingChildren = childOrders.slice(1)
+            // COMPLETED のもののみ約定取得する
+            const closingChildren = childOrders.slice(1).filter(c => c.child_order_state === 'COMPLETED')
 
             let totalSize = 0
             let totalValue = 0

@@ -46,7 +46,7 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
             // ピラミッディング (増し玉)
             const currentAbsPosition = Math.abs(currentPosition)
             const newAbsPosition = currentAbsPosition + size
-            
+
             // 平均取得単価の再計算
             averageEntryPrice = ((averageEntryPrice! * currentAbsPosition) + (price * size)) / newAbsPosition
             currentPosition = isBuy ? currentPosition + size : currentPosition - size
@@ -55,12 +55,12 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
             const isLong = currentPosition > EPSILON
             const currentAbsPosition = Math.abs(currentPosition)
             const closeSize = Math.min(currentAbsPosition, size)
-            
+
             // PnL の計算
             const pnl = isLong
                 ? (price - averageEntryPrice!) * closeSize
                 : (averageEntryPrice! - price) * closeSize
-            
+
             realizedPnl += pnl
             totalTrades++
             if (pnl > EPSILON) {
@@ -72,7 +72,7 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
             // ポジションの更新
             if (size > currentAbsPosition + EPSILON) {
                 // ドテン (反転)
-                const remainingSize = size - currentAbsPosition
+                const remainingSize = Math.round((size - currentAbsPosition) * 1e8) / 1e8
                 currentPosition = isBuy ? remainingSize : -remainingSize
                 averageEntryPrice = price // 新規ポジションの単価は今回の価格
             } else if (Math.abs(size - currentAbsPosition) < EPSILON) {
