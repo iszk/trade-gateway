@@ -862,7 +862,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         checkWebhookSecret: true,
     }))
 
-    app.post('/api/webhooks/foo', requireApiSecret, createWebhookHandler({
+    app.post('/api/webhooks/foods', requireApiSecret, createWebhookHandler({
         schema: fooWebhookSchema,
         source: 'foo',
     }))

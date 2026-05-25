@@ -650,7 +650,7 @@ test('POST /api/webhooks/tradingview: dispatch 成功 & strategy/interval あり
     assert.equal(addedTrades[0]?.provider_order_id, 'JRF-test-1')
     assert.equal(addedTrades[0]?.broker, 'bitflyer')
     assert.equal(addedTrades[0]?.ticker, 'BTC_JPY')
-    
+
     assert.equal(addedOrdersV2.length, 1)
     assert.equal(addedOrdersV2[0]?.id, 'evt-open-trade-1')
     assert.equal(addedOrdersV2[0]?.strategy, 'MA Crossover')
@@ -727,7 +727,7 @@ const postFooWebhook = async (
     apiSecret = 'test-secret',
     sourceIp = '1.2.3.4',
 ) => {
-    return app.request('/api/webhooks/foo', {
+    return app.request('/api/webhooks/foods', {
         method: 'POST',
         headers: {
             'content-type': 'application/json',
@@ -738,9 +738,9 @@ const postFooWebhook = async (
     })
 }
 
-test('POST /api/webhooks/foo returns 401 without Authorization header', async () => {
+test('POST /api/webhooks/foods returns 401 without Authorization header', async () => {
     const app = createAppForTests({ apiSecret: 'test-secret' })
-    const res = await app.request('/api/webhooks/foo', {
+    const res = await app.request('/api/webhooks/foods', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(makeFooPayload('evt-foo-unauth-1')),
@@ -750,7 +750,7 @@ test('POST /api/webhooks/foo returns 401 without Authorization header', async ()
     assert.equal(body.error.code, 'UNAUTHORIZED')
 })
 
-test('POST /api/webhooks/foo returns 401 with wrong API secret', async () => {
+test('POST /api/webhooks/foods returns 401 with wrong API secret', async () => {
     const app = createAppForTests({ apiSecret: 'test-secret' })
     const res = await postFooWebhook(app, makeFooPayload('evt-foo-unauth-2'), 'wrong-secret')
     const body = await res.json()
@@ -758,7 +758,7 @@ test('POST /api/webhooks/foo returns 401 with wrong API secret', async () => {
     assert.equal(body.error.code, 'UNAUTHORIZED')
 })
 
-test('POST /api/webhooks/foo returns 202 on valid payload with correct API secret', async () => {
+test('POST /api/webhooks/foods returns 202 on valid payload with correct API secret', async () => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()
     const { logger, calls } = createLoggerStub()
@@ -786,7 +786,7 @@ test('POST /api/webhooks/foo returns 202 on valid payload with correct API secre
     })
 })
 
-test('POST /api/webhooks/foo accepts any source IP', async () => {
+test('POST /api/webhooks/foods accepts any source IP', async () => {
     const { dispatchOrder } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()
     const app = createAppForTests({
@@ -803,7 +803,7 @@ test('POST /api/webhooks/foo accepts any source IP', async () => {
     assert.equal(body.status, 'accepted')
 })
 
-test('POST /api/webhooks/foo ignores webhook_secret field in body', async () => {
+test('POST /api/webhooks/foods   ignores webhook_secret field in body', async () => {
     const { dispatchOrder } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()
     const app = createAppForTests({
@@ -821,9 +821,9 @@ test('POST /api/webhooks/foo ignores webhook_secret field in body', async () => 
     assert.equal(body.status, 'accepted')
 })
 
-test('POST /api/webhooks/foo returns 400 for invalid content-type', async () => {
+test('POST /api/webhooks/foods returns 400 for invalid content-type', async () => {
     const app = createAppForTests({ apiSecret: 'test-secret' })
-    const res = await app.request('/api/webhooks/foo', {
+    const res = await app.request('/api/webhooks/foods', {
         method: 'POST',
         headers: {
             'content-type': 'text/plain',
@@ -837,7 +837,7 @@ test('POST /api/webhooks/foo returns 400 for invalid content-type', async () => 
     assert.match(body.error.message, /application\/json/)
 })
 
-test('POST /api/webhooks/foo returns 400 on validation error', async () => {
+test('POST /api/webhooks/foods returns 400 on validation error', async () => {
     const app = createAppForTests({ apiSecret: 'test-secret' })
     const payload = { ...makeFooPayload('evt-foo-invalid'), time: 'bad-date' }
     const res = await postFooWebhook(app, payload)
@@ -847,7 +847,7 @@ test('POST /api/webhooks/foo returns 400 on validation error', async () => {
     assert.match(body.error.message, /time/)
 })
 
-test('POST /api/webhooks/foo returns 409 on duplicate event_id', async () => {
+test('POST /api/webhooks/foods returns 409 on duplicate event_id', async () => {
     const { dispatchOrder } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()
     const app = createAppForTests({
@@ -865,7 +865,7 @@ test('POST /api/webhooks/foo returns 409 on duplicate event_id', async () => {
     assert.equal(body.error.code, 'DUPLICATED_EVENT')
 })
 
-test('POST /api/webhooks/foo: dispatch 成功 & strategy/interval あり時に addOpenTrade/addOrderV2 を呼ぶ', async () => {
+test('POST /api/webhooks/foods: dispatch 成功 & strategy/interval あり時に addOpenTrade/addOrderV2 を呼ぶ', async () => {
     const { createWebhookEvent } = createWebhookEventStub()
     const { dispatchOrder } = createDispatchStub()
     const addedTrades: OpenTrade[] = []
@@ -1031,7 +1031,7 @@ test('POST /api/webhooks/tradingview: stop_loss_pct + take_profit_pct 両方あ�
         createWebhookEvent,
         dispatchOrder,
         addOpenTrade: async (trade) => { addedTrades.push(trade) },
-        addOrderV2: async () => {},
+        addOrderV2: async () => { },
     })
 
     const payload = {
