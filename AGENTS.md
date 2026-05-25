@@ -35,3 +35,7 @@ mise に PATH が通っていない場合は `~/.local/bin/mise` を用いるこ
 ## Project Structure
 - `/api/src`: ソースコード
 - `/docs`: プロジェクト関連ドキュメント
+
+## Issue Management
+- `/docs/issues.md` を参照すること。
+- 実装開始時、issue を追加するかを判断・確認し、必要であれば issue を追加し、その issue のファイルを中心として進めること。
