@@ -17,7 +17,23 @@ TradingView の Pine Script で `"2%"` のようなパーセント文字列で�
 
 ## ログ
 
-### 2026-05-25 00:00:00 assistant
+### 2026-05-25 23:59:59 assistant
 
-起票した: ユーザーからの要件として、webhook で `stop_loss_pct` / `take_profit_pct` フィールドを
-受け取り、`_pct` フィールドが存在する場合はそちらを優先する仕様変更を記録するため。
+対応完了。
+
+#### 変更内容
+
+- `api/src/index.ts`
+  - `baseWebhookSchema` に `stop_loss_pct` / `take_profit_pct` フィールドを追加（`string | number`、任意）
+  - `dispatchOrder` 呼び出し前に `effectiveStopLoss` / `effectiveTakeProfit` を計算するロジックを追加
+    - `_pct` フィールドが存在する場合は優先使用（数値は `"N%"` 文字列に変換）
+    - 存在しない場合は従来の `stop_loss` / `take_profit` にフォールバック
+  - `orderMethod` 判定ロジック（IFD/IFDOCO）を effective values ベースに更新
+
+- `api/src/index.test.ts`
+  - 新フィールドに関するテストを7件追加（文字列/数値の変換・優先順位・フォールバック・IFDOCO判定）
+
+#### テスト結果
+
+`index.test.ts` の全52テストがパス。
+

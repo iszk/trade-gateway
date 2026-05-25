@@ -896,3 +896,153 @@ test('POST /api/webhooks/foo: dispatch 成功 & strategy/interval あり時に a
     assert.equal(addedOrdersV2[0]?.id, 'evt-foo-open-trade-1')
     assert.equal(addedOrdersV2[0]?.strategy, 'MA Crossover')
 })
+
+// ---------------------------------------------------------------------------
+// stop_loss_pct / take_profit_pct テスト
+// ---------------------------------------------------------------------------
+
+test('POST /api/webhooks/tradingview: stop_loss_pct (文字列) が stop_loss より優先されて stopLoss に渡される', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const payload = {
+        ...makePayload('evt-slpct-str'),
+        stop_loss: '1%',
+        stop_loss_pct: '2%',
+    }
+    const res = await postWebhook(app, payload)
+
+    assert.equal(res.status, 202)
+    assert.equal(dispatchCalls[0]?.stopLoss, '2%')
+})
+
+test('POST /api/webhooks/tradingview: stop_loss_pct (数値) は "N%" 文字列に変換されて stopLoss に渡される', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const payload = {
+        ...makePayload('evt-slpct-num'),
+        stop_loss_pct: 2,
+    }
+    const res = await postWebhook(app, payload)
+
+    assert.equal(res.status, 202)
+    assert.equal(dispatchCalls[0]?.stopLoss, '2%')
+})
+
+test('POST /api/webhooks/tradingview: take_profit_pct (文字列) が take_profit より優先されて takeProfit に渡される', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const payload = {
+        ...makePayload('evt-tppct-str'),
+        take_profit: '1%',
+        take_profit_pct: '3%',
+    }
+    const res = await postWebhook(app, payload)
+
+    assert.equal(res.status, 202)
+    assert.equal(dispatchCalls[0]?.takeProfit, '3%')
+})
+
+test('POST /api/webhooks/tradingview: take_profit_pct (数値) は "N%" 文字列に変換されて takeProfit に渡される', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const payload = {
+        ...makePayload('evt-tppct-num'),
+        take_profit_pct: 3,
+    }
+    const res = await postWebhook(app, payload)
+
+    assert.equal(res.status, 202)
+    assert.equal(dispatchCalls[0]?.takeProfit, '3%')
+})
+
+test('POST /api/webhooks/tradingview: stop_loss_pct なし時は stop_loss がそのまま stopLoss に渡される', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const payload = {
+        ...makePayload('evt-sl-fallback'),
+        stop_loss: '1.5%',
+    }
+    const res = await postWebhook(app, payload)
+
+    assert.equal(res.status, 202)
+    assert.equal(dispatchCalls[0]?.stopLoss, '1.5%')
+})
+
+test('POST /api/webhooks/tradingview: stop_loss_pct も stop_loss もなければ stopLoss は undefined', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+    })
+
+    const res = await postWebhook(app, makePayload('evt-sl-none'))
+
+    assert.equal(res.status, 202)
+    assert.equal(dispatchCalls[0]?.stopLoss, undefined)
+    assert.equal(dispatchCalls[0]?.takeProfit, undefined)
+})
+
+test('POST /api/webhooks/tradingview: stop_loss_pct + take_profit_pct 両方あれば orderMethod が IFDOCO になる', async () => {
+    const { createWebhookEvent } = createWebhookEventStub()
+    const { dispatchOrder } = createDispatchStub()
+    const addedTrades: OpenTrade[] = []
+
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        createWebhookEvent,
+        dispatchOrder,
+        addOpenTrade: async (trade) => { addedTrades.push(trade) },
+        addOrderV2: async () => {},
+    })
+
+    const payload = {
+        ...makePayload('evt-ifdoco-pct'),
+        strategy: 'TEST',
+        interval: '1H',
+        stop_loss_pct: 2,
+        take_profit_pct: 3,
+    }
+    const res = await postWebhook(app, payload)
+
+    assert.equal(res.status, 202)
+    assert.equal(addedTrades[0]?.order_method, 'IFDOCO')
+})
