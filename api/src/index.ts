@@ -270,7 +270,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const getConfirmedIfdOpenTrades = options.getConfirmedIfdOpenTrades ?? createDefaultGetConfirmedIfdOpenTradesFn()
     const getPendingOrdersV2 = options.getPendingOrdersV2 ?? createDefaultGetPendingOrdersV2Fn()
     const updateOrderV2 = options.updateOrderV2 ?? createDefaultUpdateOrderV2Fn()
-    const addOrderV2 = options.addOrderV2 ?? createDefaultAddOrderV2Fn()
     const getOrderV2 = options.getOrderV2 ?? createDefaultGetOrderV2Fn()
     const listOrdersV2ByStrategy = options.listOrdersV2ByStrategy ?? createDefaultListOrdersV2ByStrategyFn()
     const getActiveIfdOrdersV2 = options.getActiveIfdOrdersV2 ?? createDefaultGetActiveIfdOrdersV2Fn()
