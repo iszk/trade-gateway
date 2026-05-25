@@ -1,6 +1,8 @@
 import type { CreateTradeRecordFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn, ConfirmedIfdOpenTrade } from './trade-records.js'
 import { pairLogs } from './trade-records.js'
 
+import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn } from './orders-v2.js'
+
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
     warn(obj: Record<string, unknown>, msg?: string): void
@@ -30,6 +32,9 @@ export type CronContext = {
     /** IFD/IFDOCO フロー用 */
     getConfirmedIfdOpenTrades?: GetConfirmedIfdOpenTradesFn
     closingExecutionFetchers?: Partial<Record<string, ClosingExecutionFetcherLike>>
+    /** Phase 3: orders_v2 のステータス同期用 */
+    getPendingOrdersV2?: GetPendingOrdersV2Fn
+    updateOrderV2?: UpdateOrderV2Fn
 }
 
 const PAIRING_TIMEOUT_MS = 30_000
@@ -70,6 +75,16 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             closingExecutionFetchers: ctx.closingExecutionFetchers,
             deleteOpenTrade: ctx.deleteOpenTrade,
             createTradeRecord: ctx.createTradeRecord,
+        })
+    }
+
+    // Phase 3: orders_v2 のステータス同期
+    if (ctx.getPendingOrdersV2 && ctx.updateOrderV2 && ctx.executionPriceFetchers) {
+        await fetchAndUpdatePendingOrdersV2({
+            logger: ctx.logger,
+            executionPriceFetchers: ctx.executionPriceFetchers,
+            getPendingOrdersV2: ctx.getPendingOrdersV2,
+            updateOrderV2: ctx.updateOrderV2,
         })
     }
 }
@@ -251,6 +266,65 @@ const resolveIfdLikeTrades = async (ctx: {
             ctx.logger.warn(
                 { event: 'cron:ifd_resolve_failed', broker: trade.broker, eventId: trade.event_id, error },
                 'failed to resolve IFD/IFDOCO trade',
+            )
+        }
+    }
+}
+
+/** Phase 3: orders_v2 の PENDING を確定させる */
+const fetchAndUpdatePendingOrdersV2 = async (ctx: {
+    logger: Logger
+    executionPriceFetchers: Partial<Record<string, ExecutionPriceFetcherLike>>
+    getPendingOrdersV2: GetPendingOrdersV2Fn
+    updateOrderV2: UpdateOrderV2Fn
+}): Promise<void> => {
+    const pendingOrders = await ctx.getPendingOrdersV2()
+    ctx.logger.info(
+        { event: 'cron:orders_v2_sync_start', count: pendingOrders.length },
+        'syncing pending orders_v2',
+    )
+
+    for (const order of pendingOrders) {
+        const fetcher = ctx.executionPriceFetchers[order.broker]
+        if (!fetcher) {
+            ctx.logger.info(
+                { event: 'cron:execution_price_fetcher_missing', broker: order.broker },
+                'no execution price fetcher for broker (orders_v2)',
+            )
+            continue
+        }
+
+        try {
+            // NOTE: IFD-OCO などの親注文（1つ目）のステータスだけとりあえず見る簡易実装
+            const providerOrderId = order.provider_order_ids[0]
+            if (!providerOrderId) continue
+
+            const price = await fetcher.getExecutionPrice(providerOrderId, order.ticker)
+            if (price !== null) {
+                // 約定確認完了 -> EXECUTED へ
+                await ctx.updateOrderV2(order.id, {
+                    status: 'EXECUTED',
+                    executed_price: price,
+                    executed_size: order.requested_size, // 簡易的に全量約定とみなす
+                })
+                ctx.logger.info(
+                    { event: 'cron:orders_v2_synced', broker: order.broker, orderId: order.id, price },
+                    'orders_v2 status updated to EXECUTED',
+                )
+            } else {
+                ctx.logger.info(
+                    {
+                        event: 'cron:orders_v2_execution_not_found',
+                        broker: order.broker, orderId: order.id,
+                        provider_order_id: providerOrderId,
+                    },
+                    'orders_v2 execution not yet confirmed',
+                )
+            }
+        } catch (error) {
+            ctx.logger.info(
+                { event: 'cron:orders_v2_sync_failed', broker: order.broker, orderId: order.id, error },
+                'failed to sync orders_v2',
             )
         }
     }

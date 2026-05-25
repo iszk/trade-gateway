@@ -15,6 +15,9 @@ import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn, createDefaultGetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
 import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
+import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultListOrdersV2ByStrategyFn } from './services/orders-v2.js'
+import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, ListOrdersV2ByStrategyFn } from './services/orders-v2.js'
+import { computeStatsV2 } from './services/stats-v2.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
@@ -220,6 +223,7 @@ type CreateAppOptions = {
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
     getOpenTrades?: GetOpenTradesFn
     addOpenTrade?: AddOpenTradeFn
+    addOrderV2?: AddOrderV2Fn
     deleteOpenTrade?: DeleteOpenTradeFn
     createTradeRecord?: CreateTradeRecordFn
     getTradeRecords?: GetTradeRecordsFn
@@ -230,6 +234,11 @@ type CreateAppOptions = {
     // IFD/IFDOCO フロー
     getConfirmedIfdOpenTrades?: GetConfirmedIfdOpenTradesFn
     closingExecutionFetchers?: Partial<Record<string, ClosingExecutionFetcherLike>>
+    // Phase 3 新フロー
+    getPendingOrdersV2?: GetPendingOrdersV2Fn
+    updateOrderV2?: UpdateOrderV2Fn
+    // Phase 4 新フロー
+    listOrdersV2ByStrategy?: ListOrdersV2ByStrategyFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -250,6 +259,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
     const getOpenTrades = options.getOpenTrades ?? createDefaultGetOpenTradesFn()
     const addOpenTrade = options.addOpenTrade ?? createDefaultAddOpenTradeFn()
+    const addOrderV2 = options.addOrderV2 ?? createDefaultAddOrderV2Fn()
     const deleteOpenTrade = options.deleteOpenTrade ?? createDefaultDeleteOpenTradeFn()
     const createTradeRecord = options.createTradeRecord ?? createDefaultCreateTradeRecordFn()
     const getTradeRecords = options.getTradeRecords ?? createDefaultGetTradeRecordsFn()
@@ -257,6 +267,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const getPendingExecutionOpenTrades = options.getPendingExecutionOpenTrades ?? createDefaultGetPendingExecutionOpenTradesFn()
     const updateOpenTradeExecutionPrice = options.updateOpenTradeExecutionPrice ?? createDefaultUpdateOpenTradeExecutionPriceFn()
     const getConfirmedIfdOpenTrades = options.getConfirmedIfdOpenTrades ?? createDefaultGetConfirmedIfdOpenTradesFn()
+    const getPendingOrdersV2 = options.getPendingOrdersV2 ?? createDefaultGetPendingOrdersV2Fn()
+    const updateOrderV2 = options.updateOrderV2 ?? createDefaultUpdateOrderV2Fn()
+    const listOrdersV2ByStrategy = options.listOrdersV2ByStrategy ?? createDefaultListOrdersV2ByStrategyFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -285,6 +298,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
         createTradeRecord,
         getConfirmedIfdOpenTrades,
         closingExecutionFetchers: options.closingExecutionFetchers ?? { bitflyer: bitflyerClient },
+        getPendingOrdersV2,
+        updateOrderV2,
     }
 
     const logWebhook = (
@@ -577,6 +592,25 @@ export const createApp = (options: CreateAppOptions = {}) => {
             }).catch((err) => {
                 reqLogger.warn({ event: 'open_trade:create_failed', error: err, eventId: effectiveEventId }, 'failed to write open_trade')
             })
+
+            // デュアルライト: 新しい orders_v2 コレクションへも記録する
+            addOrderV2({
+                id: effectiveEventId,
+                strategy: payload.strategy,
+                broker: payload.broker as any, // BrokerName に一致させる
+                ticker: payload.ticker,
+                side: payload.side,
+                order_type: (orderMethod === 'IFDOCO' || orderMethod === 'IFD') ? 'IFDOCO' : 'MARKET',
+                requested_size: payload.size,
+                executed_size: 0,
+                executed_price: null,
+                status: 'PENDING',
+                provider_order_ids: [orderResult.providerOrderId],
+                created_at: new Date(),
+                updated_at: new Date(),
+            }).catch((err) => {
+                reqLogger.warn({ event: 'order_v2:create_failed', error: err, eventId: effectiveEventId }, 'failed to write to orders_v2')
+            })
         }
 
         const { webhook_secret: _secret, ...safePayload } = payload
@@ -742,6 +776,21 @@ export const createApp = (options: CreateAppOptions = {}) => {
         } catch (err) {
             logger.warn({ event: 'trade_records:stats_failed', error: err }, 'failed to fetch trade stats')
             return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch trade stats'), 500)
+        }
+    })
+
+    app.get('/api/v2/stats', requireApiSecret, async (c) => {
+        const strategy = c.req.query('strategy')
+        if (!strategy) {
+            return c.json(errorBody('INVALID_REQUEST', 'strategy is required'), 400)
+        }
+        try {
+            const orders = await listOrdersV2ByStrategy(strategy)
+            const stats = computeStatsV2(orders, strategy)
+            return c.json(stats)
+        } catch (err) {
+            logger.warn({ event: 'v2_stats:fetch_failed', error: err, strategy }, 'failed to compute v2 stats')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to compute v2 stats'), 500)
         }
     })
 
