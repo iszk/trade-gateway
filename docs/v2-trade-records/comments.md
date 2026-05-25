@@ -26,14 +26,16 @@
   - 計算時、要求数量と実約定数量の差異をより厳密に扱う場合は API クライアントからのデータ取得側も対応する必要があります。現状は簡易的にフォールバック (`order.executed_size || order.requested_size`) しています。
   - 今回は指定した `strategy` のみの集計ですが、後から複数戦略を同時に返却できるような拡張も視野に入れた方が良さそうです。
 
-## 2026-05-25: 子注文の約定確認も含めた厳密な同期の実装完了
-- `ExecutionPriceFetcherLike` および `ClosingExecutionFetcherLike` インターフェースを拡張し、約定価格だけでなく約定数量 (`size`) も取得できるようにしました。
-- `BitflyerClient` と `SaxoClient` の実装を更新し、正確な約定情報を返すようにしました。
-- `api/src/services/cron-tasks.ts` に `syncExecutionsForExecutedIfdOrders` を実装しました。これにより、`EXECUTED` ステータスの IFD-OCO 注文に対して、Broker API 上で決済子注文が約定しているかを確認し、約定していれば自動的に `side` が反転した新しい `OrderV2` レコードを作成するようにしました。
-- これにより、`stats-v2.ts` による動的集計において、IFD-OCO のエントリーとエグジットが正しく時系列に並び、損益が正確に計算されるようになりました。
+## 2026-05-25: 部分約定への対応と戦略スキャンの動的化
+- `orders_v2` の同期ロジックを強化し、決済注文（IFD-OCO の exit 側）の部分約定に対応しました。
+  - `BitflyerClient.getClosingExecution` において、全ての決済子注文の約定履歴を合算して返すように修正しました。
+  - `syncExecutionsForExecutedIfdOrders` において、既に exit レコードが存在する場合でも、Broker 側の約定数量が増加していれば `executed_size` と `executed_price` を更新するようにしました。
+- IFD-OCO の同期対象とする戦略のハードコードを廃止しました。
+  - `orders_v2` コレクションに対し、`status: "EXECUTED"` かつ `order_type: "IFDOCO"` なドキュメントを直接クエリする `getActiveIfdOrdersV2` 関数を導入しました。
+  - これにより、新しい戦略が追加された場合でも、ソースコードの変更なしに自動的に同期対象に含まれるようになりました。
 - 気になる点:
-  - 決済注文の同期時、現在は `id` を `originalId + "-exit"` としていますが、部分決済を繰り返すような複雑なケースにはまだ対応していません（全量決済を想定）。
-  - IFD-OCO のスキャン対象とする戦略 (`strategies`) を現在はハードコードしていますが、将来的に運用する戦略が増える場合は動的に取得するか設定ファイルに持たせるのが望ましいです。
+  - Firestore クエリ (`status == "EXECUTED" AND order_type == "IFDOCO"`) は、件数が増えた場合に複合インデックスが必要になる可能性がありますが、現状の運用規模では問題ない見込みです。
+  - `stats-v2.ts` による再計算時、レコードの更新 (`updated_at`) が発生するため、キャッシュ等の最適化を行う場合は考慮が必要です。
 
 ## 2026-05-25: Phase 5 (UI対応と旧システムのフェードアウト) について
 - バックエンドの API エンドポイントまで完成したため、要件にある「一旦共存を考えている」という方針に基づき、新旧データの並行蓄積を開始する状態としました。

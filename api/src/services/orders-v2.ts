@@ -74,14 +74,35 @@ export const createGetPendingOrdersV2Fn = (db: Firestore = getFirestoreClient())
     }
 }
 
+export const createGetActiveIfdOrdersV2Fn = (db: Firestore = getFirestoreClient()) => {
+    return async (): Promise<OrderV2[]> => {
+        const snapshot = await db
+            .collection(COLLECTION_NAME)
+            .where('status', '==', 'EXECUTED')
+            .where('order_type', '==', 'IFDOCO')
+            .get()
+
+        return snapshot.docs.map((doc) => {
+            const data = doc.data() as OrderV2
+            return {
+                ...data,
+                created_at: (data.created_at as any).toDate(),
+                updated_at: (data.updated_at as any).toDate(),
+            }
+        })
+    }
+}
+
 export type AddOrderV2Fn = (order: OrderV2) => Promise<void>
 export type UpdateOrderV2Fn = (id: string, updates: Partial<OrderV2>) => Promise<void>
 export type GetOrderV2Fn = (id: string) => Promise<OrderV2 | null>
 export type ListOrdersV2ByStrategyFn = (strategy: string) => Promise<OrderV2[]>
 export type GetPendingOrdersV2Fn = () => Promise<OrderV2[]>
+export type GetActiveIfdOrdersV2Fn = () => Promise<OrderV2[]>
 
 export const createDefaultAddOrderV2Fn = (): AddOrderV2Fn => createAddOrderV2Fn(getFirestoreClient())
 export const createDefaultUpdateOrderV2Fn = (): UpdateOrderV2Fn => createUpdateOrderV2Fn(getFirestoreClient())
 export const createDefaultGetOrderV2Fn = (): GetOrderV2Fn => createGetOrderV2Fn(getFirestoreClient())
 export const createDefaultListOrdersV2ByStrategyFn = (): ListOrdersV2ByStrategyFn => createListOrdersV2ByStrategyFn(getFirestoreClient())
 export const createDefaultGetPendingOrdersV2Fn = (): GetPendingOrdersV2Fn => createGetPendingOrdersV2Fn(getFirestoreClient())
+export const createDefaultGetActiveIfdOrdersV2Fn = (): GetActiveIfdOrdersV2Fn => createGetActiveIfdOrdersV2Fn(getFirestoreClient())

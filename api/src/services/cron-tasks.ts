@@ -42,7 +42,7 @@ export type CronContext = {
     updateOrderV2?: UpdateOrderV2Fn
     addOrderV2?: AddOrderV2Fn
     getOrderV2?: GetOrderV2Fn
-    listOrdersV2ByStrategy?: ListOrdersV2ByStrategyFn
+    getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
 }
 
 const PAIRING_TIMEOUT_MS = 30_000
@@ -97,11 +97,12 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
     }
 
     // IFD/IFDOCO 子注文の同期 (V2)
-    if (ctx.listOrdersV2ByStrategy && ctx.addOrderV2 && ctx.getOrderV2 && ctx.closingExecutionFetchers) {
+    if (ctx.getActiveIfdOrdersV2 && ctx.addOrderV2 && ctx.updateOrderV2 && ctx.getOrderV2 && ctx.closingExecutionFetchers) {
         await syncExecutionsForExecutedIfdOrders({
             logger: ctx.logger,
-            listOrdersV2ByStrategy: ctx.listOrdersV2ByStrategy,
+            getActiveIfdOrdersV2: ctx.getActiveIfdOrdersV2,
             addOrderV2: ctx.addOrderV2,
+            updateOrderV2: ctx.updateOrderV2,
             getOrderV2: ctx.getOrderV2,
             closingExecutionFetchers: ctx.closingExecutionFetchers,
         })
@@ -352,59 +353,70 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
 /** IFD/IFDOCO の子注文（決済）を同期して新しい orders_v2 レコードを作る */
 const syncExecutionsForExecutedIfdOrders = async (ctx: {
     logger: Logger
-    listOrdersV2ByStrategy: ListOrdersV2ByStrategyFn
+    getActiveIfdOrdersV2: GetActiveIfdOrdersV2Fn
     addOrderV2: AddOrderV2Fn
+    updateOrderV2: UpdateOrderV2Fn
     getOrderV2: GetOrderV2Fn
     closingExecutionFetchers: Partial<Record<string, ClosingExecutionFetcherLike>>
 }): Promise<void> => {
-    // ひとまず、既知の戦略について回す（汎用化が必要）
-    // 本来は Firestore で status: 'EXECUTED' AND order_type: 'IFDOCO' なものを引くインデックスを貼るべき
-    const strategies = ['FX_BTC_JPY', 'NAS100', 'US30']
+    const activeIfdos = await ctx.getActiveIfdOrdersV2()
 
-    for (const strategy of strategies) {
-        const orders = await ctx.listOrdersV2ByStrategy(strategy)
-        const activeIfdos = orders.filter(o => o.order_type === 'IFDOCO' && o.status === 'EXECUTED')
+    for (const order of activeIfdos) {
+        const exitId = `${order.id}-exit`
+        
+        // 既存の exit レコードを取得
+        const existingExit = await ctx.getOrderV2(exitId)
 
-        for (const order of activeIfdos) {
-            const exitId = `${order.id}-exit`
-            
-            // 既に exit レコードがあるかチェック
-            const existingExit = await ctx.getOrderV2(exitId)
-            if (existingExit) continue
+        const fetcher = ctx.closingExecutionFetchers[order.broker]
+        if (!fetcher) continue
 
-            const fetcher = ctx.closingExecutionFetchers[order.broker]
-            if (!fetcher) continue
+        try {
+            const providerOrderId = order.provider_order_ids[0]
+            if (!providerOrderId) continue
 
-            try {
-                const providerOrderId = order.provider_order_ids[0]
-                if (!providerOrderId) continue
+            const closing = await fetcher.getClosingExecution(providerOrderId, order.ticker)
+            if (!closing) continue
 
-                const closing = await fetcher.getClosingExecution(providerOrderId, order.ticker)
-                if (closing) {
-                    // 決済約定発見！ 新しい EXECUTED レコードを作成
-                    await ctx.addOrderV2({
-                        id: exitId,
-                        strategy: order.strategy,
-                        broker: order.broker,
-                        ticker: order.ticker,
-                        side: order.side === 'BUY' ? 'SELL' : 'BUY',
-                        order_type: 'MARKET',
-                        requested_size: order.requested_size,
-                        executed_size: closing.size || order.executed_size,
-                        executed_price: closing.price,
-                        status: 'EXECUTED',
-                        provider_order_ids: [providerOrderId + ':closing'],
-                        created_at: new Date(),
-                        updated_at: new Date(),
-                    })
-                    ctx.logger.info(
-                        { event: 'cron:orders_v2_exit_recorded', originalId: order.id, price: closing.price },
-                        'orders_v2 exit recorded for IFDOCO',
-                    )
-                }
-            } catch (error) {
-                ctx.logger.warn({ event: 'cron:orders_v2_exit_sync_failed', orderId: order.id, error }, 'failed to sync exit for IFDOCO')
+            // すでに最新の約定数量まで反映されている場合はスキップ
+            // (精度誤差を考慮してわずかな差は無視するか、厳密に不一致なら更新)
+            if (existingExit && Math.abs(existingExit.executed_size - closing.size) < 0.00000001) {
+                continue
             }
+
+            if (!existingExit) {
+                // 新規作成
+                await ctx.addOrderV2({
+                    id: exitId,
+                    strategy: order.strategy,
+                    broker: order.broker,
+                    ticker: order.ticker,
+                    side: order.side === 'BUY' ? 'SELL' : 'BUY',
+                    order_type: 'MARKET',
+                    requested_size: order.requested_size,
+                    executed_size: closing.size,
+                    executed_price: closing.price,
+                    status: 'EXECUTED',
+                    provider_order_ids: [providerOrderId + ':closing'],
+                    created_at: new Date(),
+                    updated_at: new Date(),
+                })
+                ctx.logger.info(
+                    { event: 'cron:orders_v2_exit_recorded', originalId: order.id, price: closing.price, size: closing.size },
+                    'orders_v2 exit recorded (initial)',
+                )
+            } else {
+                // 更新（部分約定の進展）
+                await ctx.updateOrderV2(exitId, {
+                    executed_size: closing.size,
+                    executed_price: closing.price,
+                })
+                ctx.logger.info(
+                    { event: 'cron:orders_v2_exit_updated', originalId: order.id, price: closing.price, size: closing.size },
+                    'orders_v2 exit updated (partial fill progress)',
+                )
+            }
+        } catch (error) {
+            ctx.logger.warn({ event: 'cron:orders_v2_exit_sync_failed', orderId: order.id, error }, 'failed to sync exit execution')
         }
     }
 }

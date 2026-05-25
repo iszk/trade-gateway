@@ -441,18 +441,22 @@ export class BitflyerClient {
             // child[0] はエントリー注文なのでスキップ、child[1..] が決済注文
             const closingChildren = childOrders.slice(1)
 
-            for (const child of closingChildren) {
-                if (child.child_order_state !== 'COMPLETED') continue
+            let totalSize = 0
+            let totalValue = 0
 
+            for (const child of closingChildren) {
                 const execs = await this.callApi<BitflyerExecutionEntry[]>(
                     'GET',
                     `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(child.child_order_acceptance_id)}`,
                 )
-                if (execs.length > 0) {
-                    const price = weightedAvgExecs(execs)
-                    const size = execs.reduce((sum, e) => sum + e.size, 0)
-                    if (price !== null) return { price, size }
+                for (const e of execs) {
+                    totalSize += e.size
+                    totalValue += e.price * e.size
                 }
+            }
+
+            if (totalSize > 0) {
+                return { price: totalValue / totalSize, size: totalSize }
             }
 
             return null

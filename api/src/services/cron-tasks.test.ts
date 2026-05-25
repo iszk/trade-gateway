@@ -290,35 +290,54 @@ test('executeTenMinutelyTask: orders_v2 の PENDING を EXECUTED に更新する
     assert.equal(updatedOrders[0].executed_size, 0.01)
 })
 
-test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコードを作成する', async () => {
+test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコードを作成・更新する (部分約定対応)', async () => {
     const order: any = {
-        id: 'v2-ifd-1',
+        id: 'v2-ifd-partial',
         strategy: 'FX_BTC_JPY',
         broker: 'bitflyer',
         ticker: 'FX_BTC_JPY',
         side: 'BUY',
         order_type: 'IFDOCO',
         status: 'EXECUTED',
-        provider_order_ids: ['PAR-ifd-1'],
+        provider_order_ids: ['PAR-ifd-partial'],
         requested_size: 0.01,
         executed_size: 0.01,
     }
+    
+    // ケース1: 初回作成 (部分約定)
     const addedOrders: any[] = []
-
-    const ctx = makeBaseCtx({
-        listOrdersV2ByStrategy: async () => [order],
-        getOrderV2: async () => null, // exit レコードがまだない
+    const updatedOrders: any[] = []
+    
+    const ctx1 = makeBaseCtx({
+        getActiveIfdOrdersV2: async () => [order],
+        getOrderV2: async () => null,
         addOrderV2: async (o) => { addedOrders.push(o) },
+        updateOrderV2: async (id, u) => { updatedOrders.push({ id, ...u }) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 10500000, size: 0.01 }) },
+            bitflyer: { getClosingExecution: async () => ({ price: 10500000, size: 0.004 }) },
         },
     })
-
-    await executeTenMinutelyTask(ctx)
-
+    await executeTenMinutelyTask(ctx1)
     assert.equal(addedOrders.length, 1)
-    assert.equal(addedOrders[0].id, 'v2-ifd-1-exit')
-    assert.equal(addedOrders[0].side, 'SELL')
-    assert.equal(addedOrders[0].executed_price, 10500000)
-    assert.equal(addedOrders[0].status, 'EXECUTED')
+    assert.equal(addedOrders[0].id, 'v2-ifd-partial-exit')
+    assert.equal(addedOrders[0].executed_size, 0.004)
+
+    // ケース2: 追加約定
+    const existingExit: any = addedOrders[0]
+    const addedOrders2: any[] = []
+    const updatedOrders2: any[] = []
+    const ctx2 = makeBaseCtx({
+        getActiveIfdOrdersV2: async () => [order],
+        getOrderV2: async (id) => id === 'v2-ifd-partial-exit' ? existingExit : null,
+        addOrderV2: async (o) => { addedOrders2.push(o) },
+        updateOrderV2: async (id, u) => { updatedOrders2.push({ id, ...u }) },
+        closingExecutionFetchers: {
+            bitflyer: { getClosingExecution: async () => ({ price: 10600000, size: 0.007 }) },
+        },
+    })
+    await executeTenMinutelyTask(ctx2)
+    assert.equal(addedOrders2.length, 0)
+    assert.equal(updatedOrders2.length, 1)
+    assert.equal(updatedOrders2[0].executed_size, 0.007)
+    assert.equal(updatedOrders2[0].executed_price, 10600000)
 })

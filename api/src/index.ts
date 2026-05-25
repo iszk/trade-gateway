@@ -15,8 +15,8 @@ import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn, createDefaultGetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
 import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
-import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultListOrdersV2ByStrategyFn, createDefaultGetOrderV2Fn } from './services/orders-v2.js'
-import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, ListOrdersV2ByStrategyFn, GetOrderV2Fn } from './services/orders-v2.js'
+import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultListOrdersV2ByStrategyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn } from './services/orders-v2.js'
+import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, ListOrdersV2ByStrategyFn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './services/orders-v2.js'
 import { computeStatsV2 } from './services/stats-v2.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
@@ -239,6 +239,7 @@ type CreateAppOptions = {
     updateOrderV2?: UpdateOrderV2Fn
     // Phase 4 新フロー
     listOrdersV2ByStrategy?: ListOrdersV2ByStrategyFn
+    getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -272,6 +273,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const addOrderV2 = options.addOrderV2 ?? createDefaultAddOrderV2Fn()
     const getOrderV2 = options.getOrderV2 ?? createDefaultGetOrderV2Fn()
     const listOrdersV2ByStrategy = options.listOrdersV2ByStrategy ?? createDefaultListOrdersV2ByStrategyFn()
+    const getActiveIfdOrdersV2 = options.getActiveIfdOrdersV2 ?? createDefaultGetActiveIfdOrdersV2Fn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -304,7 +306,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         updateOrderV2,
         addOrderV2,
         getOrderV2,
-        listOrdersV2ByStrategy,
+        getActiveIfdOrdersV2,
     }
 
     const logWebhook = (
