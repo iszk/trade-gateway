@@ -337,7 +337,7 @@ test('BitflyerClient.getExecutionPrice returns weighted average price for child 
 
     assert.ok(capturedUrls[0]?.includes('getexecutions'))
     assert.ok(capturedUrls[0]?.includes('JRF-child-1'))
-    assert.equal(result, 10050000) // (10000000 * 0.01 + 10100000 * 0.01) / 0.02
+    assert.deepEqual(result, { price: 10050000, size: 0.02 }) // (10000000 * 0.01 + 10100000 * 0.01) / 0.02
 })
 
 test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no executions found', async () => {
@@ -374,7 +374,7 @@ test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no
     })
 
     const result = await client.getExecutionPrice('JRF-parent-1', 'BTC/JPY')
-    assert.equal(result, 9500000)
+    assert.deepEqual(result, { price: 9500000, size: 0.01 })
     assert.equal(callCount, 3)
 })
 
@@ -432,7 +432,7 @@ test('BitflyerClient.getClosingExecution returns price when closing child order 
     })
 
     const result = await client.getClosingExecution('PAR-1', 'BTC/JPY')
-    assert.deepEqual(result, { price: 9500000 })
+    assert.deepEqual(result, { price: 9500000, size: 0.01 })
     assert.equal(callCount, 2)
 })
 

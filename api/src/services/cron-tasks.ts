@@ -1,7 +1,7 @@
 import type { CreateTradeRecordFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn, ConfirmedIfdOpenTrade } from './trade-records.js'
 import { pairLogs } from './trade-records.js'
 
-import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn } from './orders-v2.js'
+import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, ListOrdersV2ByStrategyFn } from './orders-v2.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -12,12 +12,17 @@ type PositionFetcherLike = {
     fetchAllPositions(broker?: string): Promise<unknown[]>
 }
 
+export type ExecutionInfo = {
+    price: number
+    size: number
+}
+
 export type ExecutionPriceFetcherLike = {
-    getExecutionPrice(providerOrderId: string, ticker: string): Promise<number | null>
+    getExecutionPrice(providerOrderId: string, ticker: string): Promise<ExecutionInfo | null>
 }
 
 export type ClosingExecutionFetcherLike = {
-    getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number } | null>
+    getClosingExecution(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
 }
 
 export type CronContext = {
@@ -35,6 +40,9 @@ export type CronContext = {
     /** Phase 3: orders_v2 のステータス同期用 */
     getPendingOrdersV2?: GetPendingOrdersV2Fn
     updateOrderV2?: UpdateOrderV2Fn
+    addOrderV2?: AddOrderV2Fn
+    getOrderV2?: GetOrderV2Fn
+    getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
 }
 
 const PAIRING_TIMEOUT_MS = 30_000
@@ -87,6 +95,18 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             updateOrderV2: ctx.updateOrderV2,
         })
     }
+
+    // IFD/IFDOCO 子注文の同期 (V2)
+    if (ctx.getActiveIfdOrdersV2 && ctx.addOrderV2 && ctx.updateOrderV2 && ctx.getOrderV2 && ctx.closingExecutionFetchers) {
+        await syncExecutionsForExecutedIfdOrders({
+            logger: ctx.logger,
+            getActiveIfdOrdersV2: ctx.getActiveIfdOrdersV2,
+            addOrderV2: ctx.addOrderV2,
+            updateOrderV2: ctx.updateOrderV2,
+            getOrderV2: ctx.getOrderV2,
+            closingExecutionFetchers: ctx.closingExecutionFetchers,
+        })
+    }
 }
 
 export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
@@ -117,11 +137,11 @@ const fetchAndUpdateExecutionPricesFromOpenTrades = async (ctx: {
         }
 
         try {
-            const price = await fetcher.getExecutionPrice(trade.provider_order_id, trade.ticker)
-            if (price !== null) {
-                await ctx.updateOpenTradeExecutionPrice(trade.event_id, price)
+            const info = await fetcher.getExecutionPrice(trade.provider_order_id, trade.ticker)
+            if (info !== null) {
+                await ctx.updateOpenTradeExecutionPrice(trade.event_id, info.price)
                 ctx.logger.info(
-                    { event: 'cron:open_trades_execution_price_updated', broker: trade.broker, eventId: trade.event_id, price },
+                    { event: 'cron:open_trades_execution_price_updated', broker: trade.broker, eventId: trade.event_id, price: info.price },
                     'open_trades execution price updated',
                 )
             } else {
@@ -295,20 +315,20 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
         }
 
         try {
-            // NOTE: IFD-OCO などの親注文（1つ目）のステータスだけとりあえず見る簡易実装
+            // 親注文（1つ目）のステータスを確認
             const providerOrderId = order.provider_order_ids[0]
             if (!providerOrderId) continue
 
-            const price = await fetcher.getExecutionPrice(providerOrderId, order.ticker)
-            if (price !== null) {
+            const info = await fetcher.getExecutionPrice(providerOrderId, order.ticker)
+            if (info !== null) {
                 // 約定確認完了 -> EXECUTED へ
                 await ctx.updateOrderV2(order.id, {
                     status: 'EXECUTED',
-                    executed_price: price,
-                    executed_size: order.requested_size, // 簡易的に全量約定とみなす
+                    executed_price: info.price,
+                    executed_size: info.size || order.requested_size, // broker から size が取れればそれを使う
                 })
                 ctx.logger.info(
-                    { event: 'cron:orders_v2_synced', broker: order.broker, orderId: order.id, price },
+                    { event: 'cron:orders_v2_synced', broker: order.broker, orderId: order.id, price: info.price, size: info.size },
                     'orders_v2 status updated to EXECUTED',
                 )
             } else {
@@ -326,6 +346,77 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                 { event: 'cron:orders_v2_sync_failed', broker: order.broker, orderId: order.id, error },
                 'failed to sync orders_v2',
             )
+        }
+    }
+}
+
+/** IFD/IFDOCO の子注文（決済）を同期して新しい orders_v2 レコードを作る */
+const syncExecutionsForExecutedIfdOrders = async (ctx: {
+    logger: Logger
+    getActiveIfdOrdersV2: GetActiveIfdOrdersV2Fn
+    addOrderV2: AddOrderV2Fn
+    updateOrderV2: UpdateOrderV2Fn
+    getOrderV2: GetOrderV2Fn
+    closingExecutionFetchers: Partial<Record<string, ClosingExecutionFetcherLike>>
+}): Promise<void> => {
+    const activeIfdos = await ctx.getActiveIfdOrdersV2()
+
+    for (const order of activeIfdos) {
+        const exitId = `${order.id}-exit`
+        
+        // 既存の exit レコードを取得
+        const existingExit = await ctx.getOrderV2(exitId)
+
+        const fetcher = ctx.closingExecutionFetchers[order.broker]
+        if (!fetcher) continue
+
+        try {
+            const providerOrderId = order.provider_order_ids[0]
+            if (!providerOrderId) continue
+
+            const closing = await fetcher.getClosingExecution(providerOrderId, order.ticker)
+            if (!closing) continue
+
+            // すでに最新の約定数量まで反映されている場合はスキップ
+            // (精度誤差を考慮してわずかな差は無視するか、厳密に不一致なら更新)
+            if (existingExit && Math.abs(existingExit.executed_size - closing.size) < 0.00000001) {
+                continue
+            }
+
+            if (!existingExit) {
+                // 新規作成
+                await ctx.addOrderV2({
+                    id: exitId,
+                    strategy: order.strategy,
+                    broker: order.broker,
+                    ticker: order.ticker,
+                    side: order.side === 'BUY' ? 'SELL' : 'BUY',
+                    order_type: 'MARKET',
+                    requested_size: order.requested_size,
+                    executed_size: closing.size,
+                    executed_price: closing.price,
+                    status: 'EXECUTED',
+                    provider_order_ids: [providerOrderId + ':closing'],
+                    created_at: new Date(),
+                    updated_at: new Date(),
+                })
+                ctx.logger.info(
+                    { event: 'cron:orders_v2_exit_recorded', originalId: order.id, price: closing.price, size: closing.size },
+                    'orders_v2 exit recorded (initial)',
+                )
+            } else {
+                // 更新（部分約定の進展）
+                await ctx.updateOrderV2(exitId, {
+                    executed_size: closing.size,
+                    executed_price: closing.price,
+                })
+                ctx.logger.info(
+                    { event: 'cron:orders_v2_exit_updated', originalId: order.id, price: closing.price, size: closing.size },
+                    'orders_v2 exit updated (partial fill progress)',
+                )
+            }
+        } catch (error) {
+            ctx.logger.warn({ event: 'cron:orders_v2_exit_sync_failed', orderId: order.id, error }, 'failed to sync exit execution')
         }
     }
 }
