@@ -63,6 +63,8 @@ const baseWebhookSchema = z.object({
     dry_run: z.boolean().optional(),
     stop_loss: z.string().optional(),
     take_profit: z.string().optional(),
+    stop_loss_pct: z.union([z.string().min(1), z.number().positive()]).optional(),
+    take_profit_pct: z.union([z.string().min(1), z.number().positive()]).optional(),
     symbol: z.string().min(1), // "brokerName:brokerTickerCode" の形式
 })
 
@@ -525,6 +527,17 @@ export const createApp = (options: CreateAppOptions = {}) => {
             throw error
         }
 
+        const pctToString = (v: string | number): string =>
+            typeof v === 'number' ? `${v}%` : v
+
+        const effectiveStopLoss = payload.stop_loss_pct !== undefined
+            ? pctToString(payload.stop_loss_pct)
+            : payload.stop_loss
+
+        const effectiveTakeProfit = payload.take_profit_pct !== undefined
+            ? pctToString(payload.take_profit_pct)
+            : payload.take_profit
+
         const orderResult = await dispatchOrder({
             eventId: effectiveEventId,
             broker: payload.broker as BrokerName || undefined,
@@ -534,8 +547,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
             requestId,
             ...(payload.dry_run ? { dryRun: true } : {}),
             ...(payload.price !== undefined ? { price: payload.price } : {}),
-            ...(payload.stop_loss ? { stopLoss: payload.stop_loss } : {}),
-            ...(payload.take_profit ? { takeProfit: payload.take_profit } : {}),
+            ...(effectiveStopLoss ? { stopLoss: effectiveStopLoss } : {}),
+            ...(effectiveTakeProfit ? { takeProfit: effectiveTakeProfit } : {}),
         })
 
         if (!orderResult.ok) {
@@ -581,8 +594,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
         // execution_price は null で記録し、cron が後から確定させる
         if (orderResult.ok && payload.strategy !== undefined && payload.interval !== undefined) {
             const orderMethod =
-                payload.stop_loss && payload.take_profit ? 'IFDOCO' as const :
-                    payload.stop_loss || payload.take_profit ? 'IFD' as const :
+                effectiveStopLoss && effectiveTakeProfit ? 'IFDOCO' as const :
+                    effectiveStopLoss || effectiveTakeProfit ? 'IFD' as const :
                         undefined
             addOpenTrade({
                 event_id: effectiveEventId,
