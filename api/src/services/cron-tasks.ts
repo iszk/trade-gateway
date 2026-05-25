@@ -1,7 +1,7 @@
 import type { CreateTradeRecordFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn, ConfirmedIfdOpenTrade } from './trade-records.js'
 import { pairLogs } from './trade-records.js'
 
-import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, ListOrdersV2ByStrategyFn } from './orders-v2.js'
+import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, ListOrdersV2ByStrategyFn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void

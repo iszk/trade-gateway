@@ -15,11 +15,14 @@ export type StatsV2 = {
  * 渡された OrderV2 の履歴 (EXECUTED のみ) を時系列順にリプレイし、
  * 現在のポジション、平均取得単価、PnL 等を計算する。
  */
+const EPSILON = 0.00000001
+
 export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => {
     // 確定済みの注文だけを対象に、古い順にソートする
+    // created_at が等しい場合は ID で安定させる
     const executedOrders = orders
         .filter((o) => o.status === 'EXECUTED' && o.executed_price !== null)
-        .sort((a, b) => a.created_at.getTime() - b.created_at.getTime())
+        .sort((a, b) => a.created_at.getTime() - b.created_at.getTime() || a.id.localeCompare(b.id))
 
     let currentPosition = 0
     let averageEntryPrice: number | null = null
@@ -30,14 +33,16 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
 
     for (const order of executedOrders) {
         const size = order.executed_size || order.requested_size
+        if (size < EPSILON) continue
+
         const price = order.executed_price!
         const isBuy = order.side === 'BUY'
 
-        if (currentPosition === 0) {
+        if (Math.abs(currentPosition) < EPSILON) {
             // 新規エントリー
             currentPosition = isBuy ? size : -size
             averageEntryPrice = price
-        } else if ((currentPosition > 0 && isBuy) || (currentPosition < 0 && !isBuy)) {
+        } else if ((currentPosition > EPSILON && isBuy) || (currentPosition < -EPSILON && !isBuy)) {
             // ピラミッディング (増し玉)
             const currentAbsPosition = Math.abs(currentPosition)
             const newAbsPosition = currentAbsPosition + size
@@ -47,7 +52,7 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
             currentPosition = isBuy ? currentPosition + size : currentPosition - size
         } else {
             // 決済 (ドテン・部分決済・全決済を含む)
-            const isLong = currentPosition > 0
+            const isLong = currentPosition > EPSILON
             const currentAbsPosition = Math.abs(currentPosition)
             const closeSize = Math.min(currentAbsPosition, size)
             
@@ -58,19 +63,19 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
             
             realizedPnl += pnl
             totalTrades++
-            if (pnl > 0) {
+            if (pnl > EPSILON) {
                 winningTrades++
-            } else if (pnl < 0) {
+            } else if (pnl < -EPSILON) {
                 losingTrades++
             }
 
             // ポジションの更新
-            if (size > currentAbsPosition) {
+            if (size > currentAbsPosition + EPSILON) {
                 // ドテン (反転)
                 const remainingSize = size - currentAbsPosition
                 currentPosition = isBuy ? remainingSize : -remainingSize
                 averageEntryPrice = price // 新規ポジションの単価は今回の価格
-            } else if (size === currentAbsPosition) {
+            } else if (Math.abs(size - currentAbsPosition) < EPSILON) {
                 // 全決済
                 currentPosition = 0
                 averageEntryPrice = null
