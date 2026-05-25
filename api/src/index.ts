@@ -239,6 +239,7 @@ type CreateAppOptions = {
     updateOrderV2?: UpdateOrderV2Fn
     // Phase 4 新フロー
     listOrdersV2ByStrategy?: ListOrdersV2ByStrategyFn
+    getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
 }
 
