@@ -114,7 +114,7 @@ test('executeTenMinutelyTask: getPendingExecutionOpenTrades から execution_pri
         getPendingExecutionOpenTrades: async () => [pendingTrade],
         updateOpenTradeExecutionPrice: async (eventId, price) => { updatedTrades.push({ eventId, price }) },
         executionPriceFetchers: {
-            bitflyer: { getExecutionPrice: async () => 9500000 },
+            bitflyer: { getExecutionPrice: async () => ({ price: 9500000, size: 0.01 }) },
         },
     })
 
@@ -177,7 +177,7 @@ test('executeTenMinutelyTask: IFD/IFDOCO の決済約定が確認できたとき
     const ctx = makeBaseCtx({
         getConfirmedIfdOpenTrades: async () => [trade],
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 11000000 }) },
+            bitflyer: { getClosingExecution: async () => ({ price: 11000000, size: 0.01 }) },
         },
         deleteOpenTrade: async (id) => { deletedEventIds.push(id) },
         createTradeRecord: async (r) => { createdRecords.push(r) },
@@ -229,7 +229,7 @@ test('executeTenMinutelyTask: IFD ショートの PnL を正しく計算する',
     const ctx = makeBaseCtx({
         getConfirmedIfdOpenTrades: async () => [trade],
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 10000000 }) },
+            bitflyer: { getClosingExecution: async () => ({ price: 10000000, size: 0.01 }) },
         },
         createTradeRecord: async (r) => { createdRecords.push(r) },
     })
@@ -259,4 +259,66 @@ test('executeTenMinutelyTask: getConfirmedIfdOpenTrades が未設定のとき IF
     await executeTenMinutelyTask(ctx)
 
     assert.equal(closingFetcherCalled, false)
+})
+
+// ─────────────── Phase 3: orders_v2 sync ───────────────
+
+test('executeTenMinutelyTask: orders_v2 の PENDING を EXECUTED に更新する', async () => {
+    const pendingOrder: any = {
+        id: 'v2-pending-1',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        status: 'PENDING',
+        provider_order_ids: ['JRF-v2-1'],
+        requested_size: 0.01,
+    }
+    const updatedOrders: any[] = []
+
+    const ctx = makeBaseCtx({
+        getPendingOrdersV2: async () => [pendingOrder],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            bitflyer: { getExecutionPrice: async () => ({ price: 9800000, size: 0.01 }) },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(updatedOrders.length, 1)
+    assert.equal(updatedOrders[0].status, 'EXECUTED')
+    assert.equal(updatedOrders[0].executed_price, 9800000)
+    assert.equal(updatedOrders[0].executed_size, 0.01)
+})
+
+test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコードを作成する', async () => {
+    const order: any = {
+        id: 'v2-ifd-1',
+        strategy: 'FX_BTC_JPY',
+        broker: 'bitflyer',
+        ticker: 'FX_BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        status: 'EXECUTED',
+        provider_order_ids: ['PAR-ifd-1'],
+        requested_size: 0.01,
+        executed_size: 0.01,
+    }
+    const addedOrders: any[] = []
+
+    const ctx = makeBaseCtx({
+        listOrdersV2ByStrategy: async () => [order],
+        getOrderV2: async () => null, // exit レコードがまだない
+        addOrderV2: async (o) => { addedOrders.push(o) },
+        closingExecutionFetchers: {
+            bitflyer: { getClosingExecution: async () => ({ price: 10500000, size: 0.01 }) },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(addedOrders.length, 1)
+    assert.equal(addedOrders[0].id, 'v2-ifd-1-exit')
+    assert.equal(addedOrders[0].side, 'SELL')
+    assert.equal(addedOrders[0].executed_price, 10500000)
+    assert.equal(addedOrders[0].status, 'EXECUTED')
 })

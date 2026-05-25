@@ -378,7 +378,7 @@ export class BitflyerClient {
         }
     }
 
-    async getExecutionPrice(providerOrderId: string, ticker: string): Promise<number | null> {
+    async getExecutionPrice(providerOrderId: string, ticker: string): Promise<{ price: number, size: number } | null> {
         if (providerOrderId === 'DRY_RUN') return null
 
         this.logger.info({
@@ -391,8 +391,11 @@ export class BitflyerClient {
                 'GET',
                 `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
             )
-            const directPrice = weightedAvgExecs(directExecs)
-            if (directPrice !== null) return directPrice
+            if (directExecs.length > 0) {
+                const price = weightedAvgExecs(directExecs)
+                const size = directExecs.reduce((sum, e) => sum + e.size, 0)
+                if (price !== null) return { price, size }
+            }
 
             // parent_order_acceptance_id として照会し、最初のチャイルド（エントリー注文）の約定価格を取得
             const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
@@ -406,7 +409,12 @@ export class BitflyerClient {
                 'GET',
                 `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(entryChildId)}`,
             )
-            return weightedAvgExecs(childExecs)
+            if (childExecs.length > 0) {
+                const price = weightedAvgExecs(childExecs)
+                const size = childExecs.reduce((sum, e) => sum + e.size, 0)
+                if (price !== null) return { price, size }
+            }
+            return null
         } catch (error) {
             this.logger.warn(
                 { event: 'bitflyer:get_execution_price_failed', providerOrderId, ticker, error },
@@ -421,7 +429,7 @@ export class BitflyerClient {
      * COMPLETED の子注文があれば約定価格を返す。
      * 未約定なら null。
      */
-    async getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number } | null> {
+    async getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number, size: number } | null> {
         if (parentOrderId === 'DRY_RUN') return null
 
         try {
@@ -440,8 +448,11 @@ export class BitflyerClient {
                     'GET',
                     `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(child.child_order_acceptance_id)}`,
                 )
-                const price = weightedAvgExecs(execs)
-                if (price !== null) return { price }
+                if (execs.length > 0) {
+                    const price = weightedAvgExecs(execs)
+                    const size = execs.reduce((sum, e) => sum + e.size, 0)
+                    if (price !== null) return { price, size }
+                }
             }
 
             return null

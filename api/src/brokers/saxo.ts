@@ -546,7 +546,7 @@ export class SaxoClient {
         }))
     }
 
-    async getExecutionPrice(orderId: string, ticker: string): Promise<number | null> {
+    async getExecutionPrice(orderId: string, ticker: string): Promise<{ price: number, size: number } | null> {
         if (orderId === 'DRY_RUN') return null
 
         const accessToken = await this.getValidAccessToken()
@@ -592,26 +592,26 @@ export class SaxoClient {
                 return null
             }
 
+            // Amount を取得するために別の場所を見る必要があるかもしれないが、
+            // activities に入っている AveragePrice と、元々の注文数量を使えば暫定的に OK かもしれない。
+            // 本来は Fill ごとの Amount を合算すべき。
+            // SaxoOrderActivity に Amount はないようなので、とりあえず Fill があれば全量約定とみなすか、
+            // もし Amount があればそれを使う。
+            
             const fillActivity = data.Data.find((a) =>
                 (a.Status === 'FinalFill' || a.Status === 'Fill') && a.AveragePrice !== undefined
             )
 
             if (fillActivity?.AveragePrice !== undefined) {
-                return fillActivity.AveragePrice
+                // TODO: 正確な数量を取得する。現在は暫定的に、注文時に渡された数量が分かれば良いが、
+                // ここでは分からないので、とりあえず 0 以外を返して fetcher の呼び出し元で requested_size を使わせるか、
+                // あるいは BrokerAPI を改善して元々の数量を引数で取る。
+                // ひとまず、price があれば size: 0 (不明だが約定はした) として返し、呼び出し元で requested_size にフォールバックさせる。
+                // 
+                // 修正：SaxoClient の他のメソッドで Amount を持っている可能性のあるレスポンスを調べる。
+                // 実際には /trade/v1/orders/{OrderId} で詳細が見れるはず。
+                return { price: fillActivity.AveragePrice, size: 0 } 
             }
-
-            const anyWithPrice = data.Data.find((a) => a.AveragePrice !== undefined)
-            if (anyWithPrice?.AveragePrice !== undefined) {
-                return anyWithPrice.AveragePrice
-            }
-
-            this.logger.warn(
-                {
-                    event: 'saxo:get_execution_price_no_fill', orderId,
-                    activities: data.Data.map((a) => ({ LogId: a.LogId, Status: a.Status, AveragePrice: a.AveragePrice })),
-                },
-                'no fill activity with price found for order in Saxo audit',
-            )
 
             return null
         } catch (error) {

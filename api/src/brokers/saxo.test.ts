@@ -201,7 +201,7 @@ test('SaxoClient.getExecutionPrice returns AveragePrice from audit activities', 
     assert.ok(capturedUrl.includes('/cs/v1/audit/orderactivities/'))
     assert.ok(capturedUrl.includes('OrderId=ORD-123'))
     assert.ok(capturedUrl.includes('ClientKey=test-client'))
-    assert.equal(result, 18066.67)
+    assert.deepEqual(result, { price: 18066.67, size: 0 })
 })
 
 test('SaxoClient.getExecutionPrice returns null when activities are empty', async () => {
