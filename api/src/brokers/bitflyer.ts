@@ -60,6 +60,7 @@ type BitflyerExecutionEntry = {
 type BitflyerChildOrderEntry = {
     child_order_acceptance_id: string
     child_order_state: string
+    child_order_type: string
 }
 
 const SEND_CHILD_ORDER_PATH = '/v1/me/sendchildorder'
@@ -104,7 +105,9 @@ const normalizeProductCode = (ticker: string) => ticker.replace(/\//g, '_').toUp
 // マップにない ticker は normalizeProductCode にフォールバック
 const TICKER_PRODUCT_CODE_MAP: Record<string, string> = {
     'BITFLYER:FXBTCJPY': 'FX_BTC_JPY',
+    'FXBTCJPY': 'FX_BTC_JPY',
     'BITFLYER:BTCJPY': 'BTC_JPY',
+    'BTCJPY': 'BTC_JPY',
 }
 
 const resolveProductCode = (ticker: string): string =>
@@ -381,6 +384,8 @@ export class BitflyerClient {
     async getExecutionPrice(providerOrderId: string, ticker: string): Promise<{ price: number, size: number } | null> {
         if (providerOrderId === 'DRY_RUN') return null
 
+        const productCode = resolveProductCode(ticker)
+
         this.logger.info({
             event: 'bitflyer:get_execution_price_start', providerOrderId
         }, 'fetching execution price for order ' + ticker + ' ' + providerOrderId)
@@ -389,7 +394,7 @@ export class BitflyerClient {
             // child_order_acceptance_id として照会
             const directExecs = await this.callApi<BitflyerExecutionEntry[]>(
                 'GET',
-                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
+                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(productCode)}&child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
             )
             if (directExecs.length > 0) {
                 const price = weightedAvgExecs(directExecs)
@@ -400,14 +405,16 @@ export class BitflyerClient {
             // parent_order_acceptance_id として照会し、最初のチャイルド（エントリー注文）の約定価格を取得
             const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
                 'GET',
-                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(ticker)}&parent_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
+                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
             )
             if (childOrders.length === 0) return null
 
-            const entryChildId = childOrders[0].child_order_acceptance_id
+            const entryChild = childOrders.find(c => c.child_order_type === 'MARKET')
+            if (!entryChild) return null
+            const entryChildId = entryChild.child_order_acceptance_id
             const childExecs = await this.callApi<BitflyerExecutionEntry[]>(
                 'GET',
-                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(entryChildId)}`,
+                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(productCode)}&child_order_acceptance_id=${encodeURIComponent(entryChildId)}`,
             )
             if (childExecs.length > 0) {
                 const price = weightedAvgExecs(childExecs)
@@ -432,15 +439,17 @@ export class BitflyerClient {
     async getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number, size: number } | null> {
         if (parentOrderId === 'DRY_RUN') return null
 
+        const productCode = resolveProductCode(ticker)
+
         try {
             const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
                 'GET',
-                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(ticker)}&parent_order_acceptance_id=${encodeURIComponent(parentOrderId)}`,
+                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_acceptance_id=${encodeURIComponent(parentOrderId)}`,
             )
 
-            // child[0] はエントリー注文なのでスキップ、child[1..] が決済注文
-            // COMPLETED のもののみ約定取得する
-            const closingChildren = childOrders.slice(1).filter(c => c.child_order_state === 'COMPLETED')
+            // MARKET 注文はエントリーなのでスキップし、STOP/LIMIT 等の決済注文のみ対象にする
+            // API のレスポンス順に依存せず child_order_type で判定する
+            const closingChildren = childOrders.filter(c => c.child_order_type !== 'MARKET' && c.child_order_state === 'COMPLETED')
 
             let totalSize = 0
             let totalValue = 0
@@ -448,7 +457,7 @@ export class BitflyerClient {
             for (const child of closingChildren) {
                 const execs = await this.callApi<BitflyerExecutionEntry[]>(
                     'GET',
-                    `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(ticker)}&child_order_acceptance_id=${encodeURIComponent(child.child_order_acceptance_id)}`,
+                    `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(productCode)}&child_order_acceptance_id=${encodeURIComponent(child.child_order_acceptance_id)}`,
                 )
                 for (const e of execs) {
                     totalSize += e.size

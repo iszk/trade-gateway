@@ -342,6 +342,7 @@ test('BitflyerClient.getExecutionPrice returns weighted average price for child 
 
 test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no executions found', async () => {
     let callCount = 0
+    const capturedUrls: string[] = []
 
     const client = new BitflyerClient({
         apiKey: 'test-key',
@@ -350,6 +351,7 @@ test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no
         fetchImpl: async (url) => {
             callCount++
             const urlStr = String(url)
+            capturedUrls.push(urlStr)
 
             if (callCount === 1) {
                 // 1st: getexecutions?child_order_acceptance_id=JRF-parent-1 → empty
@@ -360,7 +362,7 @@ test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no
                 // 2nd: getchildorders?parent_order_acceptance_id=JRF-parent-1
                 assert.ok(urlStr.includes('getchildorders'))
                 return new Response(
-                    JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry', child_order_state: 'COMPLETED' }]),
+                    JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry', child_order_state: 'COMPLETED', child_order_type: 'MARKET' }]),
                     { status: 200, headers: { 'content-type': 'application/json' } },
                 )
             }
@@ -376,6 +378,7 @@ test('BitflyerClient.getExecutionPrice falls back to parent order lookup when no
     const result = await client.getExecutionPrice('JRF-parent-1', 'BTC/JPY')
     assert.deepEqual(result, { price: 9500000, size: 0.01 })
     assert.equal(callCount, 3)
+    assert.ok(capturedUrls.every((url) => url.includes('product_code=BTC_JPY')))
 })
 
 test('BitflyerClient.getExecutionPrice returns null on API error', async () => {
@@ -400,6 +403,7 @@ test('BitflyerClient.getClosingExecution returns null for DRY_RUN', async () => 
 
 test('BitflyerClient.getClosingExecution returns price when closing child order is COMPLETED', async () => {
     let callCount = 0
+    const capturedUrls: string[] = []
 
     const client = new BitflyerClient({
         apiKey: 'test-key',
@@ -408,15 +412,16 @@ test('BitflyerClient.getClosingExecution returns price when closing child order 
         fetchImpl: async (url) => {
             callCount++
             const urlStr = String(url)
+            capturedUrls.push(urlStr)
 
             if (callCount === 1) {
                 // getchildorders?parent_order_acceptance_id=PAR-1
                 assert.ok(urlStr.includes('getchildorders'))
                 return new Response(
                     JSON.stringify([
-                        { child_order_acceptance_id: 'JRF-entry', child_order_state: 'COMPLETED' },
-                        { child_order_acceptance_id: 'JRF-stop', child_order_state: 'COMPLETED' },
-                        { child_order_acceptance_id: 'JRF-limit', child_order_state: 'ACTIVE' },
+                        { child_order_acceptance_id: 'JRF-entry', child_order_state: 'COMPLETED', child_order_type: 'MARKET' },
+                        { child_order_acceptance_id: 'JRF-stop', child_order_state: 'COMPLETED', child_order_type: 'STOP' },
+                        { child_order_acceptance_id: 'JRF-limit', child_order_state: 'ACTIVE', child_order_type: 'LIMIT' },
                     ]),
                     { status: 200, headers: { 'content-type': 'application/json' } },
                 )
@@ -434,6 +439,7 @@ test('BitflyerClient.getClosingExecution returns price when closing child order 
     const result = await client.getClosingExecution('PAR-1', 'BTC/JPY')
     assert.deepEqual(result, { price: 9500000, size: 0.01 })
     assert.equal(callCount, 2)
+    assert.ok(capturedUrls.every((url) => url.includes('product_code=BTC_JPY')))
 })
 
 test('BitflyerClient.getClosingExecution returns null when no closing child is COMPLETED', async () => {
@@ -444,9 +450,9 @@ test('BitflyerClient.getClosingExecution returns null when no closing child is C
         fetchImpl: async () =>
             new Response(
                 JSON.stringify([
-                    { child_order_acceptance_id: 'JRF-entry', child_order_state: 'COMPLETED' },
-                    { child_order_acceptance_id: 'JRF-stop', child_order_state: 'ACTIVE' },
-                    { child_order_acceptance_id: 'JRF-limit', child_order_state: 'ACTIVE' },
+                    { child_order_acceptance_id: 'JRF-entry', child_order_state: 'COMPLETED', child_order_type: 'MARKET' },
+                    { child_order_acceptance_id: 'JRF-stop', child_order_state: 'ACTIVE', child_order_type: 'STOP' },
+                    { child_order_acceptance_id: 'JRF-limit', child_order_state: 'ACTIVE', child_order_type: 'LIMIT' },
                 ]),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             ),
@@ -466,4 +472,156 @@ test('BitflyerClient.getClosingExecution returns null on API error', async () =>
 
     const result = await client.getClosingExecution('PAR-1', 'BTC/JPY')
     assert.equal(result, null)
+})
+
+// バグ再現: getchildorders がパラメーター順以外で返された場合 (IFDOCO exit の executed_price/size 不正)
+test('BitflyerClient.getClosingExecution correctly identifies closing child when API returns children in non-parameter order', async () => {
+    // API がエントリー注文を index 0 以外で返すケース
+    // (STOP が先頭、MARKET エントリーが末尾)
+    let callCount = 0
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            callCount++
+            const urlStr = String(url)
+
+            if (callCount === 1) {
+                // getchildorders: STOP が先頭, MARKET エントリーが末尾
+                assert.ok(urlStr.includes('getchildorders'))
+                return new Response(
+                    JSON.stringify([
+                        { child_order_acceptance_id: 'JRF-stop', child_order_state: 'COMPLETED', child_order_type: 'STOP' },
+                        { child_order_acceptance_id: 'JRF-limit', child_order_state: 'CANCELED', child_order_type: 'LIMIT' },
+                        { child_order_acceptance_id: 'JRF-entry', child_order_state: 'COMPLETED', child_order_type: 'MARKET' },
+                    ]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            // getexecutions for JRF-stop (the actual closing order)
+            assert.ok(urlStr.includes('getexecutions'))
+            assert.ok(urlStr.includes('JRF-stop'))
+            return new Response(
+                JSON.stringify([{ child_order_acceptance_id: 'JRF-stop', price: 9200000, size: 0.01 }]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getClosingExecution('PAR-1', 'BTC/JPY')
+    // エントリー(MARKET)の価格ではなく、決済(STOP)の価格が返るべき
+    assert.deepEqual(result, { price: 9200000, size: 0.01 })
+    assert.equal(callCount, 2)
+})
+
+test('BitflyerClient.getExecutionPrice correctly identifies entry child when API returns children in non-parameter order', async () => {
+    // MARKET エントリーが index 0 以外の場合
+    let callCount = 0
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            callCount++
+            const urlStr = String(url)
+
+            if (callCount === 1) {
+                // 1st: getexecutions?child_order_acceptance_id=JRF-parent-1 → empty
+                return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+            }
+            if (callCount === 2) {
+                // 2nd: getchildorders: STOP が先頭, MARKET エントリーが末尾
+                assert.ok(urlStr.includes('getchildorders'))
+                return new Response(
+                    JSON.stringify([
+                        { child_order_acceptance_id: 'JRF-stop', child_order_state: 'ACTIVE', child_order_type: 'STOP' },
+                        { child_order_acceptance_id: 'JRF-entry', child_order_state: 'COMPLETED', child_order_type: 'MARKET' },
+                    ]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            // 3rd: getexecutions for JRF-entry (MARKET)
+            assert.ok(urlStr.includes('getexecutions'))
+            assert.ok(urlStr.includes('JRF-entry'))
+            return new Response(
+                JSON.stringify([{ child_order_acceptance_id: 'JRF-entry', price: 9700000, size: 0.01 }]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPrice('JRF-parent-1', 'BTC/JPY')
+    assert.deepEqual(result, { price: 9700000, size: 0.01 })
+    assert.equal(callCount, 3)
+})
+
+test('BitflyerClient normalizes bitflyer ticker format for execution queries', async () => {
+    const capturedUrls: string[] = []
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const urlStr = String(url)
+            capturedUrls.push(urlStr)
+
+            if (capturedUrls.length === 1) {
+                return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+            }
+            if (capturedUrls.length === 2) {
+                return new Response(
+                    JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry', child_order_state: 'COMPLETED', child_order_type: 'MARKET' }]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            return new Response(
+                JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry', price: 9500000, size: 0.001 }]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPrice('JRF-parent-1', 'FXBTCJPY')
+
+    assert.deepEqual(result, { price: 9500000, size: 0.001 })
+    assert.ok(capturedUrls.every((url) => url.includes('product_code=FX_BTC_JPY')))
+})
+
+test('BitflyerClient normalizes bitflyer ticker format for closing execution queries', async () => {
+    const capturedUrls: string[] = []
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const urlStr = String(url)
+            capturedUrls.push(urlStr)
+
+            if (capturedUrls.length === 1) {
+                return new Response(
+                    JSON.stringify([
+                        { child_order_acceptance_id: 'JRF-stop', child_order_state: 'COMPLETED', child_order_type: 'STOP' },
+                        { child_order_acceptance_id: 'JRF-entry', child_order_state: 'COMPLETED', child_order_type: 'MARKET' },
+                    ]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            return new Response(
+                JSON.stringify([{ child_order_acceptance_id: 'JRF-stop', price: 9200000, size: 0.001 }]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getClosingExecution('PAR-1', 'FXBTCJPY')
+
+    assert.deepEqual(result, { price: 9200000, size: 0.001 })
+    assert.ok(capturedUrls.every((url) => url.includes('product_code=FX_BTC_JPY')))
 })
