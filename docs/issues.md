@@ -26,7 +26,7 @@ title は kebab-case または日本語で、理解のしやすい短い文章�
 
 ## ログ
 
-### {YYYY-MM-DD HH:MM:SS} {エージェント名}
+### {YYYY-MM-DD HH:MM:SS} {エージェント名} {モデル名}
 
 起票した: {起票理由}
 
