@@ -19,6 +19,11 @@ type BitflyerOrderResponse = {
     error_message?: string
 }
 
+type BitflyerParentOrderDetail = {
+    parent_order_id?: string
+    parent_order_acceptance_id?: string
+}
+
 function parsePercentage(value: string): number | null {
     const match = value.trim().match(/^(\d+(?:\.\d+)?)%$/)
     if (!match || !match[1]) return null
@@ -70,6 +75,7 @@ const GET_BALANCE_PATH = '/v1/me/getbalance'
 const GET_COLLATERAL_PATH = '/v1/me/getcollateral'
 const GET_EXECUTIONS_PATH = '/v1/me/getexecutions'
 const GET_CHILD_ORDERS_PATH = '/v1/me/getchildorders'
+const GET_PARENT_ORDER_PATH = '/v1/me/getparentorder'
 const DEFAULT_BITFLYER_BASE_URL = 'https://api.bitflyer.com'
 
 type BitflyerParentOrderParameter = {
@@ -381,6 +387,23 @@ export class BitflyerClient {
         }
     }
 
+    private async resolveParentOrderId(orderId: string): Promise<string | null> {
+        if (orderId.startsWith('JCO')) {
+            return orderId
+        }
+
+        const queryParam = orderId.startsWith('JRF')
+            ? `parent_order_acceptance_id=${encodeURIComponent(orderId)}`
+            : `parent_order_id=${encodeURIComponent(orderId)}`
+
+        const parentOrder = await this.callApi<BitflyerParentOrderDetail>(
+            'GET',
+            `${GET_PARENT_ORDER_PATH}?${queryParam}`,
+        )
+
+        return parentOrder.parent_order_id ?? null
+    }
+
     async getExecutionPrice(providerOrderId: string, ticker: string): Promise<{ price: number, size: number } | null> {
         if (providerOrderId === 'DRY_RUN') return null
 
@@ -402,10 +425,13 @@ export class BitflyerClient {
                 if (price !== null) return { price, size }
             }
 
-            // parent_order_acceptance_id として照会し、最初のチャイルド（エントリー注文）の約定価格を取得
+            // 親注文受付ID(JRF...)から親注文ID(JCO...)へ解決した上で、子注文一覧を取得する
+            const parentOrderId = await this.resolveParentOrderId(providerOrderId)
+            if (!parentOrderId) return null
+
             const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
                 'GET',
-                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
+                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_id=${encodeURIComponent(parentOrderId)}`,
             )
             if (childOrders.length === 0) return null
 
@@ -442,10 +468,24 @@ export class BitflyerClient {
         const productCode = resolveProductCode(ticker)
 
         try {
+            const resolvedParentOrderId = await this.resolveParentOrderId(parentOrderId)
+            if (!resolvedParentOrderId) return null
+
             const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
                 'GET',
-                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_acceptance_id=${encodeURIComponent(parentOrderId)}`,
+                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_id=${encodeURIComponent(resolvedParentOrderId)}`,
             )
+
+            // 
+            this.logger.info({
+                event: 'bitflyer:get_closing_execution_child_orders_fetched',
+                url: `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_id=${encodeURIComponent(resolvedParentOrderId)}`,
+                parentOrderId,
+                resolvedParentOrderId,
+                ticker,
+                childOrdersCount: childOrders.length,
+                body: childOrders,
+            }, 'fetched child orders for parent order ' + parentOrderId)
 
             // MARKET 注文はエントリーなのでスキップし、STOP/LIMIT 等の決済注文のみ対象にする
             // API のレスポンス順に依存せず child_order_type で判定する
