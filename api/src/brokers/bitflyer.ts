@@ -1,6 +1,8 @@
 import { createHmac } from 'node:crypto'
 
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
+import type { BitflyerParentOrderMetadata } from '../types/broker-order-metadata.js'
+import type { OrderV2 } from '../types/order-v2.js'
 import type { Position } from '../types/position.js'
 import { defaultLogger, type Logger } from '../logger.js'
 
@@ -66,6 +68,10 @@ type BitflyerChildOrderEntry = {
     child_order_acceptance_id: string
     child_order_state: string
     child_order_type: string
+    side?: 'BUY' | 'SELL'
+    size?: number
+    price?: number
+    trigger_price?: number
 }
 
 const SEND_CHILD_ORDER_PATH = '/v1/me/sendchildorder'
@@ -124,6 +130,62 @@ const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): number | null => {
     const totalSize = execs.reduce((sum, e) => sum + e.size, 0)
     const totalValue = execs.reduce((sum, e) => sum + e.price * e.size, 0)
     return totalValue / totalSize
+}
+
+const areSameNumber = (left: number | undefined, right: number | undefined): boolean => {
+    if (left === undefined || right === undefined) return left === right
+    return Math.abs(left - right) < 0.00000001
+}
+
+const matchesExpectedChildOrder = (
+    child: BitflyerChildOrderEntry,
+    expected: BitflyerParentOrderMetadata['entry']['expected'],
+): boolean => {
+    if (child.side === undefined || child.size === undefined) return false
+
+    const hasExpectedPrice = expected.price !== undefined
+    const hasExpectedTriggerPrice = expected.trigger_price !== undefined
+
+    return (
+        child.side === expected.side &&
+        areSameNumber(child.size, expected.size) &&
+        (!hasExpectedPrice || areSameNumber(child.price, expected.price)) &&
+        (!hasExpectedTriggerPrice || areSameNumber(child.trigger_price, expected.trigger_price)) &&
+        (
+            hasExpectedPrice ||
+            hasExpectedTriggerPrice ||
+            child.child_order_type === expected.condition_type
+        )
+    )
+}
+
+const buildParentOrderMetadata = (
+    providerOrderId: string,
+    orderMethod: 'IFD' | 'IFDOCO',
+    entrySide: 'BUY' | 'SELL',
+    entrySize: number,
+    exits: BitflyerParentOrderMetadata['exits'],
+): BitflyerParentOrderMetadata => ({
+    kind: 'bitflyer_parent_order_v1',
+    parent_order_acceptance_id: providerOrderId,
+    order_method: orderMethod,
+    entry: {
+        expected: {
+            role: 'ENTRY',
+            side: entrySide,
+            condition_type: 'MARKET',
+            size: entrySize,
+        },
+        resolved: {
+            acceptance_id: null,
+        },
+    },
+    exits,
+})
+
+type OrdersV2ExecutionSyncResult = {
+    execution: { price: number, size: number } | null
+    brokerOrderMetadata?: BitflyerParentOrderMetadata
 }
 
 export class BitflyerClient {
@@ -295,10 +357,33 @@ export class BitflyerClient {
                     return buildFailure('BROKER_REQUEST_FAILED', 'missing parent_order_acceptance_id')
                 }
 
+                const metadataExits: BitflyerParentOrderMetadata['exits'] = parameters.slice(1).map((parameter) => ({
+                    expected: {
+                        role: parameter.condition_type === 'STOP' ? 'STOP_LOSS' : 'TAKE_PROFIT',
+                        side: parameter.side,
+                        condition_type: parameter.condition_type as 'LIMIT' | 'STOP',
+                        size: parameter.size,
+                        ...(parameter.price !== undefined ? { price: parameter.price } : {}),
+                        ...(parameter.trigger_price !== undefined ? { trigger_price: parameter.trigger_price } : {}),
+                    },
+                    resolved: {
+                        acceptance_id: null,
+                    },
+                }))
+
+                const brokerOrderMetadata = buildParentOrderMetadata(
+                    providerOrderId,
+                    orderMethod,
+                    order.side,
+                    size,
+                    metadataExits,
+                )
+
                 return {
                     ok: true,
                     broker: 'bitflyer',
                     providerOrderId,
+                    brokerOrderMetadata,
                 }
             }
 
@@ -402,6 +487,171 @@ export class BitflyerClient {
         )
 
         return parentOrder.parent_order_id ?? null
+    }
+
+    private async fetchChildOrders(parentOrderId: string, ticker: string): Promise<BitflyerChildOrderEntry[] | null> {
+        const productCode = resolveProductCode(ticker)
+        const resolvedParentOrderId = await this.resolveParentOrderId(parentOrderId)
+        if (!resolvedParentOrderId) return null
+
+        return await this.callApi<BitflyerChildOrderEntry[]>(
+            'GET',
+            `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_id=${encodeURIComponent(resolvedParentOrderId)}`,
+        )
+    }
+
+    private resolveMetadataFromChildOrders(
+        metadata: BitflyerParentOrderMetadata,
+        childOrders: BitflyerChildOrderEntry[],
+    ): BitflyerParentOrderMetadata {
+        const usedAcceptanceIds = new Set<string>()
+        if (metadata.entry.resolved.acceptance_id) {
+            usedAcceptanceIds.add(metadata.entry.resolved.acceptance_id)
+        }
+        for (const exit of metadata.exits) {
+            if (exit.resolved.acceptance_id) {
+                usedAcceptanceIds.add(exit.resolved.acceptance_id)
+            }
+        }
+
+        const resolveAcceptanceId = (expected: BitflyerParentOrderMetadata['entry']['expected'], current: string | null) => {
+            if (current) return current
+
+            const matches = childOrders.filter((child) =>
+                !usedAcceptanceIds.has(child.child_order_acceptance_id) && matchesExpectedChildOrder(child, expected),
+            )
+
+            if (matches.length !== 1) return null
+
+            const [match] = matches
+            if (!match) return null
+            usedAcceptanceIds.add(match.child_order_acceptance_id)
+            return match.child_order_acceptance_id
+        }
+
+        return {
+            ...metadata,
+            entry: {
+                ...metadata.entry,
+                resolved: {
+                    acceptance_id: resolveAcceptanceId(
+                        metadata.entry.expected,
+                        metadata.entry.resolved.acceptance_id,
+                    ),
+                },
+            },
+            exits: metadata.exits.map((exit) => ({
+                ...exit,
+                resolved: {
+                    acceptance_id: resolveAcceptanceId(exit.expected, exit.resolved.acceptance_id),
+                },
+            })),
+        }
+    }
+
+    private async fetchExecutionInfoByChildAcceptanceId(
+        childAcceptanceId: string,
+        ticker: string,
+    ): Promise<{ price: number, size: number } | null> {
+        const productCode = resolveProductCode(ticker)
+        const childExecs = await this.callApi<BitflyerExecutionEntry[]>(
+            'GET',
+            `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(productCode)}&child_order_acceptance_id=${encodeURIComponent(childAcceptanceId)}`,
+        )
+        if (childExecs.length === 0) return null
+
+        const price = weightedAvgExecs(childExecs)
+        const size = childExecs.reduce((sum, e) => sum + e.size, 0)
+        return price === null ? null : { price, size }
+    }
+
+    async getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {
+        const providerOrderId = order.provider_order_ids[0]
+        if (!providerOrderId || providerOrderId === 'DRY_RUN') {
+            return { execution: null }
+        }
+
+        const metadata = order.broker_order_metadata
+        if (metadata?.kind !== 'bitflyer_parent_order_v1') {
+            return {
+                execution: await this.getExecutionPrice(providerOrderId, order.ticker),
+            }
+        }
+
+        try {
+            let resolvedMetadata = metadata
+            if (!resolvedMetadata.entry.resolved.acceptance_id) {
+                const childOrders = await this.fetchChildOrders(providerOrderId, order.ticker)
+                if (childOrders) {
+                    resolvedMetadata = this.resolveMetadataFromChildOrders(resolvedMetadata, childOrders)
+                }
+            }
+
+            const acceptanceId = resolvedMetadata.entry.resolved.acceptance_id
+            const execution = acceptanceId
+                ? await this.fetchExecutionInfoByChildAcceptanceId(acceptanceId, order.ticker)
+                : null
+
+            return {
+                execution,
+                brokerOrderMetadata: resolvedMetadata,
+            }
+        } catch (error) {
+            this.logger.warn(
+                { event: 'bitflyer:get_execution_price_v2_failed', orderId: order.id, ticker: order.ticker, error },
+                'failed to get execution price for orders_v2 order',
+            )
+            return { execution: null, brokerOrderMetadata: metadata }
+        }
+    }
+
+    async getClosingExecutionForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {
+        const providerOrderId = order.provider_order_ids[0]
+        if (!providerOrderId || providerOrderId === 'DRY_RUN') {
+            return { execution: null }
+        }
+
+        const metadata = order.broker_order_metadata
+        if (metadata?.kind !== 'bitflyer_parent_order_v1') {
+            return {
+                execution: await this.getClosingExecution(providerOrderId, order.ticker),
+            }
+        }
+
+        try {
+            let resolvedMetadata = metadata
+            if (resolvedMetadata.exits.some((exit) => !exit.resolved.acceptance_id)) {
+                const childOrders = await this.fetchChildOrders(providerOrderId, order.ticker)
+                if (childOrders) {
+                    resolvedMetadata = this.resolveMetadataFromChildOrders(resolvedMetadata, childOrders)
+                }
+            }
+
+            let totalSize = 0
+            let totalValue = 0
+
+            for (const exit of resolvedMetadata.exits) {
+                const acceptanceId = exit.resolved.acceptance_id
+                if (!acceptanceId) continue
+
+                const execution = await this.fetchExecutionInfoByChildAcceptanceId(acceptanceId, order.ticker)
+                if (!execution) continue
+
+                totalSize += execution.size
+                totalValue += execution.price * execution.size
+            }
+
+            return {
+                execution: totalSize > 0 ? { price: totalValue / totalSize, size: totalSize } : null,
+                brokerOrderMetadata: resolvedMetadata,
+            }
+        } catch (error) {
+            this.logger.warn(
+                { event: 'bitflyer:get_closing_execution_v2_failed', orderId: order.id, ticker: order.ticker, error },
+                'failed to get closing execution for orders_v2 order',
+            )
+            return { execution: null, brokerOrderMetadata: metadata }
+        }
     }
 
     async getExecutionPrice(providerOrderId: string, ticker: string): Promise<{ price: number, size: number } | null> {

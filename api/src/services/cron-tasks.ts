@@ -2,6 +2,8 @@ import type { CreateTradeRecordFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendin
 import { pairLogs } from './trade-records.js'
 
 import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, ListOrdersV2ByStrategyFn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
+import type { OrderV2 } from '../types/order-v2.js'
+import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -17,12 +19,19 @@ export type ExecutionInfo = {
     size: number
 }
 
+export type OrdersV2ExecutionSyncResult = {
+    execution: ExecutionInfo | null
+    brokerOrderMetadata?: BrokerOrderMetadata
+}
+
 export type ExecutionPriceFetcherLike = {
     getExecutionPrice(providerOrderId: string, ticker: string): Promise<ExecutionInfo | null>
+    getExecutionPriceForOrderV2?(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
 }
 
 export type ClosingExecutionFetcherLike = {
     getClosingExecution(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
+    getClosingExecutionForOrderV2?(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
 }
 
 export type CronContext = {
@@ -319,14 +328,28 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
             const providerOrderId = order.provider_order_ids[0]
             if (!providerOrderId) continue
 
-            const info = await fetcher.getExecutionPrice(providerOrderId, order.ticker)
+            const syncResult = fetcher.getExecutionPriceForOrderV2
+                ? await fetcher.getExecutionPriceForOrderV2(order)
+                : { execution: await fetcher.getExecutionPrice(providerOrderId, order.ticker) }
+
+            const info = syncResult.execution
+            if (info !== null || syncResult.brokerOrderMetadata !== undefined) {
+                const updates: Partial<OrderV2> = {}
+                if (syncResult.brokerOrderMetadata !== undefined) {
+                    updates.broker_order_metadata = syncResult.brokerOrderMetadata
+                }
+                if (info !== null) {
+                    updates.status = 'EXECUTED'
+                    updates.executed_price = info.price
+                    updates.executed_size = info.size || order.requested_size
+                }
+
+                if (Object.keys(updates).length > 0) {
+                    await ctx.updateOrderV2(order.id, updates)
+                }
+            }
+
             if (info !== null) {
-                // 約定確認完了 -> EXECUTED へ
-                await ctx.updateOrderV2(order.id, {
-                    status: 'EXECUTED',
-                    executed_price: info.price,
-                    executed_size: info.size || order.requested_size, // broker から size が取れればそれを使う
-                })
                 ctx.logger.info(
                     { event: 'cron:orders_v2_synced', broker: order.broker, orderId: order.id, price: info.price, size: info.size },
                     'orders_v2 status updated to EXECUTED',
@@ -363,7 +386,7 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
 
     for (const order of activeIfdos) {
         const exitId = `${order.id}-exit`
-        
+
         // 既存の exit レコードを取得
         const existingExit = await ctx.getOrderV2(exitId)
 
@@ -374,7 +397,17 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
             const providerOrderId = order.provider_order_ids[0]
             if (!providerOrderId) continue
 
-            const closing = await fetcher.getClosingExecution(providerOrderId, order.ticker)
+            const syncResult = fetcher.getClosingExecutionForOrderV2
+                ? await fetcher.getClosingExecutionForOrderV2(order)
+                : { execution: await fetcher.getClosingExecution(providerOrderId, order.ticker) }
+
+            if (syncResult.brokerOrderMetadata !== undefined) {
+                await ctx.updateOrderV2(order.id, {
+                    broker_order_metadata: syncResult.brokerOrderMetadata,
+                })
+            }
+
+            const closing = syncResult.execution
             if (!closing) continue
 
             // すでに最新の約定数量まで反映されている場合はスキップ

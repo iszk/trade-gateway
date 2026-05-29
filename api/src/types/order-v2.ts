@@ -1,4 +1,5 @@
 import { BrokerName, OrderSide } from './order.js'
+import type { BrokerOrderMetadata } from './broker-order-metadata.js'
 
 export type OrderStatusV2 = 'PENDING' | 'EXECUTED' | 'FAILED' | 'CANCELED'
 
@@ -27,6 +28,8 @@ export type OrderV2 = {
     status: OrderStatusV2
     /** Broker側で発行された注文ID。IFD-OCO等の複数IDに対応するため配列 */
     provider_order_ids: string[]
+    /** Broker固有の注文追跡メタデータ */
+    broker_order_metadata?: BrokerOrderMetadata
     /** レコード作成日時 (Webhook受付時刻など) */
     created_at: Date
     /** 最終更新日時 */

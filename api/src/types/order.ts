@@ -1,5 +1,7 @@
 export type BrokerName = 'bitflyer' | 'dummy' | 'saxo'
 
+import type { BrokerOrderMetadata } from './broker-order-metadata.js'
+
 export type OrderSide = 'BUY' | 'SELL'
 
 export type OrderRequest = {
@@ -19,6 +21,7 @@ export type OrderDispatchSuccess = {
     ok: true
     broker: BrokerName
     providerOrderId: string
+    brokerOrderMetadata?: BrokerOrderMetadata
 }
 
 export type OrderDispatchFailureCode =

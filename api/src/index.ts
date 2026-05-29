@@ -626,6 +626,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 executed_price: null,
                 status: 'PENDING',
                 provider_order_ids: [orderResult.providerOrderId],
+                broker_order_metadata: orderResult.brokerOrderMetadata,
                 created_at: new Date(),
                 updated_at: new Date(),
             }).catch((err) => {

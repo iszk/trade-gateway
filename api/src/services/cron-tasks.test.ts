@@ -290,6 +290,54 @@ test('executeTenMinutelyTask: orders_v2 の PENDING を EXECUTED に更新する
     assert.equal(updatedOrders[0].executed_size, 0.01)
 })
 
+test('executeTenMinutelyTask: orders_v2 の entry metadata 解決結果を保存する', async () => {
+    const pendingOrder: any = {
+        id: 'v2-pending-meta-1',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        status: 'PENDING',
+        provider_order_ids: ['JRF-v2-meta-1'],
+        requested_size: 0.01,
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-v2-meta-1',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: null },
+            },
+            exits: [],
+        },
+    }
+    const updatedOrders: any[] = []
+
+    const ctx = makeBaseCtx({
+        getPendingOrdersV2: async () => [pendingOrder],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            bitflyer: {
+                getExecutionPrice: async () => null,
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: null,
+                    brokerOrderMetadata: {
+                        ...pendingOrder.broker_order_metadata,
+                        entry: {
+                            ...pendingOrder.broker_order_metadata.entry,
+                            resolved: { acceptance_id: 'JRF-child-entry-1' },
+                        },
+                    },
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(updatedOrders.length, 1)
+    assert.deepEqual(updatedOrders[0].broker_order_metadata.entry.resolved, { acceptance_id: 'JRF-child-entry-1' })
+    assert.equal(updatedOrders[0].status, undefined)
+})
+
 test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコードを作成・更新する (部分約定対応)', async () => {
     const order: any = {
         id: 'v2-ifd-partial',
@@ -303,11 +351,11 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         requested_size: 0.01,
         executed_size: 0.01,
     }
-    
+
     // ケース1: 初回作成 (部分約定)
     const addedOrders: any[] = []
     const updatedOrders: any[] = []
-    
+
     const ctx1 = makeBaseCtx({
         getActiveIfdOrdersV2: async () => [order],
         getOrderV2: async () => null,
@@ -340,4 +388,67 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
     assert.equal(updatedOrders2.length, 1)
     assert.equal(updatedOrders2[0].executed_size, 0.007)
     assert.equal(updatedOrders2[0].executed_price, 10600000)
+})
+
+test('executeTenMinutelyTask: IFDOCO の close metadata 解決結果を親 orders_v2 に保存する', async () => {
+    const order: any = {
+        id: 'v2-ifd-meta',
+        strategy: 'FX_BTC_JPY',
+        broker: 'bitflyer',
+        ticker: 'FX_BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        status: 'EXECUTED',
+        provider_order_ids: ['PAR-ifd-meta'],
+        requested_size: 0.01,
+        executed_size: 0.01,
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'PAR-ifd-meta',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-entry-meta' },
+            },
+            exits: [
+                {
+                    expected: { role: 'STOP_LOSS', side: 'SELL', condition_type: 'STOP', size: 0.01, trigger_price: 9500000 },
+                    resolved: { acceptance_id: null },
+                },
+            ],
+        },
+    }
+
+    const updatedOrders: any[] = []
+    const addedOrders: any[] = []
+
+    const ctx = makeBaseCtx({
+        getActiveIfdOrdersV2: async () => [order],
+        getOrderV2: async () => null,
+        addOrderV2: async (o) => { addedOrders.push(o) },
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        closingExecutionFetchers: {
+            bitflyer: {
+                getClosingExecution: async () => null,
+                getClosingExecutionForOrderV2: async () => ({
+                    execution: { price: 10500000, size: 0.01 },
+                    brokerOrderMetadata: {
+                        ...order.broker_order_metadata,
+                        exits: [
+                            {
+                                ...order.broker_order_metadata.exits[0],
+                                resolved: { acceptance_id: 'JRF-stop-meta' },
+                            },
+                        ],
+                    },
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(updatedOrders.length, 1)
+    assert.deepEqual(updatedOrders[0].broker_order_metadata.exits[0].resolved, { acceptance_id: 'JRF-stop-meta' })
+    assert.equal(addedOrders.length, 1)
 })

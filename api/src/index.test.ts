@@ -658,6 +658,96 @@ test('POST /api/webhooks/tradingview: dispatch 成功 & strategy/interval あり
     assert.equal(addedOrdersV2[0]?.status, 'PENDING')
     assert.equal(addedOrdersV2[0]?.order_type, 'MARKET')
     assert.deepEqual(addedOrdersV2[0]?.provider_order_ids, ['JRF-test-1'])
+    assert.equal(addedOrdersV2[0]?.broker_order_metadata, undefined)
+})
+
+test('POST /api/webhooks/tradingview: bitflyer parent order metadata を orders_v2 に保存する', async () => {
+    const { createWebhookEvent } = createWebhookEventStub()
+    const addedOrdersV2: any[] = []
+
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        createWebhookEvent,
+        dispatchOrder: async () => ({
+            ok: true,
+            broker: 'bitflyer',
+            providerOrderId: 'JRF-parent-meta-1',
+            brokerOrderMetadata: {
+                kind: 'bitflyer_parent_order_v1',
+                parent_order_acceptance_id: 'JRF-parent-meta-1',
+                order_method: 'IFDOCO',
+                entry: {
+                    expected: {
+                        role: 'ENTRY',
+                        side: 'BUY',
+                        condition_type: 'MARKET',
+                        size: 0.01,
+                    },
+                    resolved: {
+                        acceptance_id: null,
+                    },
+                },
+                exits: [
+                    {
+                        expected: {
+                            role: 'STOP_LOSS',
+                            side: 'SELL',
+                            condition_type: 'STOP',
+                            size: 0.01,
+                            trigger_price: 9500000,
+                        },
+                        resolved: {
+                            acceptance_id: null,
+                        },
+                    },
+                ],
+            },
+        }),
+        addOrderV2: async (order) => { addedOrdersV2.push(order) },
+    })
+
+    const res = await postWebhook(app, {
+        ...makePayload('evt-order-meta-1'),
+        strategy: 'MA Crossover',
+        interval: '4H',
+        price: 9700000,
+        stop_loss_pct: 2,
+        take_profit_pct: 3,
+    })
+
+    assert.equal(res.status, 202)
+    assert.equal(addedOrdersV2.length, 1)
+    assert.deepEqual(addedOrdersV2[0]?.broker_order_metadata, {
+        kind: 'bitflyer_parent_order_v1',
+        parent_order_acceptance_id: 'JRF-parent-meta-1',
+        order_method: 'IFDOCO',
+        entry: {
+            expected: {
+                role: 'ENTRY',
+                side: 'BUY',
+                condition_type: 'MARKET',
+                size: 0.01,
+            },
+            resolved: {
+                acceptance_id: null,
+            },
+        },
+        exits: [
+            {
+                expected: {
+                    role: 'STOP_LOSS',
+                    side: 'SELL',
+                    condition_type: 'STOP',
+                    size: 0.01,
+                    trigger_price: 9500000,
+                },
+                resolved: {
+                    acceptance_id: null,
+                },
+            },
+        ],
+    })
 })
 
 test('POST /api/webhooks/tradingview: strategy/interval がなければ addOpenTrade/addOrderV2 を呼ばない', async () => {
