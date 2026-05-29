@@ -4,8 +4,16 @@ default:
     @just --choose
 
 test:
+    @just check-firebase
     npm run typecheck
     npm run test
+
+# Firebase のヘルスチェック（タイムアウト5秒、失敗したら即終了）
+check-firebase:
+    @echo "Checking Firebase emulator..."
+    @curl --silent --fail --max-time 5 http://firebase:8080 > /dev/null \
+        || (echo "❌ Firebase emulator is not reachable. Please check firebase. Aborting." && exit 1)
+    @echo "✅ Firebase is up."
 
 # API をデプロイする
 deploy:
