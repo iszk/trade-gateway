@@ -926,11 +926,20 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves close acceptance ids
             }
 
             assert.ok(urlStr.includes('getexecutions'))
-            assert.ok(urlStr.includes('JRF-child-stop-meta'))
-            return new Response(
-                JSON.stringify([{ child_order_acceptance_id: 'JRF-child-stop-meta', price: 9500000, size: 0.01 }]),
-                { status: 200, headers: { 'content-type': 'application/json' } },
-            )
+            if (urlStr.includes('JRF-child-stop-meta')) {
+                return new Response(
+                    JSON.stringify([{ child_order_acceptance_id: 'JRF-child-stop-meta', price: 9500000, size: 0.01 }]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlStr.includes('JRF-child-limit-meta')) {
+                return new Response(
+                    JSON.stringify([]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            assert.fail(`unexpected getexecutions url: ${urlStr}`)
         },
     })
 

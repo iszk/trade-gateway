@@ -44,7 +44,7 @@ export const createListOrdersV2ByStrategyFn = (db: Firestore = getFirestoreClien
             .where('strategy', '==', strategy)
             .orderBy('created_at', 'asc')
             .get()
-        
+
         return snapshot.docs.map((doc) => {
             const data = doc.data() as OrderV2
             return {
@@ -80,6 +80,7 @@ export const createGetActiveIfdOrdersV2Fn = (db: Firestore = getFirestoreClient(
             .collection(COLLECTION_NAME)
             .where('status', '==', 'EXECUTED')
             .where('order_type', '==', 'IFDOCO')
+            .where('exit_sync_status', '==', 'MONITORING')
             .get()
 
         return snapshot.docs.map((doc) => {

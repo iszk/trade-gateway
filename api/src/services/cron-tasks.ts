@@ -342,6 +342,9 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                     updates.status = 'EXECUTED'
                     updates.executed_price = info.price
                     updates.executed_size = info.size || order.requested_size
+                    if (order.order_type === 'IFDOCO' && order.exit_sync_status === undefined) {
+                        updates.exit_sync_status = 'MONITORING'
+                    }
                 }
 
                 if (Object.keys(updates).length > 0) {
@@ -374,6 +377,8 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
 }
 
 /** IFD/IFDOCO の子注文（決済）を同期して新しい orders_v2 レコードを作る */
+const EPSILON = 0.00000001
+
 const syncExecutionsForExecutedIfdOrders = async (ctx: {
     logger: Logger
     getActiveIfdOrdersV2: GetActiveIfdOrdersV2Fn
@@ -410,11 +415,26 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
             const closing = syncResult.execution
             if (!closing) continue
 
-            // すでに最新の約定数量まで反映されている場合はスキップ
-            // (精度誤差を考慮してわずかな差は無視するか、厳密に不一致なら更新)
-            if (existingExit && Math.abs(existingExit.executed_size - closing.size) < 0.00000001) {
+            if (closing.size > order.requested_size + EPSILON) {
+                ctx.logger.warn(
+                    {
+                        event: 'cron:orders_v2_exit_sync_invalid_size',
+                        orderId: order.id,
+                        requestedSize: order.requested_size,
+                        closingSize: closing.size,
+                    },
+                    'closing execution size exceeded requested_size; skipping exit sync update',
+                )
                 continue
             }
+
+            // すでに最新の約定数量まで反映されている場合はスキップ
+            // (精度誤差を考慮してわずかな差は無視するか、厳密に不一致なら更新)
+            if (existingExit && Math.abs(existingExit.executed_size - closing.size) < EPSILON) {
+                continue
+            }
+
+            const isExitCompleted = closing.size >= order.requested_size - EPSILON
 
             if (!existingExit) {
                 // 新規作成
@@ -429,20 +449,30 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
                     executed_size: closing.size,
                     executed_price: closing.price,
                     status: 'EXECUTED',
+                    exit_sync_status: undefined,
                     provider_order_ids: [providerOrderId + ':closing'],
                     created_at: new Date(),
                     updated_at: new Date(),
                 })
+                if (isExitCompleted) {
+                    await ctx.updateOrderV2(order.id, { exit_sync_status: 'COMPLETED' })
+                }
                 ctx.logger.info(
                     { event: 'cron:orders_v2_exit_recorded', originalId: order.id, price: closing.price, size: closing.size },
                     'orders_v2 exit recorded (initial)',
                 )
             } else {
                 // 更新（部分約定の進展）
-                await ctx.updateOrderV2(exitId, {
-                    executed_size: closing.size,
-                    executed_price: closing.price,
-                })
+                await ctx.updateOrderV2(
+                    exitId,
+                    {
+                        executed_size: closing.size,
+                        executed_price: closing.price,
+                    },
+                )
+                if (isExitCompleted) {
+                    await ctx.updateOrderV2(order.id, { exit_sync_status: 'COMPLETED' })
+                }
                 ctx.logger.info(
                     { event: 'cron:orders_v2_exit_updated', originalId: order.id, price: closing.price, size: closing.size },
                     'orders_v2 exit updated (partial fill progress)',

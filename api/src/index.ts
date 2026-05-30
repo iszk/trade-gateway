@@ -625,6 +625,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 executed_size: 0,
                 executed_price: null,
                 status: 'PENDING',
+                exit_sync_status: orderMethod === 'IFDOCO' || orderMethod === 'IFD' ? 'MONITORING' : undefined,
                 provider_order_ids: [orderResult.providerOrderId],
                 broker_order_metadata: orderResult.brokerOrderMetadata,
                 created_at: new Date(),

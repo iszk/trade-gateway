@@ -748,6 +748,7 @@ test('POST /api/webhooks/tradingview: bitflyer parent order metadata を orders_
             },
         ],
     })
+    assert.equal(addedOrdersV2[0]?.exit_sync_status, 'MONITORING')
 })
 
 test('POST /api/webhooks/tradingview: strategy/interval がなければ addOpenTrade/addOrderV2 を呼ばない', async () => {

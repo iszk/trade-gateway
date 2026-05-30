@@ -5,6 +5,8 @@ export type OrderStatusV2 = 'PENDING' | 'EXECUTED' | 'FAILED' | 'CANCELED'
 
 export type OrderTypeV2 = 'MARKET' | 'IFDOCO' | 'LIMIT' | 'STOP'
 
+export type ExitSyncStatus = 'MONITORING' | 'COMPLETED'
+
 export type OrderV2 = {
     /** 注文のユニークID（WebhookのeventIdなど） */
     id: string
@@ -26,6 +28,8 @@ export type OrderV2 = {
     executed_price: number | null
     /** 注文の現在のステータス */
     status: OrderStatusV2
+    /** IFDOCO 親注文の exit 監視状態 */
+    exit_sync_status?: ExitSyncStatus
     /** Broker側で発行された注文ID。IFD-OCO等の複数IDに対応するため配列 */
     provider_order_ids: string[]
     /** Broker固有の注文追跡メタデータ */
