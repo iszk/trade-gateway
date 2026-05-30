@@ -1,16 +1,19 @@
-# IFDOCO の exit 注文で orders_v2 に書き込まれる executed_size / executed_price の値が不正
+---
+title:  IFDOCO の exit 注文で orders_v2 に書き込まれる executed_size / executed_price の値が不正
+status: done
+---
 
-## 概要
+# 概要
 
 `orders_v2` コレクションに書き込まれたデータのうち、IFDOCO の exit（決済注文）で入ったレコードについて、`executed_size` および `executed_price` の値が正しくない。`requested_size` は正常に記録されている。
 
-## 背景
+# 背景
 
 - IFDOCO は「新規注文 → 利確注文 + 損切注文」の複合注文形式
 - exit 注文が約定した際、`orders_v2` コレクションへの書き込み処理で約定数量・約定価格が誤った値になっている
 - `requested_size`（注文数量）は正しく記録されているため、問題は約定情報の取得・マッピング処理に起因する可能性が高い
 
-## 実装/修正プラン
+# 実装/修正プラン
 
 - [x] `orders_v2` コレクションへの書き込み処理を特定する（`orders-v2.ts` など）
 - [x] IFDOCO の exit 注文における約定情報（`executed_size`, `executed_price`）の取得元・マッピングロジックを調査する
@@ -19,9 +22,9 @@
 - [x] テスト追加・修正、全テスト通過確認
 - [ ] saxo の同様の箇所を調査・修正（bitflyer 修正確認後）
 
-## ログ
+# ログ
 
-### 2026-05-26 10:27:00 GitHub Copilot Claude Sonnet 4.6
+## 2026-05-26 10:27:00 GitHub Copilot Claude Sonnet 4.6
 
 **調査結果・根本原因**
 
@@ -56,7 +59,7 @@
 **今回あえて対応しなかった内容**
 - saxo の同様の調査・修正: 現象が確認されていないため bitflyer 修正確認後に別途対応予定
 
-### 2026-05-26 16:28:00 GitHub Copilot GPT-5.4
+## 2026-05-26 16:28:00 GitHub Copilot GPT-5.4
 
 **再調査結果**
 
@@ -79,7 +82,7 @@
 
 全 143 テスト PASS 確認済み。
 
-### 2026-05-27 22:41:00 GitHub Copilot GPT-5.4
+## 2026-05-27 22:41:00 GitHub Copilot GPT-5.4
 
 **追加調査結果**
 
