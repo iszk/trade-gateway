@@ -9,6 +9,13 @@ export type StatsV2 = {
     total_trades: number
     winning_trades: number
     losing_trades: number
+    profit_factor: number
+    max_drawdown: number
+    sharpe_ratio: number | null
+    avg_pnl: number | null
+    avg_win: number | null
+    avg_loss: number | null
+    open_orders: number
 }
 
 /**
@@ -26,12 +33,21 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
         .filter((o) => o.status === 'EXECUTED' && o.executed_price !== null)
         .sort((a, b) => getSortTime(a) - getSortTime(b) || a.id.localeCompare(b.id))
 
+    const openOrders = orders.filter((o) => o.status === 'PENDING').length
+
     let currentPosition = 0
     let averageEntryPrice: number | null = null
     let realizedPnl = 0
     let totalTrades = 0
     let winningTrades = 0
     let losingTrades = 0
+
+    const tradePnls: number[] = []
+    let grossProfit = 0
+    let grossLoss = 0
+    let peakCumPnl = 0
+    let cumPnl = 0
+    let maxDrawdown = 0
 
     for (const order of executedOrders) {
         const size = order.executed_size || order.requested_size
@@ -64,11 +80,25 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
                 : (averageEntryPrice! - price) * closeSize
 
             realizedPnl += pnl
+            cumPnl += pnl
+            tradePnls.push(pnl)
             totalTrades++
+
             if (pnl > EPSILON) {
                 winningTrades++
+                grossProfit += pnl
             } else if (pnl < -EPSILON) {
                 losingTrades++
+                grossLoss += Math.abs(pnl)
+            }
+
+            // Max Drawdown の計算
+            if (cumPnl > peakCumPnl) {
+                peakCumPnl = cumPnl
+            }
+            const drawdown = peakCumPnl - cumPnl
+            if (drawdown > maxDrawdown) {
+                maxDrawdown = drawdown
             }
 
             // ポジションの更新
@@ -90,6 +120,19 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
     }
 
     const winRate = totalTrades > 0 ? winningTrades / totalTrades : 0
+    const profitFactor = grossLoss > EPSILON ? grossProfit / grossLoss : grossProfit > EPSILON ? Infinity : 0
+    const avgPnl = totalTrades > 0 ? realizedPnl / totalTrades : null
+    const avgWin = winningTrades > 0 ? grossProfit / winningTrades : null
+    const avgLoss = losingTrades > 0 ? grossLoss / losingTrades : null
+
+    // Sharpe Ratio（リスクフリーレート 0、トレード単位）
+    let sharpeRatio: number | null = null
+    if (tradePnls.length >= 2) {
+        const mean = realizedPnl / tradePnls.length
+        const variance = tradePnls.reduce((acc, pnl) => acc + (pnl - mean) ** 2, 0) / tradePnls.length
+        const stdDev = Math.sqrt(variance)
+        sharpeRatio = stdDev > EPSILON ? mean / stdDev : null
+    }
 
     return {
         strategy,
@@ -100,5 +143,12 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
         total_trades: totalTrades,
         winning_trades: winningTrades,
         losing_trades: losingTrades,
+        profit_factor: profitFactor,
+        max_drawdown: maxDrawdown,
+        sharpe_ratio: sharpeRatio,
+        avg_pnl: avgPnl,
+        avg_win: avgWin,
+        avg_loss: avgLoss,
+        open_orders: openOrders,
     }
 }
