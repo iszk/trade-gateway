@@ -26,6 +26,8 @@ export type OrderV2 = {
     executed_size: number
     /** 実約定価格 */
     executed_price: number | null
+    /** 実約定時刻。取得できない場合は未設定または created_at 相当を使う */
+    executed_at?: Date
     /** 注文の現在のステータス */
     status: OrderStatusV2
     /** IFDOCO 親注文の exit 監視状態 */

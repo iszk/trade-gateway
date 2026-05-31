@@ -32,6 +32,31 @@ test('computeStatsV2: basic buy and sell', () => {
     assert.equal(stats.win_rate, 1)
 })
 
+test('computeStatsV2: executed_at を created_at より優先して時系列判定する', () => {
+    const orders: OrderV2[] = [
+        makeOrder({
+            id: 'sell-late-created-first-executed',
+            side: 'SELL',
+            executed_price: 1100000,
+            created_at: new Date('2026-01-01T00:00:00Z'),
+            executed_at: new Date('2026-01-01T01:00:00Z'),
+        }),
+        makeOrder({
+            id: 'buy-early-created-late-executed',
+            side: 'BUY',
+            executed_price: 1000000,
+            created_at: new Date('2026-01-01T02:00:00Z'),
+            executed_at: new Date('2026-01-01T00:30:00Z'),
+        }),
+    ]
+
+    const stats = computeStatsV2(orders, 'test-strategy')
+
+    assert.equal(stats.current_position, 0)
+    assert.equal(stats.realized_pnl, 1000)
+    assert.equal(stats.total_trades, 1)
+})
+
 test('computeStatsV2: partial close', () => {
     const orders: OrderV2[] = [
         makeOrder({ side: 'BUY', executed_price: 1000000, executed_size: 0.01, created_at: new Date('2026-01-01T00:00:00Z') }),

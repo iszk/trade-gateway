@@ -74,10 +74,23 @@ type SaxoOrderActivity = {
     OrderId: string
     Status: string
     AveragePrice?: number
+    ActivityTime?: string
+    ExecutionTime?: string
+    UtcTime?: string
 }
 
 type SaxoOrderActivitiesResponse = {
     Data: SaxoOrderActivity[]
+}
+
+const parseSaxoActivityTime = (activity: SaxoOrderActivity): Date | undefined => {
+    const rawTime = activity.ActivityTime ?? activity.ExecutionTime ?? activity.UtcTime
+    if (!rawTime) return undefined
+
+    const parsedMs = Date.parse(rawTime)
+    if (Number.isNaN(parsedMs)) return undefined
+
+    return new Date(parsedMs)
 }
 
 export type SaxoInstrument = {
@@ -546,7 +559,7 @@ export class SaxoClient {
         }))
     }
 
-    async getExecutionPrice(orderId: string, ticker: string): Promise<{ price: number, size: number } | null> {
+    async getExecutionPrice(orderId: string, ticker: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
         if (orderId === 'DRY_RUN') return null
 
         const accessToken = await this.getValidAccessToken()
@@ -597,7 +610,7 @@ export class SaxoClient {
             // 本来は Fill ごとの Amount を合算すべき。
             // SaxoOrderActivity に Amount はないようなので、とりあえず Fill があれば全量約定とみなすか、
             // もし Amount があればそれを使う。
-            
+
             const fillActivity = data.Data.find((a) =>
                 (a.Status === 'FinalFill' || a.Status === 'Fill') && a.AveragePrice !== undefined
             )
@@ -610,7 +623,11 @@ export class SaxoClient {
                 // 
                 // 修正：SaxoClient の他のメソッドで Amount を持っている可能性のあるレスポンスを調べる。
                 // 実際には /trade/v1/orders/{OrderId} で詳細が見れるはず。
-                return { price: fillActivity.AveragePrice, size: 0 } 
+                return {
+                    price: fillActivity.AveragePrice,
+                    size: 0,
+                    executed_at: parseSaxoActivityTime(fillActivity),
+                }
             }
 
             return null

@@ -17,6 +17,7 @@ type PositionFetcherLike = {
 export type ExecutionInfo = {
     price: number
     size: number
+    executed_at?: Date
 }
 
 export type OrdersV2ExecutionSyncResult = {
@@ -55,6 +56,10 @@ export type CronContext = {
 }
 
 const PAIRING_TIMEOUT_MS = 30_000
+
+const resolveExecutedAt = (order: Pick<OrderV2, 'created_at' | 'executed_at'>, execution: ExecutionInfo): Date => (
+    execution.executed_at ?? order.executed_at ?? order.created_at
+)
 
 export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:ten_minutely_task' }, '10-minute task executed')
@@ -342,6 +347,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                     updates.status = 'EXECUTED'
                     updates.executed_price = info.price
                     updates.executed_size = info.size || order.requested_size
+                    updates.executed_at = resolveExecutedAt(order, info)
                     if (order.order_type === 'IFDOCO' && order.exit_sync_status === undefined) {
                         updates.exit_sync_status = 'MONITORING'
                     }
@@ -435,6 +441,7 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
             }
 
             const isExitCompleted = closing.size >= order.requested_size - EPSILON
+            const executedAt = resolveExecutedAt(order, closing)
 
             if (!existingExit) {
                 // 新規作成
@@ -448,6 +455,7 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
                     requested_size: order.requested_size,
                     executed_size: closing.size,
                     executed_price: closing.price,
+                    executed_at: executedAt,
                     status: 'EXECUTED',
                     provider_order_ids: [providerOrderId + ':closing'],
                     created_at: new Date(),
@@ -467,6 +475,7 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
                     {
                         executed_size: closing.size,
                         executed_price: closing.price,
+                        executed_at: existingExit.executed_at ?? executedAt,
                     },
                 )
                 if (isExitCompleted) {

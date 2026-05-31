@@ -62,6 +62,7 @@ type BitflyerExecutionEntry = {
     child_order_acceptance_id: string
     price: number
     size: number
+    exec_date?: string
 }
 
 type BitflyerChildOrderEntry = {
@@ -184,8 +185,23 @@ const buildParentOrderMetadata = (
 })
 
 type OrdersV2ExecutionSyncResult = {
-    execution: { price: number, size: number } | null
+    execution: { price: number, size: number, executed_at?: Date } | null
     brokerOrderMetadata?: BitflyerParentOrderMetadata
+}
+
+const extractLatestExecutionAt = (execs: BitflyerExecutionEntry[]): Date | undefined => {
+    let latestMs: number | null = null
+
+    for (const exec of execs) {
+        if (!exec.exec_date) continue
+        const parsed = Date.parse(exec.exec_date)
+        if (Number.isNaN(parsed)) continue
+        if (latestMs === null || parsed > latestMs) {
+            latestMs = parsed
+        }
+    }
+
+    return latestMs === null ? undefined : new Date(latestMs)
 }
 
 export class BitflyerClient {
@@ -552,7 +568,7 @@ export class BitflyerClient {
     private async fetchExecutionInfoByChildAcceptanceId(
         childAcceptanceId: string,
         ticker: string,
-    ): Promise<{ price: number, size: number } | null> {
+    ): Promise<{ price: number, size: number, executed_at?: Date } | null> {
         const productCode = resolveProductCode(ticker)
         const childExecs = await this.callApi<BitflyerExecutionEntry[]>(
             'GET',
@@ -562,7 +578,7 @@ export class BitflyerClient {
 
         const price = weightedAvgExecs(childExecs)
         const size = childExecs.reduce((sum, e) => sum + e.size, 0)
-        return price === null ? null : { price, size }
+        return price === null ? null : { price, size, executed_at: extractLatestExecutionAt(childExecs) }
     }
 
     async getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {
@@ -629,6 +645,7 @@ export class BitflyerClient {
 
             let totalSize = 0
             let totalValue = 0
+            let latestExecutedAt: Date | undefined
 
             for (const exit of resolvedMetadata.exits) {
                 const acceptanceId = exit.resolved.acceptance_id
@@ -639,10 +656,13 @@ export class BitflyerClient {
 
                 totalSize += execution.size
                 totalValue += execution.price * execution.size
+                if (execution.executed_at && (!latestExecutedAt || execution.executed_at.getTime() > latestExecutedAt.getTime())) {
+                    latestExecutedAt = execution.executed_at
+                }
             }
 
             return {
-                execution: totalSize > 0 ? { price: totalValue / totalSize, size: totalSize } : null,
+                execution: totalSize > 0 ? { price: totalValue / totalSize, size: totalSize, executed_at: latestExecutedAt } : null,
                 brokerOrderMetadata: resolvedMetadata,
             }
         } catch (error) {

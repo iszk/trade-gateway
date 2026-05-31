@@ -18,11 +18,13 @@ export type StatsV2 = {
 const EPSILON = 0.00000001
 
 export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => {
+    const getSortTime = (order: OrderV2) => (order.executed_at ?? order.created_at).getTime()
+
     // 確定済みの注文だけを対象に、古い順にソートする
-    // created_at が等しい場合は ID で安定させる
+    // executed_at があればそれを優先し、未設定時は created_at にフォールバックする
     const executedOrders = orders
         .filter((o) => o.status === 'EXECUTED' && o.executed_price !== null)
-        .sort((a, b) => a.created_at.getTime() - b.created_at.getTime() || a.id.localeCompare(b.id))
+        .sort((a, b) => getSortTime(a) - getSortTime(b) || a.id.localeCompare(b.id))
 
     let currentPosition = 0
     let averageEntryPrice: number | null = null

@@ -848,7 +848,7 @@ test('BitflyerClient.getExecutionPriceForOrderV2 resolves entry acceptance id fr
             assert.ok(urlStr.includes('getexecutions'))
             assert.ok(urlStr.includes('JRF-child-entry-meta'))
             return new Response(
-                JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry-meta', price: 9700000, size: 0.01 }]),
+                JSON.stringify([{ child_order_acceptance_id: 'JRF-child-entry-meta', price: 9700000, size: 0.01, exec_date: '2026-01-01T00:05:00.000Z' }]),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             )
         },
@@ -856,7 +856,7 @@ test('BitflyerClient.getExecutionPriceForOrderV2 resolves entry acceptance id fr
 
     const result = await client.getExecutionPriceForOrderV2(order)
 
-    assert.deepEqual(result.execution, { price: 9700000, size: 0.01 })
+    assert.deepEqual(result.execution, { price: 9700000, size: 0.01, executed_at: new Date('2026-01-01T00:05:00.000Z') })
     assert.deepEqual(result.brokerOrderMetadata?.entry.resolved, { acceptance_id: 'JRF-child-entry-meta' })
     assert.deepEqual(result.brokerOrderMetadata?.exits[0]?.resolved, { acceptance_id: 'JRF-child-stop-meta' })
 })
@@ -928,7 +928,7 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves close acceptance ids
             assert.ok(urlStr.includes('getexecutions'))
             if (urlStr.includes('JRF-child-stop-meta')) {
                 return new Response(
-                    JSON.stringify([{ child_order_acceptance_id: 'JRF-child-stop-meta', price: 9500000, size: 0.01 }]),
+                    JSON.stringify([{ child_order_acceptance_id: 'JRF-child-stop-meta', price: 9500000, size: 0.01, exec_date: '2026-01-01T01:10:00.000Z' }]),
                     { status: 200, headers: { 'content-type': 'application/json' } },
                 )
             }
@@ -945,7 +945,7 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves close acceptance ids
 
     const result = await client.getClosingExecutionForOrderV2(order)
 
-    assert.deepEqual(result.execution, { price: 9500000, size: 0.01 })
+    assert.deepEqual(result.execution, { price: 9500000, size: 0.01, executed_at: new Date('2026-01-01T01:10:00.000Z') })
     assert.deepEqual(result.brokerOrderMetadata?.exits[0]?.resolved, { acceptance_id: 'JRF-child-stop-meta' })
     assert.deepEqual(result.brokerOrderMetadata?.exits[1]?.resolved, { acceptance_id: 'JRF-child-limit-meta' })
 })

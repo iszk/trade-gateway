@@ -4,6 +4,14 @@ import type { OrderV2 } from '../types/order-v2.js'
 
 const COLLECTION_NAME = 'orders_v2'
 
+const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => ({
+    ...data,
+    // Firestore の Timestamp を Date に変換
+    created_at: (data.created_at as any).toDate(),
+    updated_at: (data.updated_at as any).toDate(),
+    executed_at: data.executed_at ? (data.executed_at as any).toDate() : undefined,
+})
+
 export const createAddOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
     return async (order: OrderV2): Promise<void> => {
         const docRef = db.collection(COLLECTION_NAME).doc(order.id)
@@ -27,13 +35,7 @@ export const createGetOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
         if (!doc.exists) {
             return null
         }
-        const data = doc.data() as OrderV2
-        return {
-            ...data,
-            // Firestore の Timestamp を Date に変換
-            created_at: (data.created_at as any).toDate(),
-            updated_at: (data.updated_at as any).toDate(),
-        }
+        return fromFirestoreOrderV2(doc.data() as OrderV2)
     }
 }
 
@@ -45,14 +47,7 @@ export const createListOrdersV2ByStrategyFn = (db: Firestore = getFirestoreClien
             .orderBy('created_at', 'asc')
             .get()
 
-        return snapshot.docs.map((doc) => {
-            const data = doc.data() as OrderV2
-            return {
-                ...data,
-                created_at: (data.created_at as any).toDate(),
-                updated_at: (data.updated_at as any).toDate(),
-            }
-        })
+        return snapshot.docs.map((doc) => fromFirestoreOrderV2(doc.data() as OrderV2))
     }
 }
 
@@ -63,14 +58,7 @@ export const createGetPendingOrdersV2Fn = (db: Firestore = getFirestoreClient())
             .where('status', '==', 'PENDING')
             .get()
 
-        return snapshot.docs.map((doc) => {
-            const data = doc.data() as OrderV2
-            return {
-                ...data,
-                created_at: (data.created_at as any).toDate(),
-                updated_at: (data.updated_at as any).toDate(),
-            }
-        })
+        return snapshot.docs.map((doc) => fromFirestoreOrderV2(doc.data() as OrderV2))
     }
 }
 
@@ -83,14 +71,7 @@ export const createGetActiveIfdOrdersV2Fn = (db: Firestore = getFirestoreClient(
             .where('exit_sync_status', '==', 'MONITORING')
             .get()
 
-        return snapshot.docs.map((doc) => {
-            const data = doc.data() as OrderV2
-            return {
-                ...data,
-                created_at: (data.created_at as any).toDate(),
-                updated_at: (data.updated_at as any).toDate(),
-            }
-        })
+        return snapshot.docs.map((doc) => fromFirestoreOrderV2(doc.data() as OrderV2))
     }
 }
 

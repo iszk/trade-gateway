@@ -271,6 +271,7 @@ test('executeTenMinutelyTask: orders_v2 の PENDING を EXECUTED に更新する
         status: 'PENDING',
         provider_order_ids: ['JRF-v2-1'],
         requested_size: 0.01,
+        created_at: new Date('2026-01-01T00:00:00Z'),
     }
     const updatedOrders: any[] = []
 
@@ -288,6 +289,7 @@ test('executeTenMinutelyTask: orders_v2 の PENDING を EXECUTED に更新する
     assert.equal(updatedOrders[0].status, 'EXECUTED')
     assert.equal(updatedOrders[0].executed_price, 9800000)
     assert.equal(updatedOrders[0].executed_size, 0.01)
+    assert.deepEqual(updatedOrders[0].executed_at, new Date('2026-01-01T00:00:00Z'))
 })
 
 test('executeTenMinutelyTask: PENDING の IFDOCO 親注文が EXECUTED になったとき exit_sync_status を MONITORING にする', async () => {
@@ -299,6 +301,7 @@ test('executeTenMinutelyTask: PENDING の IFDOCO 親注文が EXECUTED になっ
         status: 'PENDING',
         provider_order_ids: ['PAR-pending-ifd-1'],
         requested_size: 0.01,
+        created_at: new Date('2026-01-01T00:00:00Z'),
     }
 
     const updatedOrders: any[] = []
@@ -318,8 +321,41 @@ test('executeTenMinutelyTask: PENDING の IFDOCO 親注文が EXECUTED になっ
         status: 'EXECUTED',
         executed_price: 9800000,
         executed_size: 0.01,
+        executed_at: new Date('2026-01-01T00:00:00Z'),
         exit_sync_status: 'MONITORING',
     })
+})
+
+test('executeTenMinutelyTask: orders_v2 の実約定時刻を fetcher の値で保存する', async () => {
+    const pendingOrder: any = {
+        id: 'v2-pending-executed-at-1',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        status: 'PENDING',
+        provider_order_ids: ['JRF-v2-executed-at-1'],
+        requested_size: 0.01,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+    }
+
+    const updatedOrders: any[] = []
+    const executedAt = new Date('2026-01-01T00:05:00Z')
+    const ctx = makeBaseCtx({
+        getPendingOrdersV2: async () => [pendingOrder],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            bitflyer: {
+                getExecutionPrice: async () => null,
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: { price: 9810000, size: 0.01, executed_at: executedAt },
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(updatedOrders.length, 1)
+    assert.deepEqual(updatedOrders[0].executed_at, executedAt)
 })
 
 test('executeTenMinutelyTask: orders_v2 の entry metadata 解決結果を保存する', async () => {
@@ -383,6 +419,8 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         provider_order_ids: ['PAR-ifd-partial'],
         requested_size: 0.01,
         executed_size: 0.01,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        executed_at: new Date('2026-01-01T00:01:00Z'),
     }
 
     // ケース1: 初回作成 (部分約定)
@@ -402,6 +440,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
     assert.equal(addedOrders.length, 1)
     assert.equal(addedOrders[0].id, 'v2-ifd-partial-exit')
     assert.equal(addedOrders[0].executed_size, 0.004)
+    assert.deepEqual(addedOrders[0].executed_at, new Date('2026-01-01T00:01:00Z'))
     assert.equal('exit_sync_status' in addedOrders[0], false)
 
     // ケース2: 追加約定
@@ -422,6 +461,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
     assert.equal(updatedOrders2.length, 1)
     assert.equal(updatedOrders2[0].executed_size, 0.007)
     assert.equal(updatedOrders2[0].executed_price, 10600000)
+    assert.deepEqual(updatedOrders2[0].executed_at, new Date('2026-01-01T00:01:00Z'))
 
     // ケース3: full close で親注文の監視状態を COMPLETED にする
     const updatedOrders3: any[] = []
@@ -440,6 +480,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         id: 'v2-ifd-partial-exit',
         executed_size: 0.01,
         executed_price: 10700000,
+        executed_at: new Date('2026-01-01T00:01:00Z'),
     })
     assert.deepEqual(updatedOrders3[1], {
         id: 'v2-ifd-partial',
@@ -494,6 +535,8 @@ test('executeTenMinutelyTask: IFDOCO の close metadata 解決結果を親 order
         provider_order_ids: ['PAR-ifd-meta'],
         requested_size: 0.01,
         executed_size: 0.01,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        executed_at: new Date('2026-01-01T00:01:00Z'),
         broker_order_metadata: {
             kind: 'bitflyer_parent_order_v1',
             parent_order_acceptance_id: 'PAR-ifd-meta',
@@ -523,7 +566,7 @@ test('executeTenMinutelyTask: IFDOCO の close metadata 解決結果を親 order
             bitflyer: {
                 getClosingExecution: async () => null,
                 getClosingExecutionForOrderV2: async () => ({
-                    execution: { price: 10500000, size: 0.01 },
+                    execution: { price: 10500000, size: 0.01, executed_at: new Date('2026-01-01T00:30:00Z') },
                     brokerOrderMetadata: {
                         ...order.broker_order_metadata,
                         exits: [
@@ -544,4 +587,5 @@ test('executeTenMinutelyTask: IFDOCO の close metadata 解決結果を親 order
     assert.deepEqual(updatedOrders[0].broker_order_metadata.exits[0].resolved, { acceptance_id: 'JRF-stop-meta' })
     assert.deepEqual(updatedOrders[1], { id: 'v2-ifd-meta', exit_sync_status: 'COMPLETED' })
     assert.equal(addedOrders.length, 1)
+    assert.deepEqual(addedOrders[0].executed_at, new Date('2026-01-01T00:30:00Z'))
 })
