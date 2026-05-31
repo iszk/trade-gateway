@@ -449,7 +449,6 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
                     executed_size: closing.size,
                     executed_price: closing.price,
                     status: 'EXECUTED',
-                    exit_sync_status: undefined,
                     provider_order_ids: [providerOrderId + ':closing'],
                     created_at: new Date(),
                     updated_at: new Date(),

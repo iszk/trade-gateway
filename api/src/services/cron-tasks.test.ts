@@ -402,6 +402,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
     assert.equal(addedOrders.length, 1)
     assert.equal(addedOrders[0].id, 'v2-ifd-partial-exit')
     assert.equal(addedOrders[0].executed_size, 0.004)
+    assert.equal('exit_sync_status' in addedOrders[0], false)
 
     // ケース2: 追加約定
     const existingExit: any = addedOrders[0]

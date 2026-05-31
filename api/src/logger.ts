@@ -9,6 +9,39 @@ export type Logger = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value)
 
+const serializeError = (error: Error): Record<string, unknown> => {
+    const serialized: Record<string, unknown> = {
+        name: error.name,
+        message: error.message,
+    }
+
+    if (error.stack) {
+        serialized.stack = error.stack
+    }
+
+    for (const key of Object.getOwnPropertyNames(error)) {
+        if (key === 'name' || key === 'message' || key === 'stack') {
+            continue
+        }
+
+        serialized[key] = Reflect.get(error, key)
+    }
+
+    return serialized
+}
+
+export const serializeLogDetails = (details: Record<string, unknown>): Record<string, unknown> => {
+    const normalized = { ...details }
+
+    for (const key of ['error', 'err', 'cause']) {
+        if (normalized[key] instanceof Error) {
+            normalized[key] = serializeError(normalized[key])
+        }
+    }
+
+    return normalized
+}
+
 export const createLogger = (
     tsLogger: TSLogger<ILogObj>,
     additionalFields: Record<string, unknown> = {},
@@ -59,12 +92,12 @@ export const defaultLogger: Logger = (() => {
 
             if (typeof firstArg === 'string') {
                 message = firstArg
-                details = isRecord(secondArg) ? secondArg : {}
+                details = isRecord(secondArg) ? serializeLogDetails(secondArg) : {}
             } else if (isRecord(firstArg)) {
-                details = firstArg
+                details = serializeLogDetails(firstArg)
                 message = (details.message as string) || (details.event as string) || ''
             } else {
-                details = rest
+                details = serializeLogDetails(rest)
                 message = (details.message as string) || (details.event as string) || ''
             }
 
