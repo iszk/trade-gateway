@@ -24,7 +24,7 @@ AI エージェントはタスク実行時に以下のコマンドを使用す�
 - **Setup**: `mise run setup`
 - **Test**: `mise run test`
 
-mise に PATH が通っていない場合は `~/.local/bin/mise` を用いること。
+mise に PATH が通っていない場合は `/usr/local/bin/mise` または `~/.local/bin/mise` を用いること。
 
 ## Rules & Workflow
 1. **Always Test**: 作業完了（完了報告やコミット）の前に、必ず `mise run test` を実行してパスすることを確認すること。

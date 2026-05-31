@@ -1,6 +1,6 @@
 ---
 title: orders-v2 のレコードに約定時間を追加する
-status: todo
+status: done
 ---
 
 # 概要
@@ -33,3 +33,15 @@ status: todo
 ## 2026-05-28 00:00 GitHub Copilot GPT-5.4
 
 起票した: `orders-v2` では注文作成時刻しか扱えず、IFDOCO の exit や指値注文で実際の約定タイミングを失ってしまうため。`created_at` を約定時刻の近似として使えるケースと使えないケースを分離し、実約定時刻を保持できるようにする必要がある。
+
+## 2026-06-01 00:12 GitHub Copilot GPT-5.4
+
+着手した。`orders_v2` の型と Firestore 読み出しに `executed_at` を追加し、同期処理では実約定時刻が取得できた場合はそれを保存、取得できない場合は既存互換のため `created_at` 相当へフォールバックする方針で進める。合わせて `computeStatsV2` の時系列判定を `created_at` 固定から `executed_at ?? created_at` に切り替える。
+
+## 2026-06-01 00:16 GitHub Copilot GPT-5.4
+
+実装した。`orders_v2` の型と Firestore 復元処理に `executed_at` を追加し、`cron-tasks` で entry/exit の同期時に `executed_at` を保存するようにした。bitFlyer の `getExecutionPriceForOrderV2` / `getClosingExecutionForOrderV2` では `getexecutions` の `exec_date` から最新約定時刻を抽出して返し、取得できないブローカーや既存データでは `executed_at ?? created_at` のフォールバックで従来互換を維持している。`computeStatsV2` も約定順を `executed_at` 優先で処理するよう更新し、関連テストを追加・更新した。`mise run test` で全件パスを確認済み。
+
+## 2026-06-01 00:32 GitHub Copilot GPT-5.4
+
+追加確認したところ、Saxo の MARKET 注文取得経路 (`SaxoClient.getExecutionPrice`) は `AveragePrice` しか返しておらず `executed_at` が未対応だったため補完する。`/cs/v1/audit/orderactivities` の fill 活動に含まれる時刻を優先的にパースし、`ExecutionInfo.executed_at` として `orders_v2` 同期へ渡す。既存どおり時刻が取れない応答は `cron-tasks` 側の `created_at` フォールバックに委ねる。
