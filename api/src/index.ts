@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { createOrderDispatcher } from './services/order-dispatcher.js'
 import type { DispatchOrderFn, BrokerName } from './types/order.js'
 import type { BrokerBalance } from './types/balance.js'
+import type { OrderV2 } from './types/order-v2.js'
 import type { Position } from './types/position.js'
 import { DuplicateEventError, createDefaultWebhookEventFn } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
@@ -15,9 +16,10 @@ import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn, createDefaultGetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
 import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
-import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultListOrdersV2ByStrategyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn } from './services/orders-v2.js'
-import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, ListOrdersV2ByStrategyFn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './services/orders-v2.js'
+import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultListOrdersV2ByStrategyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
+import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, ListOrdersV2ByStrategyFn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn, ListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
 import { computeStatsV2 } from './services/stats-v2.js'
+import type { StatsV2 } from './services/stats-v2.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
@@ -243,6 +245,7 @@ type CreateAppOptions = {
     listOrdersV2ByStrategy?: ListOrdersV2ByStrategyFn
     getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
+    listOrdersV2ByDateRange?: ListOrdersV2ByDateRangeFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -276,6 +279,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const getOrderV2 = options.getOrderV2 ?? createDefaultGetOrderV2Fn()
     const listOrdersV2ByStrategy = options.listOrdersV2ByStrategy ?? createDefaultListOrdersV2ByStrategyFn()
     const getActiveIfdOrdersV2 = options.getActiveIfdOrdersV2 ?? createDefaultGetActiveIfdOrdersV2Fn()
+    const listOrdersV2ByDateRange = options.listOrdersV2ByDateRange ?? createDefaultListOrdersV2ByDateRangeFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -816,6 +820,75 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
     })
 
+    app.get('/api/v2/orders/stats', requireApiSecret, async (c) => {
+        const dates = parseFilterDates(c.req.query('from'), c.req.query('to'))
+        if ('error' in dates) {
+            return c.json(errorBody('INVALID_REQUEST', dates.error), 400)
+        }
+        try {
+            const allOrders = await listOrdersV2ByDateRange(dates.from, dates.to)
+
+            // strategy ごとにグループ化して集計
+            const grouped = new Map<string, typeof allOrders>()
+            for (const order of allOrders) {
+                const list = grouped.get(order.strategy) ?? []
+                list.push(order)
+                grouped.set(order.strategy, list)
+            }
+
+            const stats: StatsV2[] = Array.from(grouped.entries())
+                .map(([strategy, orders]) => computeStatsV2(orders, strategy))
+                .sort((a, b) => a.strategy.localeCompare(b.strategy))
+
+            return c.json({
+                stats,
+                from: dates.from.toISOString(),
+                to: dates.to.toISOString(),
+            })
+        } catch (err) {
+            logger.warn({ event: 'v2_orders_stats:fetch_failed', error: err }, 'failed to compute v2 orders stats')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to compute v2 orders stats'), 500)
+        }
+    })
+
+    app.get('/api/v2/orders', requireApiSecret, async (c) => {
+        const dates = parseFilterDates(c.req.query('from'), c.req.query('to'))
+        if ('error' in dates) {
+            return c.json(errorBody('INVALID_REQUEST', dates.error), 400)
+        }
+
+        const strategyFilter = c.req.query('strategy')
+        const rawLimit = Number(c.req.query('limit') ?? 50)
+        const rawPage = Number(c.req.query('page') ?? 1)
+        const limit = Math.min(Math.max(1, isNaN(rawLimit) ? 50 : rawLimit), 200)
+        const page = Math.max(1, isNaN(rawPage) ? 1 : rawPage)
+
+        try {
+            const allOrders = await listOrdersV2ByDateRange(dates.from, dates.to)
+            const filtered = strategyFilter
+                ? allOrders.filter((o) => o.strategy === strategyFilter)
+                : allOrders
+
+            const total = filtered.length
+            const total_pages = Math.max(1, Math.ceil(total / limit))
+            const offset = (page - 1) * limit
+            const orders = filtered.slice(offset, offset + limit)
+
+            return c.json({
+                orders,
+                total,
+                page,
+                limit,
+                total_pages,
+                from: dates.from.toISOString(),
+                to: dates.to.toISOString(),
+            })
+        } catch (err) {
+            logger.warn({ event: 'v2_orders:fetch_failed', error: err }, 'failed to fetch v2 orders')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch v2 orders'), 500)
+        }
+    })
+
     app.get('/api/trade-records', requireApiSecret, async (c) => {
         const dates = parseFilterDates(c.req.query('from'), c.req.query('to'))
         if ('error' in dates) {
@@ -893,3 +966,21 @@ export type { BrokerBalance } from './types/balance.js'
 export type { Position } from './types/position.js'
 export type { SaxoInstrument } from './brokers/saxo.js'
 export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, TradeRecordsResponse } from './services/trade-records.js'
+export type { OrderV2 } from './types/order-v2.js'
+export type { StatsV2 } from './services/stats-v2.js'
+
+export type OrdersV2StatsResponse = {
+    stats: StatsV2[]
+    from: string
+    to: string
+}
+
+export type OrdersV2Response = {
+    orders: OrderV2[]
+    total: number
+    page: number
+    limit: number
+    total_pages: number
+    from: string
+    to: string
+}
