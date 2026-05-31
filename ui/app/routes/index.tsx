@@ -20,6 +20,9 @@ export default createRoute((c) => {
         <a href="/trade-records" class="bg-purple-500 hover:bg-purple-600 text-white font-semibold py-3 px-6 rounded shadow">
           Trade Records
         </a>
+        <a href="/orders-v2" class="bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 px-6 rounded shadow">
+          Orders V2
+        </a>
       </div>
 
       <div class="border-t pt-8">
