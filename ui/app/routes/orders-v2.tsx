@@ -13,6 +13,9 @@ const pct = (n: number): string => `${(n * 100).toFixed(1)}%`
 const toDateInputValue = (d: Date): string =>
   d.toLocaleDateString('en-CA', { timeZone: 'Asia/Tokyo' })
 
+const getEffectiveTime = (order: Pick<OrderV2, 'created_at' | 'executed_at'>): string =>
+  String(order.executed_at ?? order.created_at)
+
 const statusBadge = (status: OrderV2['status']) => {
   const map: Record<string, string> = {
     PENDING: 'bg-yellow-100 text-yellow-800',
@@ -71,7 +74,7 @@ export default createRoute(async (c) => {
       <form method="get" action="/orders-v2" class="bg-white shadow rounded-lg p-4 mb-6">
         <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">From</label>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">From (Executed At)</label>
             <input
               type="date"
               name="from"
@@ -80,7 +83,7 @@ export default createRoute(async (c) => {
             />
           </div>
           <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">To</label>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">To (Executed At)</label>
             <input
               type="date"
               name="to"
@@ -218,7 +221,7 @@ export default createRoute(async (c) => {
                 <table class="min-w-full text-left text-sm whitespace-nowrap">
                   <thead class="uppercase tracking-wider border-b-2 text-gray-600 bg-gray-50">
                     <tr>
-                      <th class="px-4 py-3">Created At</th>
+                      <th class="px-4 py-3">Executed At</th>
                       <th class="px-4 py-3">Strategy</th>
                       <th class="px-4 py-3">Broker</th>
                       <th class="px-4 py-3">Ticker</th>
@@ -233,7 +236,7 @@ export default createRoute(async (c) => {
                   <tbody>
                     {ordersData.orders.map((o: OrderV2, i: number) => (
                       <tr key={i} class="border-b hover:bg-gray-50">
-                        <td class="px-4 py-3 text-xs">{new Date(o.created_at as unknown as string).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
+                        <td class="px-4 py-3 text-xs">{new Date(getEffectiveTime(o)).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
                         <td class="px-4 py-3">{o.strategy}</td>
                         <td class="px-4 py-3 capitalize">{o.broker}</td>
                         <td class="px-4 py-3">{o.ticker}</td>
