@@ -1,6 +1,6 @@
 ---
 title: order v1 系統の依存箇所を棚卸しし、orders_v2 へ一本化する
-status: wip
+status: done
 ---
 
 # 概要
@@ -11,8 +11,8 @@ v1 を削除する前提で、どのコレクションと API / UI / cron がど
 
 # 背景
 
-- webhook 受信時、現状は `open_trades` と `orders_v2` にデュアルライトしている
-- 10 分 cron でも v1 (`open_trades` の約定価格同期、`trade_records` 生成) と v2 (`orders_v2` の約定同期、IFDOCO exit 同期) が並行実行されている
+- webhook 受信の新規書き込み先は `orders_v2` に寄せたが、旧データと cron にはまだ `open_trades` / `trade_records` 依存が残っている
+- 10 分 cron の実処理は `orders_v2` 側に寄せたが、コードベース上には旧 `open_trades` / `trade_records` 実装とそのテストがまだ残っている
 - UI も `/trade-records` と `/orders-v2` の 2 画面が共存しており、参照する API / コレクションが分かれている
 - v1 を先に削ると、約定ペアリング済みトレード一覧・統計・既存 cron フローが失われるため、依存箇所の棚卸しと置き換え順序の整理が必要
 
@@ -47,13 +47,13 @@ v1 を削除する前提で、どのコレクションと API / UI / cron がど
 - [ ] PnL, win rate, profit factor, max drawdown, sharpe ratio などの集計ロジック
 - [ ] FIFO ペアリングを `orders_v2` から再計算するのか、別 read model を v2 由来で再構築するのかを決める
 - [ ] v2 側に不足している API / UI / テストを追加し、`trade_records` 画面を置き換え可能な状態にする
-- [ ] webhook 受信処理から `open_trades` への書き込みを止めても成立することを確認する
-- [ ] cron から v1 系 (`fetchAndUpdateExecutionPricesFromOpenTrades`, `matchAndRecordOpenTrades`, `resolveIfdLikeTrades`) を切り離せるように段階的に分離する
-- [ ] 既存データの扱いを決める
-- [ ] `trade_records` / `open_trades` を読み続ける互換期間を設けるか
-- [ ] `orders_v2` からのバックフィルを行うか
-- [ ] 過去データは読み取り専用で残すか、完全廃止するか
-- [ ] API / UI / docs / テストを v2 前提へ更新した後、v1 実装と不要コレクション参照を削除する
+- [x] webhook 受信処理から `open_trades` への書き込みを止めても成立することを確認する
+- [x] cron から v1 系 (`fetchAndUpdateExecutionPricesFromOpenTrades`, `matchAndRecordOpenTrades`, `resolveIfdLikeTrades`) を切り離せるように段階的に分離する
+- [x] 既存データの扱いを決める
+- [x] `trade_records` / `open_trades` を読み続ける互換期間を設けるか
+- [x] `orders_v2` からのバックフィルを行うか
+- [x] 過去データは読み取り専用で残すか、完全廃止するか
+- [x] API / UI / docs / テストを v2 前提へ更新した後、v1 実装と不要コレクション参照を削除する
 
 段階案:
 
@@ -77,3 +77,23 @@ v1 を削除する前提で、どのコレクションと API / UI / cron がど
 ## 2026-06-02 12:52 GitHub Copilot GPT-5.4
 
 方針を更新した。ユーザー判断として `orders_v2` 側で strategy 以外のグルーピングは不要になったため、`interval` を `orders_v2` に追加する案は採用しない。その代わり、`orders_v2` の EXECUTED 注文から `strategy + ticker + broker` 単位で FIFO にクローズ済みトレードを再構成する `trade-records-v2` サービスを追加し、`/api/trade-records*` と `/trade-records` をその view に差し替えた。統計は strategy 単位のみに整理し、UI から `interval` 列と `interval` フィルタを外した。まだ v1 の write path と cron (`open_trades` / `trade_records`) 自体は残しているため、この issue の残タスクはデュアルライト停止と v1 実装削除である。
+
+## 2026-06-02 13:37 GitHub Copilot GPT-5.4
+
+続きとして、新規 webhook 受付時の `open_trades` への書き込みを削除し、注文の保存先を `orders_v2` に一本化した。これに合わせて `createApp` の `addOpenTrade` 注入点も除去し、`index.test.ts` の期待値を `orders_v2` のみを見る形へ更新した。これで新しく増えるデータは v2 系に限定される一方、cron の v1 フェーズと既存 `open_trades` / `trade_records` データはまだ残っているため、次の削除対象は cron 側の v1 依存である。
+
+## 2026-06-02 13:42 GitHub Copilot GPT-5.4
+
+続きとして、`executeTenMinutelyTask` から v1 系の cron フェーズを削除した。具体的には `open_trades` の約定価格更新、通常売買のペアリングによる `trade_records` 作成、IFD/IFDOCO の `open_trades` 解決フローを外し、cron context も `orders_v2` の同期と exit 追跡だけを注入する形へ整理した。これに合わせて `cron-tasks.test.ts` は v2 フローだけを検証する構成へ更新した。現時点で production path 上の v1 実行経路は止まったため、残る作業は未使用になった `trade-records.ts` の write-side 実装と旧テスト群の削除、および既存データの扱い整理である。
+
+## 2026-06-02 14:01 GitHub Copilot GPT-5.4
+
+続きとして、production code から参照されなくなっていた `api/src/services/trade-records.ts` と `api/src/services/trade-records.test.ts` を削除した。削除前に参照検索を行い、残っていた利用箇所が旧テスト自身だけであることを確認したうえで落としている。API の typecheck では参照漏れが出ていないため、v1 実装のコード上の依存は除去できた。残タスクは既存 Firestore データの扱い整理と、必要なら issue をクローズできる条件の確認だけである。
+
+## 2026-06-02 14:04 GitHub Copilot GPT-5.4
+
+既存データの扱いを確定した。`open_trades` と `trade_records` の既存 Firestore データは移行せず破棄でよい前提とし、互換期間や `orders_v2` へのバックフィルは行わない。手動削除対象の collection は `open_trades` と `trade_records` の 2 つで、もし Firestore 側に TTL policy や追加 index が残っていればそれも合わせて掃除する想定とした。あわせて `docs/database-spec.md` から廃止済みコレクションの定義を外し、`docs/api-spec.md` も `orders_v2` ベースで再構成する現仕様へ更新した。コードとドキュメントの両方で close 条件は満たしているため、残るのはユーザー確認のうえで issue を `done` にすることだけである。
+
+## 2026-06-02 14:07 GitHub Copilot GPT-5.4
+
+ユーザー確認を取り、issue を close した。クローズ理由は、`orders_v2` を source of truth とする構成へ API / UI / cron / docs を切り替え、v1 実装コードの削除まで完了したためである。運用上に残る作業は Firestore 上の `open_trades` と `trade_records` を手動削除することだけで、これは issue 本体のスコープ外の後処理として扱う。

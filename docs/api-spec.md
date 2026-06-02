@@ -90,14 +90,13 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 
 ### 5. トレード統計取得
 - Method/Path: `GET /api/trade-records/stats`
-- 認証: 必要（`X-Api-Secret` ヘッダ）
-- 役割: ペアリング済みトレードの統計を strategy/interval/ticker/broker の 4 軸でグループ化して返す
+- 認証: 必要（Bearerトークン）
+- 役割: `orders_v2` の EXECUTED 注文から再構成したクローズ済みトレードの統計を、strategy 単位で返す
 
 #### Query Parameters
 - `from` (optional, ISO 8601): 期間開始（デフォルト: 直近 30 日）
 - `to` (optional, ISO 8601): 期間終了（デフォルト: 現在）
 - `strategy` (optional): 絞り込み
-- `interval` (optional): 絞り込み
 - `ticker` (optional): 絞り込み
 - `broker` (optional): 絞り込み
 
@@ -105,25 +104,26 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `200 OK`
 
 ```json
-[
-  {
-    "strategy": "MA Crossover",
-    "interval": "4H",
-    "ticker": "BTC_JPY",
-    "broker": "bitflyer",
-    "total": 10,
-    "win_count": 7,
-    "loss_count": 3,
-    "win_rate": 0.7,
-    "total_pnl": 50000,
-    "avg_pnl": 5000,
-    "avg_win": 10000,
-    "avg_loss": -3333.33,
-    "profit_factor": 2.33,
-    "max_drawdown": 8000,
-    "sharpe_ratio": 1.5
-  }
-]
+{
+  "groups": [
+    {
+      "strategy": "MA Crossover",
+      "total": 10,
+      "win_count": 7,
+      "loss_count": 3,
+      "win_rate": 0.7,
+      "total_pnl": 50000,
+      "avg_pnl": 5000,
+      "avg_win": 10000,
+      "avg_loss": 3333.33,
+      "profit_factor": 2.33,
+      "max_drawdown": 8000,
+      "sharpe_ratio": 1.5
+    }
+  ],
+  "from": "2026-03-28T00:00:00.000Z",
+  "to": "2026-04-27T00:00:00.000Z"
+}
 ```
 
 #### エラーレスポンス
@@ -133,14 +133,13 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 
 ### 6. トレード記録一覧取得
 - Method/Path: `GET /api/trade-records`
-- 認証: 必要（`X-Api-Secret` ヘッダ）
-- 役割: ペアリング済みトレード記録を一覧取得する（ページネーション付き）
+- 認証: 必要（Bearerトークン）
+- 役割: `orders_v2` の EXECUTED 注文から FIFO で再構成したクローズ済みトレード記録を一覧取得する（ページネーション付き）
 
 #### Query Parameters
 - `from` (optional, ISO 8601): 期間開始（デフォルト: 直近 30 日）
 - `to` (optional, ISO 8601): 期間終了（デフォルト: 現在）
 - `strategy` (optional): 絞り込み
-- `interval` (optional): 絞り込み
 - `ticker` (optional): 絞り込み
 - `broker` (optional): 絞り込み
 - `limit` (optional, number, 1–200): 1 ページあたり件数（デフォルト: 50）
@@ -155,7 +154,6 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
     {
       "docId": "abc123",
       "strategy": "MA Crossover",
-      "interval": "4H",
       "ticker": "BTC_JPY",
       "broker": "bitflyer",
       "entry_side": "BUY",

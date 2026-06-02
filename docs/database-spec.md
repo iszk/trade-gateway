@@ -97,68 +97,47 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 - Firestoreトランザクションを使用して読み書きを行い、重複実行を防止する
 - TTLは不要（上書きで管理）
 
-## 5. `open_trades`
+## 5. `orders_v2`
 
-ペアリング待ちの未決済トレードを保持する。webhook 受信時に即時作成し、cron が `execution_price` を確定する。エントリー/エグジットのペアが揃い次第 `trade_records` に変換して削除される。
+注文の source of truth。webhook 受付時に親注文を保存し、cron が約定情報と IFDOCO の exit を同期する。`/api/trade-records*` のクローズ済みトレード一覧・統計は、このコレクションの EXECUTED 注文から FIFO で再構成する。
 
 ### ドキュメント ID
-- `event_id`（対応する `webhook_events` の `event_id`）
+- `id`（Webhook の `event_id` など）
+- exit 注文は親注文 ID に `-exit` を付与して表現する
 
 ### フィールド
-- `event_id` (string, required)
+- `id` (string, required)
+- `strategy` (string, required)
 - `broker` (string, required)
 - `ticker` (string, required)
 - `side` (string, required) — `BUY` | `SELL`
-- `size` (number, required)
-- `strategy` (string, required)
-- `interval` (string, required)
-- `execution_price` (number | null, required) — webhook 受信時は `null`、cron で確定後に数値
-- `provider_order_id` (string, optional) — ブローカー側の注文 ID
+- `order_type` (string, required) — `MARKET` | `IFDOCO` | `LIMIT` | `STOP`
+- `requested_size` (number, required)
+- `executed_size` (number, required)
+- `executed_price` (number | null, required)
+- `executed_at` (timestamp, optional)
+- `status` (string, required) — `PENDING` | `EXECUTED` | `FAILED` | `CANCELED`
+- `exit_sync_status` (string, optional) — `MONITORING` | `COMPLETED`
+- `provider_order_ids` (string[], required)
+- `broker_order_metadata` (map, optional)
 - `created_at` (timestamp, required)
-- `order_dispatch_log_id` (string, optional) — 紐付く `order_dispatch_logs` のドキュメント ID
+- `updated_at` (timestamp, required)
 
 ### 制約
-- ドキュメント ID = `event_id` で idempotent upsert（`set` 呼び出し）を使用する
-- TTL は設定しない（ペアリング完了時に明示削除）
-
-## 6. `trade_records`
-
-エントリー/エグジットがペアリングされたクローズ済みトレードの記録を保持する。
-
-### ドキュメント ID
-- 自動採番 ID
-
-### フィールド
-- `strategy` (string, required)
-- `interval` (string, required)
-- `ticker` (string, required)
-- `broker` (string, required)
-- `entry_side` (string, required) — `BUY` | `SELL`
-- `entry_price` (number, required) — エントリー約定価格
-- `exit_price` (number, required) — エグジット約定価格
-- `size` (number, required)
-- `pnl` (number, required) — 損益
-- `entry_event_id` (string, required)
-- `exit_event_id` (string, required)
-- `opened_at` (timestamp, required) — エントリー約定時刻
-- `closed_at` (timestamp, required) — エグジット約定時刻
-- `expire_at` (timestamp, required, TTL 用)
-
-### 制約
-- 同じ `entry_event_id` + `exit_event_id` の組み合わせが重複しないようアプリケーションで担保する
+- 親注文・exit 注文ともにドキュメント ID を一意キーとして upsert / update する
+- クローズ済みトレードの read model は別コレクションに保存せず、`orders_v2` から再計算する
+- TTL は現時点で使用しない
 
 ## 保持期間（MVP）
 - `webhook_events`: 90 日
 - `order_dispatch_logs`: 180 日
-- `open_trades`: 無期限（ペアリング完了時に明示削除）
-- `trade_records`: 約 2 年（`closed_at + 730 日`）
+- `orders_v2`: 現時点では明示的な TTL を設定しない
 - `oidc_connections`: 連携中は保持、削除要求時に削除
 
 ## TTL 設計（MVP）
 - `webhook_events.expire_at` に `received_at + 90 日` を設定
 - `order_dispatch_logs.expire_at` に `created_at + 180 日` を設定
-- `trade_records.expire_at` に `closed_at + 730 日` を設定
-- `open_trades` は TTL を使用しない（ペアリング完了後に `delete()` で明示削除）
+- `orders_v2` は TTL を使用しない
 - `oidc_connections` は通常 TTL 対象外（削除要求時に明示削除）
 - Firestore TTL ポリシーは対象コレクションごとに有効化する
 
@@ -178,3 +157,7 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 - `access_token_encrypted` と `refresh_token_encrypted` は暗号化済み文字列のみ保存
 - 鍵管理は Cloud KMS を利用する
 - 復号は発注時など必要最小限のタイミングに限定する
+
+## 廃止済みコレクション
+- `open_trades` と `trade_records` は v1 系 read model として廃止した
+- 既存データは移行せず、不要になった時点で手動削除する前提とする

@@ -14,8 +14,6 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
-import { createDefaultCreateTradeRecordFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn, createDefaultGetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
-import type { CreateTradeRecordFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
 import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
 import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultListOrdersV2ByStrategyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
@@ -227,18 +225,9 @@ type CreateAppOptions = {
     positionFetcher?: PositionFetcherLike
     slotScheduler?: SlotScheduler
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
-    getOpenTrades?: GetOpenTradesFn
-    addOpenTrade?: AddOpenTradeFn
     addOrderV2?: AddOrderV2Fn
-    deleteOpenTrade?: DeleteOpenTradeFn
-    createTradeRecord?: CreateTradeRecordFn
     getTradeRecords?: GetTradeRecordsFn
     getTradeStats?: GetTradeStatsFn
-    // 新フロー（Phase 2）
-    getPendingExecutionOpenTrades?: GetPendingExecutionOpenTradesFn
-    updateOpenTradeExecutionPrice?: UpdateOpenTradeExecutionPriceFn
-    // IFD/IFDOCO フロー
-    getConfirmedIfdOpenTrades?: GetConfirmedIfdOpenTradesFn
     closingExecutionFetchers?: Partial<Record<string, ClosingExecutionFetcherLike>>
     // Phase 3 新フロー
     getPendingOrdersV2?: GetPendingOrdersV2Fn
@@ -266,16 +255,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const balanceFetcher = options.balanceFetcher ?? new BalanceFetcher()
     const requireApiSecret = createApiSecretAuthMiddleware(apiSecret)
     const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
-    const getOpenTrades = options.getOpenTrades ?? createDefaultGetOpenTradesFn()
-    const addOpenTrade = options.addOpenTrade ?? createDefaultAddOpenTradeFn()
     const addOrderV2 = options.addOrderV2 ?? createDefaultAddOrderV2Fn()
-    const deleteOpenTrade = options.deleteOpenTrade ?? createDefaultDeleteOpenTradeFn()
-    const createTradeRecord = options.createTradeRecord ?? createDefaultCreateTradeRecordFn()
     const getTradeRecords = options.getTradeRecords ?? createDefaultGetTradeRecordsFn()
     const getTradeStats = options.getTradeStats ?? createDefaultGetTradeStatsFn()
-    const getPendingExecutionOpenTrades = options.getPendingExecutionOpenTrades ?? createDefaultGetPendingExecutionOpenTradesFn()
-    const updateOpenTradeExecutionPrice = options.updateOpenTradeExecutionPrice ?? createDefaultUpdateOpenTradeExecutionPriceFn()
-    const getConfirmedIfdOpenTrades = options.getConfirmedIfdOpenTrades ?? createDefaultGetConfirmedIfdOpenTradesFn()
     const getPendingOrdersV2 = options.getPendingOrdersV2 ?? createDefaultGetPendingOrdersV2Fn()
     const updateOrderV2 = options.updateOrderV2 ?? createDefaultUpdateOrderV2Fn()
     const getOrderV2 = options.getOrderV2 ?? createDefaultGetOrderV2Fn()
@@ -303,12 +285,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
         logger,
         positionFetcher,
         executionPriceFetchers: options.executionPriceFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
-        getPendingExecutionOpenTrades,
-        updateOpenTradeExecutionPrice,
-        getOpenTrades,
-        deleteOpenTrade,
-        createTradeRecord,
-        getConfirmedIfdOpenTrades,
         closingExecutionFetchers: options.closingExecutionFetchers ?? { bitflyer: bitflyerClient },
         getPendingOrdersV2,
         updateOrderV2,
@@ -596,30 +572,12 @@ export const createApp = (options: CreateAppOptions = {}) => {
             reqLogger.warn({ event: 'dispatch_log:failed', error: err, data: dispatchLogData }, 'failed to write order dispatch log')
         })
 
-        // Phase 2 新フロー: dispatch 成功 & strategy/interval あり時に open_trades を即時作成
-        // execution_price は null で記録し、cron が後から確定させる
+        // 新規注文は orders_v2 のみへ記録する
         if (orderResult.ok && payload.strategy !== undefined && payload.interval !== undefined) {
             const orderMethod =
                 effectiveStopLoss && effectiveTakeProfit ? 'IFDOCO' as const :
                     effectiveStopLoss || effectiveTakeProfit ? 'IFD' as const :
                         undefined
-            addOpenTrade({
-                event_id: effectiveEventId,
-                broker: payload.broker,
-                ticker: payload.ticker,
-                side: payload.side,
-                size: payload.size,
-                strategy: payload.strategy,
-                interval: payload.interval,
-                execution_price: null,
-                created_at: new Date(),
-                provider_order_id: orderResult.providerOrderId,
-                ...(orderMethod ? { order_method: orderMethod } : {}),
-            }).catch((err) => {
-                reqLogger.warn({ event: 'open_trade:create_failed', error: err, eventId: effectiveEventId }, 'failed to write open_trade')
-            })
-
-            // デュアルライト: 新しい orders_v2 コレクションへも記録する
             addOrderV2({
                 id: effectiveEventId,
                 strategy: payload.strategy,

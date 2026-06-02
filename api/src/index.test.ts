@@ -8,7 +8,6 @@ import type { Position } from './types/position.js'
 import { DuplicateEventError } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import type { SlotScheduler, RunIfNewSlotParams } from './services/slot-scheduler.js'
-import type { OpenTrade } from './services/trade-records.js'
 
 const createLoggerStub = () => {
     const calls: Record<string, unknown>[] = []
@@ -618,12 +617,11 @@ test('GET /api/cron returns 200 even if slot-scheduler throws internally', async
     assert.equal(res.status, 200)
 })
 
-// ─────────────── Phase 2 新フロー: open_trades 即時作成 ───────────────
+// ─────────────── Phase 2 新フロー: orders_v2 即時作成 ───────────────
 
-test('POST /api/webhooks/tradingview: dispatch 成功 & strategy/interval あり時に addOpenTrade と addOrderV2 を呼ぶ', async () => {
+test('POST /api/webhooks/tradingview: dispatch 成功 & strategy/interval あり時に addOrderV2 を呼ぶ', async () => {
     const { createWebhookEvent } = createWebhookEventStub()
     const { dispatchOrder } = createDispatchStub()
-    const addedTrades: OpenTrade[] = []
     const addedOrdersV2: any[] = []
 
     const app = createAppForTests({
@@ -631,7 +629,6 @@ test('POST /api/webhooks/tradingview: dispatch 成功 & strategy/interval あり
         sourceIpAllowlist: new Set(['52.89.214.238']),
         createWebhookEvent,
         dispatchOrder,
-        addOpenTrade: async (trade) => { addedTrades.push(trade) },
         addOrderV2: async (order) => { addedOrdersV2.push(order) },
     })
 
@@ -642,15 +639,6 @@ test('POST /api/webhooks/tradingview: dispatch 成功 & strategy/interval あり
     })
 
     assert.equal(res.status, 202)
-    assert.equal(addedTrades.length, 1)
-    assert.equal(addedTrades[0]?.event_id, 'evt-open-trade-1')
-    assert.equal(addedTrades[0]?.execution_price, null)
-    assert.equal(addedTrades[0]?.strategy, 'MA Crossover')
-    assert.equal(addedTrades[0]?.interval, '4H')
-    assert.equal(addedTrades[0]?.provider_order_id, 'JRF-test-1')
-    assert.equal(addedTrades[0]?.broker, 'bitflyer')
-    assert.equal(addedTrades[0]?.ticker, 'BTC_JPY')
-
     assert.equal(addedOrdersV2.length, 1)
     assert.equal(addedOrdersV2[0]?.id, 'evt-open-trade-1')
     assert.equal(addedOrdersV2[0]?.strategy, 'MA Crossover')
@@ -751,10 +739,9 @@ test('POST /api/webhooks/tradingview: bitflyer parent order metadata を orders_
     assert.equal(addedOrdersV2[0]?.exit_sync_status, 'MONITORING')
 })
 
-test('POST /api/webhooks/tradingview: strategy/interval がなければ addOpenTrade/addOrderV2 を呼ばない', async () => {
+test('POST /api/webhooks/tradingview: strategy/interval がなければ addOrderV2 を呼ばない', async () => {
     const { createWebhookEvent } = createWebhookEventStub()
     const { dispatchOrder } = createDispatchStub()
-    const addedTrades: OpenTrade[] = []
     const addedOrdersV2: any[] = []
 
     const app = createAppForTests({
@@ -762,20 +749,17 @@ test('POST /api/webhooks/tradingview: strategy/interval がなければ addOpenT
         sourceIpAllowlist: new Set(['52.89.214.238']),
         createWebhookEvent,
         dispatchOrder,
-        addOpenTrade: async (trade) => { addedTrades.push(trade) },
         addOrderV2: async (order) => { addedOrdersV2.push(order) },
     })
 
     const res = await postWebhook(app, makePayload('evt-no-strategy'))
 
     assert.equal(res.status, 202)
-    assert.equal(addedTrades.length, 0)
     assert.equal(addedOrdersV2.length, 0)
 })
 
-test('POST /api/webhooks/tradingview: dispatch 失敗時は addOpenTrade/addOrderV2 を呼ばない', async () => {
+test('POST /api/webhooks/tradingview: dispatch 失敗時は addOrderV2 を呼ばない', async () => {
     const { createWebhookEvent } = createWebhookEventStub()
-    const addedTrades: OpenTrade[] = []
     const addedOrdersV2: any[] = []
 
     const app = createAppForTests({
@@ -783,7 +767,6 @@ test('POST /api/webhooks/tradingview: dispatch 失敗時は addOpenTrade/addOrde
         sourceIpAllowlist: new Set(['52.89.214.238']),
         createWebhookEvent,
         dispatchOrder: async () => ({ ok: false, broker: 'bitflyer', code: 'BROKER_REQUEST_FAILED', message: 'fail' }),
-        addOpenTrade: async (trade) => { addedTrades.push(trade) },
         addOrderV2: async (order) => { addedOrdersV2.push(order) },
     })
 
@@ -794,7 +777,6 @@ test('POST /api/webhooks/tradingview: dispatch 失敗時は addOpenTrade/addOrde
     })
 
     assert.equal(res.status, 202)
-    assert.equal(addedTrades.length, 0)
     assert.equal(addedOrdersV2.length, 0)
 })
 
@@ -956,17 +938,15 @@ test('POST /api/webhooks/foods returns 409 on duplicate event_id', async () => {
     assert.equal(body.error.code, 'DUPLICATED_EVENT')
 })
 
-test('POST /api/webhooks/foods: dispatch 成功 & strategy/interval あり時に addOpenTrade/addOrderV2 を呼ぶ', async () => {
+test('POST /api/webhooks/foods: dispatch 成功 & strategy/interval あり時に addOrderV2 を呼ぶ', async () => {
     const { createWebhookEvent } = createWebhookEventStub()
     const { dispatchOrder } = createDispatchStub()
-    const addedTrades: OpenTrade[] = []
     const addedOrdersV2: any[] = []
 
     const app = createAppForTests({
         apiSecret: 'test-secret',
         createWebhookEvent,
         dispatchOrder,
-        addOpenTrade: async (trade) => { addedTrades.push(trade) },
         addOrderV2: async (order) => { addedOrdersV2.push(order) },
     })
 
@@ -977,12 +957,6 @@ test('POST /api/webhooks/foods: dispatch 成功 & strategy/interval あり時に
     })
 
     assert.equal(res.status, 202)
-    assert.equal(addedTrades.length, 1)
-    assert.equal(addedTrades[0]?.event_id, 'evt-foo-open-trade-1')
-    assert.equal(addedTrades[0]?.execution_price, null)
-    assert.equal(addedTrades[0]?.strategy, 'MA Crossover')
-    assert.equal(addedTrades[0]?.interval, '4H')
-
     assert.equal(addedOrdersV2.length, 1)
     assert.equal(addedOrdersV2[0]?.id, 'evt-foo-open-trade-1')
     assert.equal(addedOrdersV2[0]?.strategy, 'MA Crossover')
@@ -1114,15 +1088,14 @@ test('POST /api/webhooks/tradingview: stop_loss_pct も stop_loss もなけれ�
 test('POST /api/webhooks/tradingview: stop_loss_pct + take_profit_pct 両方あれば orderMethod が IFDOCO になる', async () => {
     const { createWebhookEvent } = createWebhookEventStub()
     const { dispatchOrder } = createDispatchStub()
-    const addedTrades: OpenTrade[] = []
+    const addedOrdersV2: any[] = []
 
     const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
         createWebhookEvent,
         dispatchOrder,
-        addOpenTrade: async (trade) => { addedTrades.push(trade) },
-        addOrderV2: async () => { },
+        addOrderV2: async (order) => { addedOrdersV2.push(order) },
     })
 
     const payload = {
@@ -1135,5 +1108,6 @@ test('POST /api/webhooks/tradingview: stop_loss_pct + take_profit_pct 両方あ�
     const res = await postWebhook(app, payload)
 
     assert.equal(res.status, 202)
-    assert.equal(addedTrades[0]?.order_method, 'IFDOCO')
+    assert.equal(addedOrdersV2[0]?.order_type, 'IFDOCO')
+    assert.equal(addedOrdersV2[0]?.exit_sync_status, 'MONITORING')
 })
