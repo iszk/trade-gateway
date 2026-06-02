@@ -14,8 +14,10 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
-import { createDefaultCreateTradeRecordFn, createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn, createDefaultGetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
-import type { CreateTradeRecordFn, GetTradeRecordsFn, GetTradeStatsFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
+import { createDefaultCreateTradeRecordFn, createDefaultAddOpenTradeFn, createDefaultGetOpenTradesFn, createDefaultDeleteOpenTradeFn, createDefaultGetPendingExecutionOpenTradesFn, createDefaultUpdateOpenTradeExecutionPriceFn, createDefaultGetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
+import type { CreateTradeRecordFn, AddOpenTradeFn, GetOpenTradesFn, DeleteOpenTradeFn, GetPendingExecutionOpenTradesFn, UpdateOpenTradeExecutionPriceFn, GetConfirmedIfdOpenTradesFn } from './services/trade-records.js'
+import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
+import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
 import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultListOrdersV2ByStrategyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
 import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, ListOrdersV2ByStrategyFn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn, ListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
 import { computeStatsV2 } from './services/stats-v2.js'
@@ -794,7 +796,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 from: dates.from,
                 to: dates.to,
                 strategy: c.req.query('strategy'),
-                interval: c.req.query('interval'),
                 ticker: c.req.query('ticker'),
                 broker: c.req.query('broker'),
             })
@@ -905,7 +906,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 from: dates.from,
                 to: dates.to,
                 strategy: c.req.query('strategy'),
-                interval: c.req.query('interval'),
                 ticker: c.req.query('ticker'),
                 broker: c.req.query('broker'),
             })
@@ -965,7 +965,7 @@ export type AppType = typeof app
 export type { BrokerBalance } from './types/balance.js'
 export type { Position } from './types/position.js'
 export type { SaxoInstrument } from './brokers/saxo.js'
-export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, TradeRecordsResponse } from './services/trade-records.js'
+export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, TradeRecordsResponse } from './services/trade-records-v2.js'
 export type { OrderV2 } from './types/order-v2.js'
 export type { StatsV2 } from './services/stats-v2.js'
 

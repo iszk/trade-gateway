@@ -19,7 +19,6 @@ export default createRoute(async (c) => {
   const fromParam = c.req.query('from') || toDateInputValue(defaultFrom)
   const toParam = c.req.query('to') || toDateInputValue(now)
   const strategyParam = c.req.query('strategy') || ''
-  const intervalParam = c.req.query('interval') || ''
   const tickerParam = c.req.query('ticker') || ''
   const brokerParam = c.req.query('broker') || ''
   const pageParam = c.req.query('page') || '1'
@@ -27,7 +26,6 @@ export default createRoute(async (c) => {
   const buildQuery = (extra?: Record<string, string>): Record<string, string> => {
     const q: Record<string, string> = { from: fromParam, to: toParam }
     if (strategyParam) q.strategy = strategyParam
-    if (intervalParam) q.interval = intervalParam
     if (tickerParam) q.ticker = tickerParam
     if (brokerParam) q.broker = brokerParam
     return { ...q, ...extra }
@@ -64,7 +62,7 @@ export default createRoute(async (c) => {
 
       {/* フィルターフォーム */}
       <form method="get" action="/trade-records" class="bg-white shadow rounded-lg p-4 mb-6">
-        <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
           <div>
             <label class="block text-xs font-semibold text-gray-600 mb-1">From</label>
             <input
@@ -89,16 +87,6 @@ export default createRoute(async (c) => {
               type="text"
               name="strategy"
               value={strategyParam}
-              placeholder="all"
-              class="border border-gray-300 rounded px-3 py-1.5 w-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Interval</label>
-            <input
-              type="text"
-              name="interval"
-              value={intervalParam}
               placeholder="all"
               class="border border-gray-300 rounded px-3 py-1.5 w-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
@@ -154,9 +142,6 @@ export default createRoute(async (c) => {
               <thead class="uppercase tracking-wider border-b-2 text-gray-600 bg-gray-50">
                 <tr>
                   <th class="px-4 py-3">Strategy</th>
-                  <th class="px-4 py-3">Interval</th>
-                  <th class="px-4 py-3">Ticker</th>
-                  <th class="px-4 py-3">Broker</th>
                   <th class="px-4 py-3 text-right">Total</th>
                   <th class="px-4 py-3 text-right">Win</th>
                   <th class="px-4 py-3 text-right">Loss</th>
@@ -174,9 +159,6 @@ export default createRoute(async (c) => {
                 {statsData.groups.map((g: GroupStats, i: number) => (
                   <tr key={i} class="border-b hover:bg-gray-50">
                     <td class="px-4 py-3 font-medium">{g.strategy}</td>
-                    <td class="px-4 py-3">{g.interval}</td>
-                    <td class="px-4 py-3">{g.ticker}</td>
-                    <td class="px-4 py-3 capitalize">{g.broker}</td>
                     <td class="px-4 py-3 text-right">{g.total}</td>
                     <td class="px-4 py-3 text-right text-green-600">{g.win_count}</td>
                     <td class="px-4 py-3 text-right text-red-600">{g.loss_count}</td>
@@ -226,7 +208,6 @@ export default createRoute(async (c) => {
                       <th class="px-4 py-3">Opened At</th>
                       <th class="px-4 py-3">Closed At</th>
                       <th class="px-4 py-3">Strategy</th>
-                      <th class="px-4 py-3">Interval</th>
                       <th class="px-4 py-3">Ticker</th>
                       <th class="px-4 py-3">Broker</th>
                       <th class="px-4 py-3">Side</th>
@@ -242,7 +223,6 @@ export default createRoute(async (c) => {
                         <td class="px-4 py-3 text-xs">{new Date(r.opened_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
                         <td class="px-4 py-3 text-xs">{new Date(r.closed_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
                         <td class="px-4 py-3">{r.strategy}</td>
-                        <td class="px-4 py-3">{r.interval}</td>
                         <td class="px-4 py-3">{r.ticker}</td>
                         <td class="px-4 py-3 capitalize">{r.broker}</td>
                         <td class="px-4 py-3">
