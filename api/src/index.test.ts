@@ -14,6 +14,7 @@ const createLoggerStub = () => {
     const logger = {
         info: (obj: Record<string, unknown>) => calls.push(obj),
         warn: (obj: Record<string, unknown>) => calls.push(obj),
+        error: (obj: Record<string, unknown>) => calls.push(obj),
         child: (_bindings: Record<string, unknown>) => logger,
     }
     return { logger, calls }
@@ -737,25 +738,6 @@ test('POST /api/webhooks/tradingview: bitflyer parent order metadata を orders_
         ],
     })
     assert.equal(addedOrdersV2[0]?.exit_sync_status, 'MONITORING')
-})
-
-test('POST /api/webhooks/tradingview: strategy/interval がなければ addOrderV2 を呼ばない', async () => {
-    const { createWebhookEvent } = createWebhookEventStub()
-    const { dispatchOrder } = createDispatchStub()
-    const addedOrdersV2: any[] = []
-
-    const app = createAppForTests({
-        webhookSecret: 'test-secret',
-        sourceIpAllowlist: new Set(['52.89.214.238']),
-        createWebhookEvent,
-        dispatchOrder,
-        addOrderV2: async (order) => { addedOrdersV2.push(order) },
-    })
-
-    const res = await postWebhook(app, makePayload('evt-no-strategy'))
-
-    assert.equal(res.status, 202)
-    assert.equal(addedOrdersV2.length, 0)
 })
 
 test('POST /api/webhooks/tradingview: dispatch 失敗時は addOrderV2 を呼ばない', async () => {

@@ -52,6 +52,7 @@ const createLoggerStub = () => {
     const logger = {
         info: (obj: Record<string, unknown>) => calls.push({ level: 'info', obj }),
         warn: (obj: Record<string, unknown>) => calls.push({ level: 'warn', obj }),
+        error: (obj: Record<string, unknown>) => calls.push({ level: 'error', obj }),
     }
     return { logger, calls }
 }
@@ -75,8 +76,8 @@ test('computeSlotId: stable across ±1s jitter around a nominal cron fire time',
     // nowSeconds = 30 + 600k. With k=54: 30 + 32400 = 32430 = 09:00:30.
     // So at 09:00:00, 09:00:01, 08:59:59 we are all still in slot 53.
     const base = 9 * 3600 // 09:00:00
-    const slotAtExact  = computeSlotId(base * 1_000, 600)
-    const slotAtPlus1  = computeSlotId((base + 1) * 1_000, 600)
+    const slotAtExact = computeSlotId(base * 1_000, 600)
+    const slotAtPlus1 = computeSlotId((base + 1) * 1_000, 600)
     const slotAtMinus1 = computeSlotId((base - 1) * 1_000, 600)
     assert.equal(slotAtExact, slotAtPlus1)
     assert.equal(slotAtExact, slotAtMinus1)
@@ -205,7 +206,7 @@ test('runIfNewSlot: catches Firestore errors and logs a warning without rethrowi
             nowMs: 1_000 * 1_000,
             intervalSeconds: 600,
             slotKey: 'last_slot_10m',
-            task: async () => {},
+            task: async () => { },
             logger,
         }),
     )

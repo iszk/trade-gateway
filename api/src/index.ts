@@ -590,13 +590,13 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 executed_size: 0,
                 executed_price: null,
                 status: 'PENDING',
-                exit_sync_status: orderMethod === 'IFDOCO' || orderMethod === 'IFD' ? 'MONITORING' : 'NOT_APPLICABLE',
+                exit_sync_status: orderMethod === 'IFDOCO' || orderMethod === 'IFD' ? 'MONITORING' : undefined,
                 provider_order_ids: [orderResult.providerOrderId],
                 broker_order_metadata: orderResult.brokerOrderMetadata,
                 created_at: new Date(),
                 updated_at: new Date(),
             }).catch((err) => {
-                reqLogger.warn({ event: 'order_v2:create_failed', error: err, eventId: effectiveEventId }, 'failed to write to orders_v2')
+                reqLogger.error({ event: 'order_v2:create_failed', error: err, eventId: effectiveEventId }, 'failed to write to orders_v2')
             })
         }
 

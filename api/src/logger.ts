@@ -3,6 +3,7 @@ import { Logger as TSLogger, type ILogObj } from 'tslog'
 export type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
     warn(obj: Record<string, unknown>, msg?: string): void
+    error(obj: Record<string, unknown>, msg?: string): void
     child(bindings: Record<string, unknown>): Logger
 }
 
@@ -58,6 +59,13 @@ export const createLogger = (
             tsLogger.warn(msg, { ...additionalFields, ...obj })
         } else {
             tsLogger.warn({ ...additionalFields, ...obj })
+        }
+    },
+    error: (obj, msg) => {
+        if (msg) {
+            tsLogger.error(msg, { ...additionalFields, ...obj })
+        } else {
+            tsLogger.error({ ...additionalFields, ...obj })
         }
     },
     child: (bindings) => createLogger(tsLogger, { ...additionalFields, ...bindings }),

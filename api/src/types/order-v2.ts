@@ -5,7 +5,7 @@ export type OrderStatusV2 = 'PENDING' | 'EXECUTED' | 'FAILED' | 'CANCELED'
 
 export type OrderTypeV2 = 'MARKET' | 'IFDOCO' | 'LIMIT' | 'STOP'
 
-export type ExitSyncStatus = 'MONITORING' | 'COMPLETED' | 'NOT_APPLICABLE'
+export type ExitSyncStatus = 'MONITORING' | 'COMPLETED'
 
 export type OrderV2 = {
     /** 注文のユニークID（WebhookのeventIdなど） */
