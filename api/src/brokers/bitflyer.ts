@@ -128,10 +128,11 @@ const resolveProductCode = (ticker: string): string =>
 
 const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): number | null => {
     if (execs.length === 0) return null
-    const totalSize = execs.reduce((sum, e) => sum + e.size, 0)
+    const totalSize = totalSizeExecs(execs)
     const totalValue = execs.reduce((sum, e) => sum + e.price * e.size, 0)
     return totalValue / totalSize
 }
+const totalSizeExecs = (execs: BitflyerExecutionEntry[]): number => execs.reduce((sum, e) => sum + e.size, 0)
 
 const areSameNumber = (left: number | undefined, right: number | undefined): boolean => {
     if (left === undefined || right === undefined) return left === right
@@ -577,7 +578,7 @@ export class BitflyerClient {
         if (childExecs.length === 0) return null
 
         const price = weightedAvgExecs(childExecs)
-        const size = childExecs.reduce((sum, e) => sum + e.size, 0)
+        const size = totalSizeExecs(childExecs)
         return price === null ? null : { price, size, executed_at: extractLatestExecutionAt(childExecs) }
     }
 
@@ -691,7 +692,7 @@ export class BitflyerClient {
             )
             if (directExecs.length > 0) {
                 const price = weightedAvgExecs(directExecs)
-                const size = directExecs.reduce((sum, e) => sum + e.size, 0)
+                const size = totalSizeExecs(directExecs)
                 if (price !== null) return { price, size }
             }
 
@@ -714,7 +715,7 @@ export class BitflyerClient {
             )
             if (childExecs.length > 0) {
                 const price = weightedAvgExecs(childExecs)
-                const size = childExecs.reduce((sum, e) => sum + e.size, 0)
+                const size = totalSizeExecs(childExecs)
                 if (price !== null) return { price, size }
             }
             return null
@@ -769,8 +770,8 @@ export class BitflyerClient {
                     'GET',
                     `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(productCode)}&child_order_acceptance_id=${encodeURIComponent(child.child_order_acceptance_id)}`,
                 )
+                totalSize += totalSizeExecs(execs)
                 for (const e of execs) {
-                    totalSize += e.size
                     totalValue += e.price * e.size
                 }
             }
