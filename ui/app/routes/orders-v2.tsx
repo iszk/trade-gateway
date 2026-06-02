@@ -16,6 +16,18 @@ const toDateInputValue = (d: Date): string =>
 const getEffectiveTime = (order: Pick<OrderV2, 'created_at' | 'executed_at'>): string =>
   String(order.executed_at ?? order.created_at)
 
+const formatJstDateTime = (value: string): string =>
+  new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(value))
+
 const statusBadge = (status: OrderV2['status']) => {
   const map: Record<string, string> = {
     PENDING: 'bg-yellow-100 text-yellow-800',
@@ -221,7 +233,7 @@ export default createRoute(async (c) => {
                 <table class="min-w-full text-left text-sm whitespace-nowrap">
                   <thead class="uppercase tracking-wider border-b-2 text-gray-600 bg-gray-50">
                     <tr>
-                      <th class="px-4 py-3">Executed At</th>
+                      <th class="px-4 py-3">Executed At (JST)</th>
                       <th class="px-4 py-3">Strategy</th>
                       <th class="px-4 py-3">Broker</th>
                       <th class="px-4 py-3">Ticker</th>
@@ -236,7 +248,7 @@ export default createRoute(async (c) => {
                   <tbody>
                     {ordersData.orders.map((o: OrderV2, i: number) => (
                       <tr key={i} class="border-b hover:bg-gray-50">
-                        <td class="px-4 py-3 text-xs">{new Date(getEffectiveTime(o)).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
+                        <td class="px-4 py-3 text-xs">{formatJstDateTime(getEffectiveTime(o))}</td>
                         <td class="px-4 py-3">{o.strategy}</td>
                         <td class="px-4 py-3 capitalize">{o.broker}</td>
                         <td class="px-4 py-3">{o.ticker}</td>

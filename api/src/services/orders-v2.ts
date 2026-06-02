@@ -86,13 +86,13 @@ export const createListOrdersV2ByDateRangeFn = (db: Firestore = getFirestoreClie
                 .collection(COLLECTION_NAME)
                 .where('executed_at', '>=', from)
                 .where('executed_at', '<=', to)
-                .orderBy('executed_at', 'asc')
+                .orderBy('executed_at', 'desc')
                 .get(),
             db
                 .collection(COLLECTION_NAME)
                 .where('created_at', '>=', from)
                 .where('created_at', '<=', to)
-                .orderBy('created_at', 'asc')
+                .orderBy('created_at', 'desc')
                 .get(),
         ])
 
@@ -108,7 +108,7 @@ export const createListOrdersV2ByDateRangeFn = (db: Firestore = getFirestoreClie
                 const time = getEffectiveOrderTime(order)
                 return time >= from && time <= to
             })
-            .sort((a, b) => getEffectiveOrderTime(a).getTime() - getEffectiveOrderTime(b).getTime())
+            .sort((a, b) => getEffectiveOrderTime(b).getTime() - getEffectiveOrderTime(a).getTime())
     }
 }
 

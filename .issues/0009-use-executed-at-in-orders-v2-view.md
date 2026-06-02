@@ -42,3 +42,11 @@ status: done
 ## 2026-06-01 01:16 GitHub Copilot GPT-5.4
 
 クローズした。クローズ理由: `orders-v2` view における期間フィルタと一覧表示の時刻基準を `executed_at ?? created_at` へ切り替え、`executed_at` 未設定の既存データもフォールバックで扱えることを単体テストと `mise run test` で確認できたため。
+
+## 2026-06-02 10:26 GitHub Copilot GPT-5.4
+
+追加要件に着手した。`orders-v2` の order list は API 側で `executed_at ?? created_at` を昇順ソートしていたため、売買時刻の新しい順で見たい要件に合っていなかった。`createListOrdersV2ByDateRangeFn` の Firestore 取得順と最終ソートを降順へ変更し、既存テストも降順期待値へ更新した。UI 側では日時表示を `Asia/Tokyo` 固定の formatter に寄せ、一覧ヘッダを `Executed At (JST)` に変えて日本時間表示であることを明示した。今回は一覧の並び順と時刻表示の明確化に限定し、フィルタ条件や API パラメータ仕様は変更していない。クローズ確認は未実施のため、status は `wip` のままにする。
+
+## 2026-06-02 10:42 GitHub Copilot GPT-5.4
+
+クローズした。クローズ理由: `orders-v2` の order list を `executed_at ?? created_at` 基準の降順へ変更し、一覧の約定時刻表示も `Asia/Tokyo` 固定で `Executed At (JST)` として明示した。関連する単体テスト更新と `mise run test` の通過まで確認でき、今回依頼された表示変更は完了したため。

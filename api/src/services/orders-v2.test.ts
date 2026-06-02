@@ -79,8 +79,8 @@ test('createListOrdersV2ByDateRangeFn: executed_at を優先しつつ created_at
 
     assert.deepEqual(
         orders.map((order) => order.id),
-        ['executed-in-range', 'created-fallback-in-range'],
+        ['created-fallback-in-range', 'executed-in-range'],
     )
-    assert.deepEqual(orders[0]?.executed_at, new Date('2026-01-12T00:00:00Z'))
-    assert.equal(orders[1]?.executed_at, undefined)
+    assert.equal(orders[0]?.executed_at, undefined)
+    assert.deepEqual(orders[1]?.executed_at, new Date('2026-01-12T00:00:00Z'))
 })
