@@ -1,5 +1,6 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient } from '../firestore.js'
+import { omitUndefinedFields } from '../omit-undefined-fields.js'
 
 export type OrderDispatchLogInput = {
     event_id: string
@@ -15,12 +16,6 @@ export type OrderDispatchLogInput = {
 }
 
 export type CreateOrderDispatchLogFn = (data: OrderDispatchLogInput) => Promise<void>
-
-const omitUndefinedFields = <T extends Record<string, unknown>>(value: T): T => {
-    return Object.fromEntries(
-        Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
-    ) as T
-}
 
 export const createOrderDispatchLogFn = (db: Firestore): CreateOrderDispatchLogFn => {
     return async (data) => {

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { createListOrdersV2ByDateRangeFn } from './orders-v2.js'
+import {
+    createAddOrderV2Fn,
+    createListOrdersV2ByDateRangeFn,
+    createUpdateOrderV2Fn,
+} from './orders-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 
 const toTimestamp = (date: Date) => ({
@@ -46,6 +50,62 @@ const createDbStub = (snapshots: { executed_at: OrderV2[]; created_at: OrderV2[]
             }),
         }),
     }),
+})
+
+const createWriteDbStub = () => {
+    const state: {
+        setPayload?: Record<string, unknown>
+        updatePayload?: Record<string, unknown>
+    } = {}
+
+    return {
+        state,
+        db: {
+            collection: () => ({
+                doc: () => ({
+                    set: async (payload: Record<string, unknown>) => {
+                        state.setPayload = payload
+                    },
+                    update: async (payload: Record<string, unknown>) => {
+                        state.updatePayload = payload
+                    },
+                }),
+            }),
+        },
+    }
+}
+
+test('createAddOrderV2Fn: Firestore write 前に undefined フィールドを除去する', async () => {
+    const { db, state } = createWriteDbStub()
+    const addOrderV2 = createAddOrderV2Fn(db as any)
+
+    await addOrderV2(makeOrder({
+        id: 'order-with-undefined',
+        executed_at: undefined,
+        exit_sync_status: undefined,
+    }))
+
+    assert.ok(state.setPayload)
+    assert.equal('executed_at' in state.setPayload, false)
+    assert.equal('exit_sync_status' in state.setPayload, false)
+    assert.equal(state.setPayload.id, 'order-with-undefined')
+})
+
+test('createUpdateOrderV2Fn: Firestore update 前に undefined フィールドを除去する', async () => {
+    const { db, state } = createWriteDbStub()
+    const updateOrderV2 = createUpdateOrderV2Fn(db as any)
+
+    await updateOrderV2('order-with-undefined', {
+        executed_at: undefined,
+        exit_sync_status: undefined,
+        status: 'EXECUTED',
+    })
+
+    assert.ok(state.updatePayload)
+    assert.equal('executed_at' in state.updatePayload, false)
+    assert.equal('exit_sync_status' in state.updatePayload, false)
+    assert.equal(state.updatePayload.status, 'EXECUTED')
+    assert.ok(state.updatePayload.updated_at instanceof Date)
 })
 
 test('createListOrdersV2ByDateRangeFn: executed_at を優先しつつ created_at フォールバックで期間抽出する', async () => {
