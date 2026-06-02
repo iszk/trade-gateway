@@ -573,14 +573,15 @@ export const createApp = (options: CreateAppOptions = {}) => {
         })
 
         // 新規注文は orders_v2 のみへ記録する
-        if (orderResult.ok && payload.strategy !== undefined && payload.interval !== undefined) {
+        const strategy = payload.strategy ?? 'unknown'
+        if (orderResult.ok) {
             const orderMethod =
                 effectiveStopLoss && effectiveTakeProfit ? 'IFDOCO' as const :
                     effectiveStopLoss || effectiveTakeProfit ? 'IFD' as const :
                         undefined
             addOrderV2({
                 id: effectiveEventId,
-                strategy: payload.strategy,
+                strategy: strategy,
                 broker: payload.broker as any, // BrokerName に一致させる
                 ticker: payload.ticker,
                 side: payload.side,
@@ -589,7 +590,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 executed_size: 0,
                 executed_price: null,
                 status: 'PENDING',
-                exit_sync_status: orderMethod === 'IFDOCO' || orderMethod === 'IFD' ? 'MONITORING' : undefined,
+                exit_sync_status: orderMethod === 'IFDOCO' || orderMethod === 'IFD' ? 'MONITORING' : 'NOT_APPLICABLE',
                 provider_order_ids: [orderResult.providerOrderId],
                 broker_order_metadata: orderResult.brokerOrderMetadata,
                 created_at: new Date(),
