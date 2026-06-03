@@ -131,17 +131,6 @@ type SaxoProductInfo = {
     Uic: number
 }
 
-const TICKER_PRODUCT_CODE_MAP: Record<string, SaxoProductInfo> = {
-    'FX:NAS100': {
-        AssetType: 'CfdOnIndex',
-        Uic: 4912,
-    },
-    'FX:US30': {
-        AssetType: 'CfdOnIndex',
-        Uic: 4911,
-    },
-}
-
 export class SaxoClient {
     private readonly appKey?: string
     private readonly appSecret?: string
@@ -371,12 +360,6 @@ export class SaxoClient {
             return this.buildFailure('BROKER_NOT_CONFIGURED', 'Saxo auth is missing or expired')
         }
 
-        /*
-        const productInfo = TICKER_PRODUCT_CODE_MAP[order.ticker.toUpperCase()]
-        if (!productInfo) {
-            return this.buildFailure('BROKER_REQUEST_FAILED', `Unsupported ticker: ${order.ticker}`)
-        }
-        */
         // ticker は "CfdOnIndex:4912" のような形式で渡される
         const productInfo: SaxoProductInfo = {
             AssetType: order.ticker.split(':')[0],
@@ -559,7 +542,7 @@ export class SaxoClient {
         }))
     }
 
-    async getExecutionPrice(orderId: string, ticker: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
+    async getExecutionPrice(orderId: string, _ticker: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
         if (orderId === 'DRY_RUN') return null
 
         const accessToken = await this.getValidAccessToken()

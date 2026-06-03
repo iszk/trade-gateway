@@ -2,7 +2,7 @@ import { BitflyerClient } from '../brokers/bitflyer.js'
 import { DummyClient } from '../brokers/dummy.js'
 import { SaxoClient } from '../brokers/saxo.js'
 import { config } from '../config.js'
-import type { DispatchOrderFn, OrderRequest } from '../types/order.js'
+import type { DispatchOrderFn } from '../types/order.js'
 
 type OrderDispatcherOptions = {
     bitflyerClient?: BitflyerClient

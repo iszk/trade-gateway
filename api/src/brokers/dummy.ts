@@ -1,15 +1,5 @@
-import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
+import type { OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { Position } from '../types/position.js'
-
-const buildFailure = (
-    code: OrderDispatchFailure['code'],
-    message: string,
-): OrderDispatchFailure => ({
-    ok: false,
-    broker: 'dummy',
-    code,
-    message,
-})
 
 export class DummyClient {
     async sendMarketOrder(order: OrderRequest): Promise<OrderDispatchResult> {

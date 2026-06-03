@@ -21,7 +21,7 @@ test('BalanceFetcher fetches and filters balances correctly', async () => {
     let capturedData: any = null
 
     const mockFirestore = {
-        collection: (col: string) => ({
+        collection: (_col: string) => ({
             doc: (docId: string) => ({
                 set: async (data: any) => {
                     capturedDocId = docId
