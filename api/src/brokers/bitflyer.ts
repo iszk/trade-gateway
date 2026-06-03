@@ -148,9 +148,14 @@ const matchesExpectedChildOrder = (
     const hasExpectedPrice = expected.price !== undefined
     const hasExpectedTriggerPrice = expected.trigger_price !== undefined
 
-    return (
-        child.side === expected.side &&
-        areSameNumber(child.size, expected.size) &&
+    if (
+        child.side !== expected.side ||
+        !areSameNumber(child.size, expected.size)
+    ) {
+        return false
+    }
+
+    const matchesExpectedShape = (
         (!hasExpectedPrice || areSameNumber(child.price, expected.price)) &&
         (!hasExpectedTriggerPrice || areSameNumber(child.trigger_price, expected.trigger_price)) &&
         (
@@ -158,6 +163,18 @@ const matchesExpectedChildOrder = (
             hasExpectedTriggerPrice ||
             child.child_order_type === expected.condition_type
         )
+    )
+
+    if (matchesExpectedShape) {
+        return true
+    }
+
+    return (
+        expected.role === 'STOP_LOSS' &&
+        expected.condition_type === 'STOP' &&
+        child.child_order_type === 'MARKET' &&
+        child.child_order_state === 'COMPLETED' &&
+        child.trigger_price === undefined
     )
 }
 

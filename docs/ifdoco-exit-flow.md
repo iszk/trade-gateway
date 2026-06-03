@@ -47,6 +47,8 @@ IFDOCO 注文の親レコードが `orders_v2` に存在している状態で、
 2. `GET /v1/me/getchildorders` で子注文一覧を取得
 3. `expected`（side / size / condition_type / price / trigger_price）でマッチングして acceptance_id を解決
 
+bitflyer では SL がトリガーされた後、STOP 子注文ではなく MARKET 子注文として返ることがある。この MARKET 子注文に `trigger_price` が含まれない場合でも、`STOP_LOSS` の expected と side / size が一致し、未使用の `COMPLETED` な MARKET 子注文が一意に見つかる場合は、その子注文を SL 決済として解決する。候補が複数ある場合は誤解決を避けるため acceptance_id を更新せず、次回の監視に回す。
+
 #### 4-2. 約定情報の取得
 
 解決済みの各 exit の `acceptance_id` に対し `GET /v1/me/getexecutions?child_order_acceptance_id=...` を呼ぶ。

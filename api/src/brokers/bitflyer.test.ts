@@ -950,6 +950,95 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves close acceptance ids
     assert.deepEqual(result.brokerOrderMetadata?.exits[1]?.resolved, { acceptance_id: 'JRF-child-limit-meta' })
 })
 
+test('BitflyerClient.getClosingExecutionForOrderV2 resolves stop loss MARKET child without trigger_price', async () => {
+    const order: OrderV2 = {
+        id: 'v2-close-sl-market-no-trigger',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC/JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0.01,
+        executed_price: 9700000,
+        status: 'EXECUTED',
+        provider_order_ids: ['JRF-parent-close-sl-market'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-close-sl-market',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-child-entry-sl-market' },
+            },
+            exits: [
+                {
+                    expected: { role: 'STOP_LOSS', side: 'SELL', condition_type: 'STOP', size: 0.01, trigger_price: 9500000 },
+                    resolved: { acceptance_id: null },
+                },
+                {
+                    expected: { role: 'TAKE_PROFIT', side: 'SELL', condition_type: 'LIMIT', size: 0.01, price: 9800000 },
+                    resolved: { acceptance_id: null },
+                },
+            ],
+        },
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+
+    let callCount = 0
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            callCount++
+            const urlStr = String(url)
+
+            if (callCount === 1) {
+                assert.ok(urlStr.includes('getparentorder'))
+                return new Response(
+                    JSON.stringify({ parent_order_id: 'JCO-parent-close-sl-market', parent_order_acceptance_id: 'JRF-parent-close-sl-market' }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (callCount === 2) {
+                assert.ok(urlStr.includes('getchildorders'))
+                return new Response(
+                    JSON.stringify([
+                        { child_order_acceptance_id: 'JRF-child-stop-sl-market', child_order_state: 'COMPLETED', child_order_type: 'MARKET', side: 'SELL', size: 0.01 },
+                        { child_order_acceptance_id: 'JRF-child-limit-sl-market', child_order_state: 'ACTIVE', child_order_type: 'LIMIT', side: 'SELL', size: 0.01, price: 9800000 },
+                        { child_order_acceptance_id: 'JRF-child-entry-sl-market', child_order_state: 'COMPLETED', child_order_type: 'MARKET', side: 'BUY', size: 0.01 },
+                    ]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            assert.ok(urlStr.includes('getexecutions'))
+            if (urlStr.includes('JRF-child-stop-sl-market')) {
+                return new Response(
+                    JSON.stringify([{ child_order_acceptance_id: 'JRF-child-stop-sl-market', price: 9500000, size: 0.01, exec_date: '2026-01-01T01:10:00.000Z' }]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlStr.includes('JRF-child-limit-sl-market')) {
+                return new Response(
+                    JSON.stringify([]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            assert.fail(`unexpected getexecutions url: ${urlStr}`)
+        },
+    })
+
+    const result = await client.getClosingExecutionForOrderV2(order)
+
+    assert.deepEqual(result.execution, { price: 9500000, size: 0.01, executed_at: new Date('2026-01-01T01:10:00.000Z') })
+    assert.deepEqual(result.brokerOrderMetadata?.exits[0]?.resolved, { acceptance_id: 'JRF-child-stop-sl-market' })
+    assert.deepEqual(result.brokerOrderMetadata?.exits[1]?.resolved, { acceptance_id: 'JRF-child-limit-sl-market' })
+})
+
 test('BitflyerClient.getClosingExecution returns null when parent acceptance id cannot be resolved', async () => {
     const client = new BitflyerClient({
         apiKey: 'test-key',
