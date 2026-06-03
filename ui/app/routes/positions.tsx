@@ -1,6 +1,7 @@
 import { createRoute } from 'honox/factory'
 import type { Position } from '@trade-gateway/api'
 import { fetchApiJson } from '../lib/api'
+import { fetchSymbolMap, getSymbolDisplayName } from '../lib/symbols'
 
 type PositionsResponse = {
   positions: Position[]
@@ -10,6 +11,7 @@ type PositionsResponse = {
 export default createRoute(async (c) => {
   let errorMsg = ''
   let positionsData: PositionsResponse | null = null
+  const symbols = await fetchSymbolMap().catch(() => new Map())
 
   try {
     positionsData = await fetchApiJson<PositionsResponse>('/api/positions')
@@ -55,7 +57,7 @@ export default createRoute(async (c) => {
                   {positionsData.positions.map((pos, i) => (
                     <tr key={i} class="border-b hover:bg-gray-50">
                       <td class="px-6 py-4 font-medium capitalize">{pos.broker}</td>
-                      <td class="px-6 py-4">{pos.ticker}</td>
+                      <td class="px-6 py-4">{getSymbolDisplayName(symbols, pos.broker, pos.ticker)}</td>
                       <td class="px-6 py-4">
                         <span class={`px-2 py-1 rounded text-xs font-bold ${pos.side === 'BUY' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                           {pos.side}

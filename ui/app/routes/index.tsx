@@ -23,6 +23,9 @@ export default createRoute((c) => {
         <a href="/orders-v2" class="bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 px-6 rounded shadow">
           Orders V2
         </a>
+        <a href="/symbols" class="bg-slate-600 hover:bg-slate-700 text-white font-semibold py-3 px-6 rounded shadow">
+          Symbols
+        </a>
       </div>
 
       <div class="border-t pt-8">

@@ -7,7 +7,9 @@ import type { BrokerBalance } from './types/balance.js'
 import type { Position } from './types/position.js'
 import { DuplicateEventError } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
+import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { SlotScheduler, RunIfNewSlotParams } from './services/slot-scheduler.js'
+import type { TradableSymbol } from './types/tradable-symbol.js'
 
 const createLoggerStub = () => {
     const calls: Record<string, unknown>[] = []
@@ -32,6 +34,42 @@ const createAppForTests = (options: Parameters<typeof createApp>[0] = {}) =>
     createApp({
         balanceFetcher: createBalanceFetcherStub(),
         positionFetcher: createPositionFetcherStub(),
+        getTradableSymbol: async () => null,
+        listTradableSymbols: async () => [],
+        upsertTradableSymbol: async (input) => ({
+            id: input.id,
+            broker: input.broker,
+            ticker: input.ticker,
+            display_name: input.display_name,
+            currency: input.currency,
+            note: input.note,
+            trade_control: {
+                status: input.trade_control?.status ?? 'active',
+                reason: input.trade_control?.reason,
+                updated_at: new Date(),
+                updated_by: input.trade_control?.updated_by,
+            },
+            created_at: new Date(),
+            updated_at: new Date(),
+        }),
+        updateTradeControl: async (symbolId, input) => {
+            const [broker, ...tickerParts] = symbolId.split(':')
+            return {
+                id: symbolId,
+                broker: broker as BrokerName,
+                ticker: tickerParts.join(':'),
+                currency: 'JPY',
+                trade_control: {
+                    status: input.status,
+                    reason: input.reason,
+                    updated_at: new Date(),
+                    updated_by: input.updated_by,
+                },
+                created_at: new Date(),
+                updated_at: new Date(),
+            }
+        },
+        ensureTradableSymbol: async () => {},
         ...options,
     })
 
@@ -79,16 +117,41 @@ const createDispatchStub = (override?: DispatchOrderFn) => {
     return { dispatchOrder, calls }
 }
 
-const createWebhookEventStub = (): { createWebhookEvent: CreateWebhookEventFn; seen: Set<string> } => {
+const createWebhookEventStub = (): { createWebhookEvent: CreateWebhookEventFn; seen: Set<string>; events: Parameters<CreateWebhookEventFn>[0][] } => {
     const seen = new Set<string>()
+    const events: Parameters<CreateWebhookEventFn>[0][] = []
     const createWebhookEvent: CreateWebhookEventFn = async (data) => {
         if (seen.has(data.event_id)) {
             throw new DuplicateEventError(data.event_id)
         }
         seen.add(data.event_id)
+        events.push(data)
     }
-    return { createWebhookEvent, seen }
+    return { createWebhookEvent, seen, events }
 }
+
+const createOrderDispatchLogStub = (): { createOrderDispatchLog: CreateOrderDispatchLogFn; logs: Parameters<CreateOrderDispatchLogFn>[0][] } => {
+    const logs: Parameters<CreateOrderDispatchLogFn>[0][] = []
+    const createOrderDispatchLog: CreateOrderDispatchLogFn = async (data) => {
+        logs.push(data)
+    }
+    return { createOrderDispatchLog, logs }
+}
+
+const makeTradableSymbol = (overrides: Partial<TradableSymbol> = {}): TradableSymbol => ({
+    id: 'bitflyer:BTC_JPY',
+    broker: 'bitflyer',
+    ticker: 'BTC_JPY',
+    display_name: 'BTC/JPY',
+    currency: 'JPY',
+    trade_control: {
+        status: 'active',
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    },
+    created_at: new Date('2026-01-01T00:00:00Z'),
+    updated_at: new Date('2026-01-01T00:00:00Z'),
+    ...overrides,
+})
 
 test('GET /api/health returns 200', async () => {
     const app = createAppForTests({
@@ -139,6 +202,113 @@ test('GET /api/balances returns balances when the shared key matches', async () 
     assert.equal(res.status, 200)
     assert.deepEqual(body.balances, sampleBalances)
     assert.equal(typeof body.updated_at, 'number')
+})
+
+test('GET /api/symbols returns tradable symbols', async () => {
+    const symbols = [makeTradableSymbol()]
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        listTradableSymbols: async () => symbols,
+    })
+
+    const res = await app.request('/api/symbols', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+        },
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.equal(body.symbols[0].id, 'bitflyer:BTC_JPY')
+})
+
+test('PUT /api/symbols/:symbol_id upserts symbol metadata', async () => {
+    const upserts: unknown[] = []
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        upsertTradableSymbol: async (input) => {
+            upserts.push(input)
+            return makeTradableSymbol({
+                id: input.id,
+                broker: input.broker,
+                ticker: input.ticker,
+                display_name: input.display_name,
+                currency: input.currency,
+                note: input.note,
+            })
+        },
+    })
+
+    const res = await app.request('/api/symbols/saxo%3AFX%3ANAS100', {
+        method: 'PUT',
+        headers: {
+            Authorization: 'Bearer test-secret',
+            'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+            display_name: 'NASDAQ 100',
+            currency: 'usd',
+            note: 'cfd',
+        }),
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.deepEqual(upserts[0], {
+        id: 'saxo:FX:NAS100',
+        broker: 'saxo',
+        ticker: 'FX:NAS100',
+        display_name: 'NASDAQ 100',
+        currency: 'USD',
+        note: 'cfd',
+    })
+    assert.equal(body.symbol.display_name, 'NASDAQ 100')
+})
+
+test('PATCH /api/symbols/:symbol_id/trade-control updates status and logs info', async () => {
+    const { logger, calls } = createLoggerStub()
+    const updates: unknown[] = []
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        logger,
+        updateTradeControl: async (symbolId, input) => {
+            updates.push({ symbolId, input })
+            return makeTradableSymbol({
+                id: symbolId,
+                trade_control: {
+                    status: input.status,
+                    reason: input.reason,
+                    updated_at: new Date('2026-01-01T00:00:00Z'),
+                    updated_by: input.updated_by,
+                },
+            })
+        },
+    })
+
+    const res = await app.request('/api/symbols/bitflyer%3ABTC_JPY/trade-control', {
+        method: 'PATCH',
+        headers: {
+            Authorization: 'Bearer test-secret',
+            'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+            status: 'paused',
+            reason: 'manual stop',
+        }),
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.deepEqual(updates[0], {
+        symbolId: 'bitflyer:BTC_JPY',
+        input: {
+            status: 'paused',
+            reason: 'manual stop',
+            updated_by: 'ui',
+        },
+    })
+    assert.equal(body.symbol.trade_control.status, 'paused')
+    assert.equal(calls.find((call) => call.event === 'symbol_trade_control:updated')?.status, 'paused')
 })
 
 test('GET /api/positions returns positions when the shared key matches', async () => {
@@ -216,6 +386,65 @@ test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => 
         requestId: receivedLog?.request_id,
     })
 })
+
+test('POST /api/webhooks/tradingview suppresses dispatch when symbol is paused', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent, events } = createWebhookEventStub()
+    const { createOrderDispatchLog, logs } = createOrderDispatchLogStub()
+    const { logger, calls: logCalls } = createLoggerStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+        createOrderDispatchLog,
+        getTradableSymbol: async () => makeTradableSymbol({
+            trade_control: {
+                status: 'paused',
+                reason: 'manual stop',
+                updated_at: new Date('2026-01-01T00:00:00Z'),
+            },
+        }),
+        logger,
+    })
+
+    const res = await postWebhook(app, makePayload('evt-symbol-paused-1'))
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(body, {
+        status: 'accepted',
+        event_id: 'evt-symbol-paused-1',
+        dispatch_status: 'suppressed',
+    })
+    assert.equal(dispatchCalls.length, 0)
+    assert.equal(events[0]?.status, 'suppressed')
+    assert.equal(events[0]?.rejection_reason, 'symbol_paused')
+    assert.equal(logs[0]?.result, 'suppressed')
+    assert.equal(logs[0]?.error_code, 'SYMBOL_PAUSED')
+    assert.equal(logCalls.find((call) => call.event === 'webhook:suppressed')?.reason, 'symbol_paused')
+})
+
+test('POST /api/webhooks/tradingview creates default tradable symbol after unknown active symbol', async () => {
+    const { dispatchOrder } = createDispatchStub()
+    const { createWebhookEvent, events } = createWebhookEventStub()
+    const ensuredSymbols: { broker: BrokerName; ticker: string }[] = []
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+        getTradableSymbol: async () => null,
+        ensureTradableSymbol: async (input) => { ensuredSymbols.push(input) },
+    })
+
+    const res = await postWebhook(app, makePayload('evt-symbol-ensure-1'))
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(ensuredSymbols, [{ broker: 'bitflyer', ticker: 'BTC_JPY' }])
+    assert.equal(events[0]?.status, 'accepted')
+})
+
 test('POST /api/webhooks/tradingview accepts payload without order_type', async () => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()

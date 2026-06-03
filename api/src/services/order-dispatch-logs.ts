@@ -11,7 +11,7 @@ export type OrderDispatchLogInput = {
     provider_order_id?: string
     request_payload: Record<string, unknown>
     response_payload?: Record<string, unknown>
-    result: 'success' | 'failure'
+    result: 'success' | 'failure' | 'suppressed'
     error_code?: string
 }
 

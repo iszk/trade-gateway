@@ -1,6 +1,7 @@
 import { createRoute } from 'honox/factory'
 import type { StatsV2, OrdersV2StatsResponse, OrdersV2Response, OrderV2 } from '@trade-gateway/api'
 import { fetchApiJson } from '../lib/api'
+import { fetchSymbolMap, getSymbolDisplayName } from '../lib/symbols'
 
 const fmt = (n: number | null | undefined, digits = 2): string => {
   if (n === null || n === undefined) return '—'
@@ -57,6 +58,7 @@ export default createRoute(async (c) => {
   let statsData: OrdersV2StatsResponse | null = null
   let ordersError = ''
   let ordersData: OrdersV2Response | null = null
+  const symbols = await fetchSymbolMap().catch(() => new Map())
 
   try {
     statsData = await fetchApiJson<OrdersV2StatsResponse>('/api/v2/orders/stats', { from: fromParam, to: toParam })
@@ -251,7 +253,7 @@ export default createRoute(async (c) => {
                         <td class="px-4 py-3 text-xs">{formatJstDateTime(getEffectiveTime(o))}</td>
                         <td class="px-4 py-3">{o.strategy}</td>
                         <td class="px-4 py-3 capitalize">{o.broker}</td>
-                        <td class="px-4 py-3">{o.ticker}</td>
+                        <td class="px-4 py-3">{getSymbolDisplayName(symbols, o.broker, o.ticker)}</td>
                         <td class="px-4 py-3">
                           <span class={`px-2 py-0.5 rounded text-xs font-bold ${o.side === 'BUY' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                             {o.side}

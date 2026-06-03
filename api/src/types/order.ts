@@ -28,6 +28,7 @@ export type OrderDispatchFailureCode =
     | 'BROKER_NOT_SUPPORTED'
     | 'BROKER_NOT_CONFIGURED'
     | 'BROKER_REQUEST_FAILED'
+    | 'SYMBOL_PAUSED'
 
 export type OrderDispatchFailure = {
     ok: false

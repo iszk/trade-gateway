@@ -137,6 +137,7 @@ alert(json.stringify(
 ### 成功
 - Status: `202 Accepted`
 - 備考: broker dispatch が失敗した場合も Webhook は受理済みとして `202` を返す（失敗詳細はログで追跡）
+- symbol が停止中の場合も `202 Accepted` を返し、broker dispatch は行わない
 - Body:
 
 ```json
@@ -163,10 +164,21 @@ alert(json.stringify(
 | `403` | `FORBIDDEN_SOURCE_IP` | `forbidden_source_ip` | 送信元 IP が allowlist に含まれない |
 | `409` | `DUPLICATED_EVENT` | `duplicated_event` | `event_id` が既処理 |
 
+### Symbol 停止中
+
+`tradable_symbols/{broker}:{ticker}` の `trade_control.status` が `paused` の場合、Webhook は受理するが発注しない。
+
+- `webhook_events.status`: `suppressed`
+- `webhook_events.rejection_reason`: `symbol_paused`
+- `order_dispatch_logs.result`: `suppressed`
+- `order_dispatch_logs.error_code`: `SYMBOL_PAUSED`
+- レスポンス: `202 Accepted`
+
 ## ログ仕様
 - 受信ログ: `event = "webhook:received"`
 - 受理ログ: `event = "webhook:accepted"`
 - 拒否ログ: `event = "webhook:rejected"`（入力拒否に加え、broker dispatch failure もここで記録）
+- 抑止ログ: `event = "webhook:suppressed"`（symbol 停止中など、受理したが発注しなかった場合）
 - 各ログは `request_id` を含む
 - 拒否ログは `reason`, `error`, `event_id`, `rawBody`, `payload` を可能な範囲で含む
 - `webhook_secret` はログ出力時に `[REDACTED]` へマスクする

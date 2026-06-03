@@ -10,10 +10,13 @@ import type { DispatchOrderFn, BrokerName } from './types/order.js'
 import type { BrokerBalance } from './types/balance.js'
 import type { OrderV2 } from './types/order-v2.js'
 import type { Position } from './types/position.js'
+import type { TradableSymbol } from './types/tradable-symbol.js'
 import { DuplicateEventError, createDefaultWebhookEventFn } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
+import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, createDefaultListTradableSymbolsFn, createDefaultUpdateTradeControlFn, createDefaultUpsertTradableSymbolFn, createSymbolId, parseSymbolId } from './services/tradable-symbols.js'
+import type { EnsureTradableSymbolFn, GetTradableSymbolFn, ListTradableSymbolsFn, UpdateTradeControlFn, UpsertTradableSymbolFn } from './services/tradable-symbols.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
 import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
 import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultListOrdersV2ByStrategyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
@@ -92,6 +95,11 @@ const parseIpAllowlist = (): Set<string> => {
 
 const sourceIpAllowlist = parseIpAllowlist()
 const webhookSecret = process.env.WEBHOOK_SECRET ?? 'change_me'
+
+const brokerNames = ['bitflyer', 'dummy', 'saxo'] as const
+const brokerNameSchema = z.enum(brokerNames)
+const isBrokerName = (value: string): value is BrokerName =>
+    brokerNames.includes(value as BrokerName)
 
 const extractSourceIp = (headers: Headers): string | null => {
     const xForwardedFor = headers.get('x-forwarded-for')
@@ -237,6 +245,11 @@ type CreateAppOptions = {
     getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
     listOrdersV2ByDateRange?: ListOrdersV2ByDateRangeFn
+    getTradableSymbol?: GetTradableSymbolFn
+    listTradableSymbols?: ListTradableSymbolsFn
+    upsertTradableSymbol?: UpsertTradableSymbolFn
+    updateTradeControl?: UpdateTradeControlFn
+    ensureTradableSymbol?: EnsureTradableSymbolFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -264,6 +277,11 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const listOrdersV2ByStrategy = options.listOrdersV2ByStrategy ?? createDefaultListOrdersV2ByStrategyFn()
     const getActiveIfdOrdersV2 = options.getActiveIfdOrdersV2 ?? createDefaultGetActiveIfdOrdersV2Fn()
     const listOrdersV2ByDateRange = options.listOrdersV2ByDateRange ?? createDefaultListOrdersV2ByDateRangeFn()
+    const getTradableSymbol = options.getTradableSymbol ?? createDefaultGetTradableSymbolFn()
+    const listTradableSymbols = options.listTradableSymbols ?? createDefaultListTradableSymbolsFn()
+    const upsertTradableSymbol = options.upsertTradableSymbol ?? createDefaultUpsertTradableSymbolFn()
+    const updateTradeControl = options.updateTradeControl ?? createDefaultUpdateTradeControlFn()
+    const ensureTradableSymbol = options.ensureTradableSymbol ?? createDefaultEnsureTradableSymbolFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -295,7 +313,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
     const logWebhook = (
         level: 'info' | 'warn',
-        event: 'webhook:received' | 'webhook:accepted' | 'webhook:rejected',
+        event: 'webhook:received' | 'webhook:accepted' | 'webhook:rejected' | 'webhook:suppressed',
         details: Record<string, unknown>,
         reqLogger?: Logger,
     ) => {
@@ -348,6 +366,40 @@ export const createApp = (options: CreateAppOptions = {}) => {
         ticker: string
         webhook_secret?: string
     }
+
+    const decodeSymbolIdParam = (value: string | undefined): string => {
+        if (!value) return ''
+        try {
+            return decodeURIComponent(value)
+        } catch {
+            return value
+        }
+    }
+
+    const parseValidSymbolId = (symbolId: string): { broker: BrokerName; ticker: string } | null => {
+        const parsed = parseSymbolId(symbolId)
+        if (!parsed || !isBrokerName(parsed.broker)) return null
+        return {
+            broker: parsed.broker,
+            ticker: parsed.ticker,
+        }
+    }
+
+    const tradableSymbolSchema = z.object({
+        display_name: z.string().trim().optional(),
+        currency: z.string().trim().min(1).transform((value) => value.toUpperCase()),
+        note: z.string().trim().optional(),
+        trade_control: z.object({
+            status: z.enum(['active', 'paused']).optional(),
+            reason: z.string().trim().optional(),
+            updated_by: z.string().trim().optional(),
+        }).optional(),
+    })
+
+    const tradeControlSchema = z.object({
+        status: z.enum(['active', 'paused']),
+        reason: z.string().trim().optional(),
+    })
 
     const createWebhookHandler = ({
         schema,
@@ -478,6 +530,16 @@ export const createApp = (options: CreateAppOptions = {}) => {
             return c.json(errorBody('INVALID_WEBHOOK_SECRET', 'webhook_secret is invalid'), 401)
         }
 
+        const symbolId = createSymbolId(payload.broker, payload.ticker)
+        const tradableSymbol = await getTradableSymbol(symbolId)
+        if (!tradableSymbol && isBrokerName(payload.broker)) {
+            ensureTradableSymbol({ broker: payload.broker, ticker: payload.ticker }).catch((err) => {
+                reqLogger.warn({ event: 'tradable_symbol:ensure_failed', error: err, symbol_id: symbolId }, 'failed to ensure tradable symbol')
+            })
+        }
+
+        const symbolPaused = tradableSymbol?.trade_control.status === 'paused'
+
         try {
             await createWebhookEvent({
                 event_id: effectiveEventId,
@@ -489,7 +551,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 size: payload.size,
                 occurred_at: new Date(payload.occurred_at),
                 received_at: new Date(),
-                status: 'accepted',
+                status: symbolPaused ? 'suppressed' : 'accepted',
+                rejection_reason: symbolPaused ? 'symbol_paused' : undefined,
             })
         } catch (error) {
             if (error instanceof DuplicateEventError) {
@@ -507,6 +570,46 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 return c.json(errorBody('DUPLICATED_EVENT', 'event_id is duplicated'), 409)
             }
             throw error
+        }
+
+        if (symbolPaused) {
+            logWebhook('info', 'webhook:suppressed', {
+                request_id: requestId,
+                reason: 'symbol_paused',
+                sourceIp,
+                event_id: effectiveEventId,
+                broker: payload.broker,
+                ticker: payload.ticker,
+                symbol_id: symbolId,
+                payload: redactSecrets(payload),
+            }, reqLogger)
+
+            const dispatchLogData = {
+                event_id: effectiveEventId,
+                broker: payload.broker,
+                ticker: payload.ticker,
+                side: payload.side,
+                size: payload.size,
+                request_payload: {
+                    eventId: effectiveEventId,
+                    broker: payload.broker,
+                    ticker: payload.ticker,
+                    side: payload.side,
+                    size: payload.size,
+                    requestId,
+                },
+                response_payload: {
+                    status: 'suppressed',
+                    reason: 'symbol_paused',
+                },
+                result: 'suppressed' as const,
+                error_code: 'SYMBOL_PAUSED',
+            }
+            createOrderDispatchLog(dispatchLogData).catch((err) => {
+                reqLogger.warn({ event: 'dispatch_log:failed', error: err, data: dispatchLogData }, 'failed to write order dispatch log')
+            })
+
+            return c.json({ status: 'accepted', event_id: effectiveEventId, dispatch_status: 'suppressed' }, 202)
         }
 
         const pctToString = (v: string | number): string =>
@@ -626,6 +729,116 @@ export const createApp = (options: CreateAppOptions = {}) => {
     app.get('/', (c) => c.json({ hello: 'world' }))
     app.get('/api/health', (c) => c.json({ status: 'ok' }))
     app.get('/favicon.ico', (c) => c.body(null, 204))
+
+    app.get('/api/symbols', requireApiSecret, async (c) => {
+        try {
+            const symbols = await listTradableSymbols()
+            return c.json({
+                symbols,
+                updated_at: Date.now(),
+            })
+        } catch (err) {
+            logger.warn({ event: 'symbols:fetch_failed', error: err }, 'failed to fetch symbols')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch symbols'), 500)
+        }
+    })
+
+    app.get('/api/symbols/:symbol_id', requireApiSecret, async (c) => {
+        const symbolId = decodeSymbolIdParam(c.req.param('symbol_id'))
+        if (!parseValidSymbolId(symbolId)) {
+            return c.json(errorBody('INVALID_REQUEST', 'symbol_id is invalid'), 400)
+        }
+
+        try {
+            const symbol = await getTradableSymbol(symbolId)
+            if (!symbol) {
+                return c.json(errorBody('NOT_FOUND', 'symbol is not found'), 404)
+            }
+            return c.json({ symbol })
+        } catch (err) {
+            logger.warn({ event: 'symbol:fetch_failed', error: err, symbol_id: symbolId }, 'failed to fetch symbol')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch symbol'), 500)
+        }
+    })
+
+    app.put('/api/symbols/:symbol_id', requireApiSecret, async (c) => {
+        const symbolId = decodeSymbolIdParam(c.req.param('symbol_id'))
+        const parsedSymbolId = parseValidSymbolId(symbolId)
+        if (!parsedSymbolId) {
+            return c.json(errorBody('INVALID_REQUEST', 'symbol_id is invalid'), 400)
+        }
+
+        let body: unknown
+        try {
+            body = await c.req.json()
+        } catch {
+            return c.json(errorBody('INVALID_REQUEST', 'invalid JSON body'), 400)
+        }
+
+        const parsedBody = tradableSymbolSchema.safeParse(body)
+        if (!parsedBody.success) {
+            const message = parsedBody.error.issues
+                .map((issue: z.ZodIssue) => `${issue.path.join('.') || 'body'}: ${issue.message}`)
+                .join('; ')
+            return c.json(errorBody('INVALID_REQUEST', message), 400)
+        }
+
+        try {
+            const symbol = await upsertTradableSymbol({
+                id: symbolId,
+                broker: parsedSymbolId.broker,
+                ticker: parsedSymbolId.ticker,
+                ...parsedBody.data,
+            })
+            return c.json({ symbol })
+        } catch (err) {
+            logger.warn({ event: 'symbol:upsert_failed', error: err, symbol_id: symbolId }, 'failed to upsert symbol')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to upsert symbol'), 500)
+        }
+    })
+
+    app.patch('/api/symbols/:symbol_id/trade-control', requireApiSecret, async (c) => {
+        const symbolId = decodeSymbolIdParam(c.req.param('symbol_id'))
+        if (!parseValidSymbolId(symbolId)) {
+            return c.json(errorBody('INVALID_REQUEST', 'symbol_id is invalid'), 400)
+        }
+
+        let body: unknown
+        try {
+            body = await c.req.json()
+        } catch {
+            return c.json(errorBody('INVALID_REQUEST', 'invalid JSON body'), 400)
+        }
+
+        const parsedBody = tradeControlSchema.safeParse(body)
+        if (!parsedBody.success) {
+            const message = parsedBody.error.issues
+                .map((issue: z.ZodIssue) => `${issue.path.join('.') || 'body'}: ${issue.message}`)
+                .join('; ')
+            return c.json(errorBody('INVALID_REQUEST', message), 400)
+        }
+
+        try {
+            const symbol = await updateTradeControl(symbolId, {
+                status: parsedBody.data.status,
+                reason: parsedBody.data.reason,
+                updated_by: 'ui',
+            })
+            logger.info({
+                event: 'symbol_trade_control:updated',
+                symbol_id: symbolId,
+                broker: symbol.broker,
+                ticker: symbol.ticker,
+                status: symbol.trade_control.status,
+                reason: symbol.trade_control.reason,
+                updated_by: symbol.trade_control.updated_by,
+            }, 'symbol trade control updated')
+            return c.json({ symbol })
+        } catch (err) {
+            logger.warn({ event: 'symbol_trade_control:update_failed', error: err, symbol_id: symbolId }, 'failed to update symbol trade control')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to update symbol trade control'), 500)
+        }
+    })
 
     app.get('/api/balances', requireApiSecret, async (c) => {
         try {
@@ -927,6 +1140,7 @@ export type { SaxoInstrument } from './brokers/saxo.js'
 export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, TradeRecordsResponse } from './services/trade-records-v2.js'
 export type { OrderV2 } from './types/order-v2.js'
 export type { StatsV2 } from './services/stats-v2.js'
+export type { TradableSymbol } from './types/tradable-symbol.js'
 
 export type OrdersV2StatsResponse = {
     stats: StatsV2[]
@@ -942,4 +1156,9 @@ export type OrdersV2Response = {
     total_pages: number
     from: string
     to: string
+}
+
+export type SymbolsResponse = {
+    symbols: TradableSymbol[]
+    updated_at: number
 }

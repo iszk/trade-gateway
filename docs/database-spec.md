@@ -51,7 +51,7 @@ OpenID 連携情報を保持する。
 - `occurred_at` (timestamp, required)
 - `received_at` (timestamp, required)
 - `status` (string, required)
-  - `accepted` | `rejected`
+  - `accepted` | `rejected` | `suppressed`
 - `rejection_reason` (string, optional)
 - `expire_at` (timestamp, required, TTL 用)
 
@@ -76,7 +76,7 @@ OpenID 連携情報を保持する。
 - `request_payload` (map, required)
 - `response_payload` (map, optional)
 - `result` (string, required)
-  - `success` | `failure`
+  - `success` | `failure` | `suppressed`
 - `error_code` (string, optional)
 - `created_at` (timestamp, required)
 - `expire_at` (timestamp, required, TTL 用)
@@ -161,3 +161,33 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 ## 廃止済みコレクション
 - `open_trades` と `trade_records` は v1 系 read model として廃止した
 - 既存データは移行せず、不要になった時点で手動削除する前提とする
+
+## 6. `tradable_symbols`
+
+broker + ticker のメタデータと、symbol 単位の売買停止状態を保持する。
+
+### ドキュメント ID
+- `broker:ticker`
+- 例: `bitflyer:BTC_JPY`, `saxo:FX:NAS100`
+- broker は最初の `:` より前、ticker は最初の `:` より後ろすべて
+- `/` は使用不可
+
+### フィールド
+- `id` (string, required)
+- `broker` (string, required)
+- `ticker` (string, required)
+- `display_name` (string, optional)
+- `currency` (string, required) — 例: `JPY`, `USD`
+- `note` (string, optional)
+- `trade_control` (map, required)
+  - `status` (string, required) — `active` | `paused`
+  - `reason` (string, optional)
+  - `updated_at` (timestamp, required)
+  - `updated_by` (string, optional)
+- `created_at` (timestamp, required)
+- `updated_at` (timestamp, required)
+
+### 制約
+- ドキュメントが存在しない symbol は `active` として扱う
+- Webhook で未知の symbol を受けた場合、売買処理とは独立して `currency = JPY` のデフォルトレコードを事後作成する
+- `currency` は UI 表示・整理用途であり、Webhook の売買判定では参照しない

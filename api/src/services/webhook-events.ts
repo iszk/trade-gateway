@@ -11,7 +11,7 @@ export type WebhookEventInput = {
     size: number
     occurred_at: Date
     received_at: Date
-    status: 'accepted' | 'rejected'
+    status: 'accepted' | 'rejected' | 'suppressed'
     rejection_reason?: string
 }
 

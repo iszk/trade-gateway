@@ -194,6 +194,64 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 }
 ```
 
+### 8. Symbol 一覧・更新
+- Method/Path: `GET /api/symbols`
+- 認証: 必要（Bearerトークン）
+- 役割: broker + ticker のメタデータと売買停止状態を一覧取得する
+
+#### 成功レスポンス
+- `200 OK`
+
+```json
+{
+  "symbols": [
+    {
+      "id": "bitflyer:BTC_JPY",
+      "broker": "bitflyer",
+      "ticker": "BTC_JPY",
+      "display_name": "BTC/JPY",
+      "currency": "JPY",
+      "trade_control": {
+        "status": "active",
+        "updated_at": "2026-06-03T00:00:00.000Z",
+        "updated_by": "ui"
+      },
+      "created_at": "2026-06-03T00:00:00.000Z",
+      "updated_at": "2026-06-03T00:00:00.000Z"
+    }
+  ],
+  "updated_at": 1780444800000
+}
+```
+
+### 9. Symbol 更新
+- Method/Path: `PUT /api/symbols/:symbol_id`
+- 認証: 必要（Bearerトークン）
+- 補足: `symbol_id` は `broker:ticker` を URL encode した値
+
+#### リクエスト
+
+```json
+{
+  "display_name": "BTC/JPY",
+  "currency": "JPY",
+  "note": "main symbol"
+}
+```
+
+### 10. Symbol 売買停止/再開
+- Method/Path: `PATCH /api/symbols/:symbol_id/trade-control`
+- 認証: 必要（Bearerトークン）
+
+#### リクエスト
+
+```json
+{
+  "status": "paused",
+  "reason": "manual stop"
+}
+```
+
 ## エラー形式
 
 すべてのエラーは以下を返す。
@@ -214,6 +272,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `DUPLICATED_EVENT`
 - `UPSTREAM_AUTH_ERROR`
 - `INTERNAL_ERROR`
+- `NOT_FOUND`
 
 ## ログ方針
 - Webhook 関連ログは 1 行 JSON で出力する

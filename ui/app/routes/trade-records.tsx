@@ -1,6 +1,7 @@
 import { createRoute } from 'honox/factory'
 import type { GroupStats, TradeStatsResponse, TradeRecordsResponse } from '@trade-gateway/api'
 import { fetchApiJson } from '../lib/api'
+import { fetchSymbolMap, getSymbolDisplayName } from '../lib/symbols'
 
 const fmt = (n: number | null | undefined, digits = 2): string => {
   if (n === null || n === undefined) return '—'
@@ -35,6 +36,7 @@ export default createRoute(async (c) => {
   let statsData: TradeStatsResponse | null = null
   let recordsError = ''
   let recordsData: TradeRecordsResponse | null = null
+  const symbols = await fetchSymbolMap().catch(() => new Map())
 
   try {
     statsData = await fetchApiJson<TradeStatsResponse>('/api/trade-records/stats', buildQuery())
@@ -223,7 +225,7 @@ export default createRoute(async (c) => {
                         <td class="px-4 py-3 text-xs">{new Date(r.opened_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
                         <td class="px-4 py-3 text-xs">{new Date(r.closed_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
                         <td class="px-4 py-3">{r.strategy}</td>
-                        <td class="px-4 py-3">{r.ticker}</td>
+                        <td class="px-4 py-3">{getSymbolDisplayName(symbols, r.broker, r.ticker)}</td>
                         <td class="px-4 py-3 capitalize">{r.broker}</td>
                         <td class="px-4 py-3">
                           <span class={`px-2 py-0.5 rounded text-xs font-bold ${r.entry_side === 'BUY' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
