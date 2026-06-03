@@ -173,6 +173,10 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
     closingExecutionFetchers: Partial<Record<string, ClosingExecutionFetcherLike>>
 }): Promise<void> => {
     const activeIfdos = await ctx.getActiveIfdOrdersV2()
+    ctx.logger.info({
+        event: 'cron:ifd_exit_sync_start',
+        ids: activeIfdos.map((o) => o.id),
+    }, 'syncing exits for executed IFD/IFDOCO orders, count: ' + activeIfdos.length)
 
     for (const order of activeIfdos) {
         const exitId = `${order.id}-exit`
