@@ -38,7 +38,6 @@ export class PositionFetcher {
 
     async fetchAllPositions(broker?: BrokerName): Promise<Position[]> {
         const brokersToFetch: BrokerName[] = broker ? [broker] : ['bitflyer', 'saxo', 'dummy']
-        const allPositions: Position[] = []
 
         const fetchPromises = brokersToFetch.map(async (b) => {
             try {

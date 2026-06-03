@@ -19,8 +19,8 @@ import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, 
 import type { EnsureTradableSymbolFn, GetTradableSymbolFn, ListTradableSymbolsFn, UpdateTradeControlFn, UpsertTradableSymbolFn } from './services/tradable-symbols.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
 import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
-import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultListOrdersV2ByStrategyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
-import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, ListOrdersV2ByStrategyFn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn, ListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
+import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
+import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn, ListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
 import { computeStatsV2 } from './services/stats-v2.js'
 import type { StatsV2 } from './services/stats-v2.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
@@ -93,11 +93,7 @@ const parseIpAllowlist = (): Set<string> => {
     )
 }
 
-const sourceIpAllowlist = parseIpAllowlist()
-const webhookSecret = process.env.WEBHOOK_SECRET ?? 'change_me'
-
 const brokerNames = ['bitflyer', 'dummy', 'saxo'] as const
-const brokerNameSchema = z.enum(brokerNames)
 const isBrokerName = (value: string): value is BrokerName =>
     brokerNames.includes(value as BrokerName)
 
@@ -146,9 +142,6 @@ const createApiSecretAuthMiddleware = (secret: string) => {
 }
 
 const WEBHOOK_SECRET_REDACTION = '[REDACTED]'
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-    typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const redactSecrets = (value: unknown): unknown => {
     if (Array.isArray(value)) {
@@ -240,8 +233,6 @@ type CreateAppOptions = {
     // Phase 3 新フロー
     getPendingOrdersV2?: GetPendingOrdersV2Fn
     updateOrderV2?: UpdateOrderV2Fn
-    // Phase 4 新フロー
-    listOrdersV2ByStrategy?: ListOrdersV2ByStrategyFn
     getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
     listOrdersV2ByDateRange?: ListOrdersV2ByDateRangeFn
@@ -274,7 +265,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const getPendingOrdersV2 = options.getPendingOrdersV2 ?? createDefaultGetPendingOrdersV2Fn()
     const updateOrderV2 = options.updateOrderV2 ?? createDefaultUpdateOrderV2Fn()
     const getOrderV2 = options.getOrderV2 ?? createDefaultGetOrderV2Fn()
-    const listOrdersV2ByStrategy = options.listOrdersV2ByStrategy ?? createDefaultListOrdersV2ByStrategyFn()
     const getActiveIfdOrdersV2 = options.getActiveIfdOrdersV2 ?? createDefaultGetActiveIfdOrdersV2Fn()
     const listOrdersV2ByDateRange = options.listOrdersV2ByDateRange ?? createDefaultListOrdersV2ByDateRangeFn()
     const getTradableSymbol = options.getTradableSymbol ?? createDefaultGetTradableSymbolFn()
@@ -975,21 +965,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
         } catch (err) {
             logger.warn({ event: 'trade_records:stats_failed', error: err }, 'failed to fetch trade stats')
             return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch trade stats'), 500)
-        }
-    })
-
-    app.get('/api/v2/stats', requireApiSecret, async (c) => {
-        const strategy = c.req.query('strategy')
-        if (!strategy) {
-            return c.json(errorBody('INVALID_REQUEST', 'strategy is required'), 400)
-        }
-        try {
-            const orders = await listOrdersV2ByStrategy(strategy)
-            const stats = computeStatsV2(orders, strategy)
-            return c.json(stats)
-        } catch (err) {
-            logger.warn({ event: 'v2_stats:fetch_failed', error: err, strategy }, 'failed to compute v2 stats')
-            return c.json(errorBody('INTERNAL_ERROR', 'failed to compute v2 stats'), 500)
         }
     })
 

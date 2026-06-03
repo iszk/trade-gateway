@@ -1,4 +1,4 @@
-import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, ListOrdersV2ByStrategyFn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
+import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
 
