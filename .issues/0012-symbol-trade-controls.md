@@ -1,6 +1,6 @@
 ---
 title: symbol trade controls
-status: wip
+status: done
 ---
 
 # 概要

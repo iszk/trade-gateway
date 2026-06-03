@@ -1,6 +1,6 @@
 ---
 title: bitFlyer IFDOCO の SL 決済時に親注文を正しく解決する
-status: wip
+status: done
 ---
 
 # 概要

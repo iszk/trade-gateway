@@ -1,6 +1,6 @@
 ---
 title: bitflyer の getchildorders では open / close を安定判定できない
-status: todo
+status: done
 ---
 
 # 概要
@@ -147,3 +147,7 @@ type BitflyerParentOrderMetadataV1 = {
 ## 2026-05-27 23:59:00 GitHub Copilot GPT-5.4
 
 起票した: bitflyer の `getchildorders` は、未約定時と約定済み時で `child_order_type` の見え方が変わることがあり、現在の `child_order_type !== 'MARKET'` ベースの決済判定が成立しないことが確認されたため。レスポンス順も安定しておらず、`getchildorders` 単体では open / close を識別できない可能性があるため、判定戦略を再設計する必要がある。
+
+## 2026-06-03 23:59:00
+
+0013 で行うため done とする
