@@ -75,7 +75,7 @@ test('createWebhookEventFn omits undefined fields before saving to Firestore', a
     assert.equal('rejection_reason' in doc, false)
 })
 
-test('createWebhookEventFn logs attempted Firestore data on create failure', async () => {
+test('createWebhookEventFn uses firestore write failure log on create failure', async () => {
     const firestoreError = new Error('Firestore unavailable')
     const db = {
         collection: () => ({
@@ -98,7 +98,8 @@ test('createWebhookEventFn logs attempted Firestore data on create failure', asy
     )
 
     assert.equal(errors.length, 1)
-    assert.equal(errors[0]?.event, 'webhook_event:create_failed')
+    assert.equal(errors[0]?.event, 'firestore:write_failed')
+    assert.equal(errors[0]?.operation, 'create')
     assert.equal(errors[0]?.collection, 'webhook_events')
     assert.equal(errors[0]?.doc_id, 'bitflyer:BTC_JPY:evt-firestore-failed')
     assert.equal(errors[0]?.error, firestoreError)

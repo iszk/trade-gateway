@@ -1,6 +1,5 @@
 import type { Firestore } from 'firebase-admin/firestore'
-import { getFirestoreClient } from '../firestore.js'
-import { omitUndefinedFields } from '../omit-undefined-fields.js'
+import { getFirestoreClient, setFirestoreDocument, updateFirestoreDocument } from '../firestore.js'
 import type { OrderV2 } from '../types/order-v2.js'
 
 const COLLECTION_NAME = 'orders_v2'
@@ -20,18 +19,26 @@ const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => ({
 export const createAddOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
     return async (order: OrderV2): Promise<void> => {
         const docRef = db.collection(COLLECTION_NAME).doc(order.id)
-        await docRef.set(omitUndefinedFields(order))
+        await setFirestoreDocument(docRef, order as unknown as Record<string, unknown>, {
+            collection: COLLECTION_NAME,
+            docId: order.id,
+        })
     }
 }
 
 export const createUpdateOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
     return async (id: string, updates: Partial<OrderV2>): Promise<void> => {
         const docRef = db.collection(COLLECTION_NAME).doc(id)
-        await docRef.update(
-            omitUndefinedFields({
+        await updateFirestoreDocument(
+            docRef,
+            {
                 ...updates,
                 updated_at: new Date(),
-            }),
+            } as unknown as Record<string, unknown>,
+            {
+                collection: COLLECTION_NAME,
+                docId: id,
+            },
         )
     }
 }

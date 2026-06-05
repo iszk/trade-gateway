@@ -1,7 +1,6 @@
 import type { Firestore } from 'firebase-admin/firestore'
-import { getFirestoreClient } from '../firestore.js'
+import { createFirestoreDocument, getFirestoreClient } from '../firestore.js'
 import { defaultLogger, type Logger } from '../logger.js'
-import { omitUndefinedFields } from '../omit-undefined-fields.js'
 
 export type WebhookEventInput = {
     event_id: string
@@ -43,24 +42,22 @@ export const createWebhookEventFn = (db: Firestore, options: CreateWebhookEventO
         const docId = `${data.broker}:${data.symbol}:${data.event_id}`
         const docRef = db.collection('webhook_events').doc(docId)
         const expireAt = new Date(data.received_at.getTime() + 90 * 24 * 60 * 60 * 1000)
-        const firestoreData = omitUndefinedFields({
+        const firestoreData = {
             ...data,
             expire_at: expireAt,
-        })
+        }
 
         try {
-            await docRef.create(firestoreData)
+            await createFirestoreDocument(docRef, firestoreData, {
+                collection: 'webhook_events',
+                docId,
+                logger,
+                isExpectedError: isAlreadyExistsError,
+            })
         } catch (error) {
             if (isAlreadyExistsError(error)) {
                 throw new DuplicateEventError(data.event_id)
             }
-            logger.error({
-                event: 'webhook_event:create_failed',
-                collection: 'webhook_events',
-                doc_id: docId,
-                data: firestoreData,
-                error,
-            }, 'failed to write webhook event to firestore')
             throw error
         }
     }
