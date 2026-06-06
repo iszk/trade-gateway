@@ -1,6 +1,5 @@
 import type { Firestore } from 'firebase-admin/firestore'
-import { getFirestoreClient } from '../firestore.js'
-import { omitUndefinedFields } from '../omit-undefined-fields.js'
+import { createFirestoreDocument, getFirestoreClient, setFirestoreDocument } from '../firestore.js'
 import type { BrokerName } from '../types/order.js'
 import type { TradableSymbol, TradeControlStatus } from '../types/tradable-symbol.js'
 
@@ -76,7 +75,7 @@ export const createEnsureTradableSymbolFn = (db: Firestore = getFirestoreClient(
         const docRef = db.collection(COLLECTION_NAME).doc(id)
 
         try {
-            await docRef.create({
+            await createFirestoreDocument(docRef, {
                 id,
                 broker,
                 ticker,
@@ -88,6 +87,10 @@ export const createEnsureTradableSymbolFn = (db: Firestore = getFirestoreClient(
                 },
                 created_at: now,
                 updated_at: now,
+            }, {
+                collection: COLLECTION_NAME,
+                docId: id,
+                isExpectedError: isAlreadyExistsError,
             })
         } catch (error) {
             if (isAlreadyExistsError(error)) return
@@ -137,7 +140,10 @@ export const createUpsertTradableSymbolFn = (db: Firestore = getFirestoreClient(
             updated_at: now,
         }
 
-        await docRef.set(omitUndefinedFields(data))
+        await setFirestoreDocument(docRef, data as unknown as Record<string, unknown>, {
+            collection: COLLECTION_NAME,
+            docId: input.id,
+        })
         return data
     }
 }
@@ -170,7 +176,10 @@ export const createUpdateTradeControlFn = (db: Firestore = getFirestoreClient())
             updated_at: now,
         }
 
-        await docRef.set(omitUndefinedFields(data))
+        await setFirestoreDocument(docRef, data as unknown as Record<string, unknown>, {
+            collection: COLLECTION_NAME,
+            docId: symbolId,
+        })
         return data
     }
 }

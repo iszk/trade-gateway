@@ -1,5 +1,5 @@
 import type { Firestore } from 'firebase-admin/firestore'
-import { getFirestoreClient } from '../firestore.js'
+import { getFirestoreClient, setFirestoreDocument, updateFirestoreDocument } from '../firestore.js'
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { Position } from '../types/position.js'
 import { defaultLogger, type Logger } from '../logger.js'
@@ -179,7 +179,15 @@ export class SaxoClient {
 
     async saveAuth(data: SaxoAuthData): Promise<void> {
         const db = this.getFirestore()
-        await db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC).set(data)
+        await setFirestoreDocument(
+            db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC),
+            data as unknown as Record<string, unknown>,
+            {
+                collection: FIRESTORE_COLLECTION,
+                docId: FIRESTORE_DOC,
+                logger: this.logger,
+            },
+        )
     }
 
     async refreshAccessToken(refreshToken: string): Promise<SaxoAuthData> {
@@ -349,7 +357,11 @@ export class SaxoClient {
         } catch (error) {
             this.logger.warn({ event: 'saxo:token_refresh_failed', error }, 'Failed to auto-refresh Saxo token')
             // Release lock on failure
-            await authRef.update({ refreshingUntil: Date.now() - 1000 })
+            await updateFirestoreDocument(authRef, { refreshingUntil: Date.now() - 1000 }, {
+                collection: FIRESTORE_COLLECTION,
+                docId: FIRESTORE_DOC,
+                logger: this.logger,
+            })
             return null
         }
     }

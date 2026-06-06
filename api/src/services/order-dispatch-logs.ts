@@ -1,6 +1,5 @@
 import type { Firestore } from 'firebase-admin/firestore'
-import { getFirestoreClient } from '../firestore.js'
-import { omitUndefinedFields } from '../omit-undefined-fields.js'
+import { addFirestoreDocument, getFirestoreClient } from '../firestore.js'
 
 export type OrderDispatchLogInput = {
     event_id: string
@@ -22,10 +21,12 @@ export const createOrderDispatchLogFn = (db: Firestore): CreateOrderDispatchLogF
         const createdAt = new Date()
         const expireAt = new Date(createdAt.getTime() + 180 * 24 * 60 * 60 * 1000)
 
-        await db.collection('order_dispatch_logs').add({
-            ...omitUndefinedFields(data),
+        await addFirestoreDocument(db.collection('order_dispatch_logs'), {
+            ...data,
             created_at: createdAt,
             expire_at: expireAt,
+        }, {
+            collection: 'order_dispatch_logs',
         })
     }
 }

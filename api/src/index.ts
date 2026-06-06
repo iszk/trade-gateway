@@ -595,9 +595,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 result: 'suppressed' as const,
                 error_code: 'SYMBOL_PAUSED',
             }
-            createOrderDispatchLog(dispatchLogData).catch((err) => {
-                reqLogger.warn({ event: 'dispatch_log:failed', error: err, data: dispatchLogData }, 'failed to write order dispatch log')
-            })
+            createOrderDispatchLog(dispatchLogData).catch(() => {})
 
             return c.json({ status: 'accepted', event_id: effectiveEventId, dispatch_status: 'suppressed' }, 202)
         }
@@ -661,9 +659,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             result: (orderResult.ok ? 'success' : 'failure') as 'success' | 'failure',
             error_code: orderResult.ok ? undefined : orderResult.code,
         }
-        createOrderDispatchLog(dispatchLogData).catch((err) => {
-            reqLogger.warn({ event: 'dispatch_log:failed', error: err, data: dispatchLogData }, 'failed to write order dispatch log')
-        })
+        createOrderDispatchLog(dispatchLogData).catch(() => {})
 
         // 新規注文は orders_v2 のみへ記録する
         const strategy = payload.strategy ?? 'unknown'
@@ -688,9 +684,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 broker_order_metadata: orderResult.brokerOrderMetadata,
                 created_at: new Date(),
                 updated_at: new Date(),
-            }).catch((err) => {
-                reqLogger.error({ event: 'order_v2:create_failed', error: err, eventId: effectiveEventId }, 'failed to write to orders_v2')
-            })
+            }).catch(() => {})
         }
 
         const { webhook_secret: _secret, ...safePayload } = payload

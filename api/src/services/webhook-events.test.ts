@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { createWebhookEventFn, DuplicateEventError } from './webhook-events.js'
 import type { WebhookEventInput } from './webhook-events.js'
+import type { Logger } from '../logger.js'
 
 const makeInput = (eventId: string): WebhookEventInput => ({
     event_id: eventId,
@@ -41,6 +42,17 @@ const makeFirestoreMock = () => {
     return db as unknown as Parameters<typeof createWebhookEventFn>[0] & { docs: Record<string, unknown> }
 }
 
+const makeLoggerStub = () => {
+    const errors: Record<string, unknown>[] = []
+    const logger: Logger = {
+        info: () => { },
+        warn: () => { },
+        error: (obj) => { errors.push(obj) },
+        child: () => logger,
+    }
+    return { logger, errors }
+}
+
 test('createWebhookEventFn saves document to Firestore', async () => {
     const db = makeFirestoreMock()
     const createWebhookEvent = createWebhookEventFn(db)
@@ -48,6 +60,53 @@ test('createWebhookEventFn saves document to Firestore', async () => {
     await createWebhookEvent(makeInput('evt-001'))
 
     assert.ok('bitflyer:BTC_JPY:evt-001' in db.docs)
+})
+
+test('createWebhookEventFn omits undefined fields before saving to Firestore', async () => {
+    const db = makeFirestoreMock()
+    const createWebhookEvent = createWebhookEventFn(db)
+
+    await createWebhookEvent({
+        ...makeInput('evt-undefined'),
+        rejection_reason: undefined,
+    })
+
+    const doc = db.docs['bitflyer:BTC_JPY:evt-undefined'] as Record<string, unknown>
+    assert.equal('rejection_reason' in doc, false)
+})
+
+test('createWebhookEventFn uses firestore write failure log on create failure', async () => {
+    const firestoreError = new Error('Firestore unavailable')
+    const db = {
+        collection: () => ({
+            doc: () => ({
+                create: async () => {
+                    throw firestoreError
+                },
+            }),
+        }),
+    } as unknown as Parameters<typeof createWebhookEventFn>[0]
+    const { logger, errors } = makeLoggerStub()
+    const createWebhookEvent = createWebhookEventFn(db, { logger })
+
+    await assert.rejects(
+        () => createWebhookEvent({
+            ...makeInput('evt-firestore-failed'),
+            rejection_reason: undefined,
+        }),
+        firestoreError,
+    )
+
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0]?.event, 'firestore:write_failed')
+    assert.equal(errors[0]?.operation, 'create')
+    assert.equal(errors[0]?.collection, 'webhook_events')
+    assert.equal(errors[0]?.doc_id, 'bitflyer:BTC_JPY:evt-firestore-failed')
+    assert.equal(errors[0]?.error, firestoreError)
+
+    const data = errors[0]?.data as Record<string, unknown>
+    assert.equal(data.event_id, 'evt-firestore-failed')
+    assert.equal('rejection_reason' in data, false)
 })
 
 test('createWebhookEventFn sets expire_at to received_at + 90 days', async () => {

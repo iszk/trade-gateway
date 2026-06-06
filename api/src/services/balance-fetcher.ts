@@ -1,5 +1,5 @@
 import type { Firestore } from 'firebase-admin/firestore'
-import { getFirestoreClient } from '../firestore.js'
+import { getFirestoreClient, setFirestoreDocument } from '../firestore.js'
 import { BitflyerClient } from '../brokers/bitflyer.js'
 import { config } from '../config.js'
 import type { BrokerBalance, Balance } from '../types/balance.js'
@@ -54,9 +54,12 @@ export class BalanceFetcher {
         const docId = `${date}_bitflyer`
         const docRef = this.db.collection('daily_balances').doc(docId)
 
-        await docRef.set({
+        await setFirestoreDocument(docRef, {
             ...brokerBalance,
             date
+        }, {
+            collection: 'daily_balances',
+            docId,
         })
 
         return brokerBalance
