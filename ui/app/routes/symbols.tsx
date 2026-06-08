@@ -1,39 +1,7 @@
 import { createRoute } from 'honox/factory'
 import type { SymbolsResponse, TradableSymbol } from '@trade-gateway/api'
-import { fetchApiJson, sendApiJson } from '../lib/api'
-
-const textValue = (value: unknown): string =>
-  typeof value === 'string' ? value.trim() : ''
-
-export const POST = createRoute(async (c) => {
-  const body = await c.req.parseBody()
-  const action = textValue(body.action)
-  const symbolId = textValue(body.symbol_id)
-
-  if (!symbolId) {
-    return c.redirect('/symbols?error=missing_symbol_id')
-  }
-
-  try {
-    if (action === 'save') {
-      await sendApiJson(`/api/symbols/${encodeURIComponent(symbolId)}`, 'PUT', {
-        display_name: textValue(body.display_name) || undefined,
-        currency: textValue(body.currency) || 'JPY',
-        note: textValue(body.note) || undefined,
-      })
-    } else if (action === 'pause' || action === 'resume') {
-      await sendApiJson(`/api/symbols/${encodeURIComponent(symbolId)}/trade-control`, 'PATCH', {
-        status: action === 'pause' ? 'paused' : 'active',
-        reason: textValue(body.reason) || undefined,
-      })
-    }
-  } catch (error) {
-    const message = encodeURIComponent(error instanceof Error ? error.message : 'Unknown error')
-    return c.redirect(`/symbols?error=${message}`)
-  }
-
-  return c.redirect('/symbols')
-})
+import { fetchApiJson } from '../lib/api'
+import { buildSymbolDetailPath } from '../lib/symbols'
 
 const formatJstDateTime = (value: string | Date): string =>
   new Intl.DateTimeFormat('ja-JP', {
@@ -75,33 +43,6 @@ export default createRoute(async (c) => {
         </div>
       )}
 
-      <form method="post" action="/symbols" class="bg-white shadow rounded-lg p-4 mb-6">
-        <input type="hidden" name="action" value="save" />
-        <div class="grid grid-cols-1 gap-3 md:grid-cols-5">
-          <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Symbol ID</label>
-            <input name="symbol_id" placeholder="bitflyer:BTC_JPY" class="border border-gray-300 rounded px-3 py-1.5 w-full text-sm" />
-          </div>
-          <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Display Name</label>
-            <input name="display_name" class="border border-gray-300 rounded px-3 py-1.5 w-full text-sm" />
-          </div>
-          <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Currency</label>
-            <input name="currency" value="JPY" class="border border-gray-300 rounded px-3 py-1.5 w-full text-sm" />
-          </div>
-          <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Note</label>
-            <input name="note" class="border border-gray-300 rounded px-3 py-1.5 w-full text-sm" />
-          </div>
-          <div class="flex items-end">
-            <button type="submit" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-1.5 px-4 rounded shadow text-sm w-full">
-              Save
-            </button>
-          </div>
-        </div>
-      </form>
-
       {data && (
         <div class="bg-white shadow rounded-lg overflow-x-auto">
           {data.symbols.length === 0 ? (
@@ -118,7 +59,7 @@ export default createRoute(async (c) => {
                   <th class="px-4 py-3">Status</th>
                   <th class="px-4 py-3">Reason</th>
                   <th class="px-4 py-3">Updated</th>
-                  <th class="px-4 py-3">Action</th>
+                  <th class="px-4 py-3">Detail</th>
                 </tr>
               </thead>
               <tbody>
@@ -137,24 +78,9 @@ export default createRoute(async (c) => {
                     <td class="px-4 py-3">{symbol.trade_control.reason || '—'}</td>
                     <td class="px-4 py-3 text-xs">{formatJstDateTime(symbol.updated_at)}</td>
                     <td class="px-4 py-3">
-                      <form method="post" action="/symbols" class="flex gap-2">
-                        <input type="hidden" name="symbol_id" value={symbol.id} />
-                        <input
-                          name="reason"
-                          value={symbol.trade_control.reason || ''}
-                          placeholder="reason"
-                          class="border border-gray-300 rounded px-2 py-1 text-xs"
-                        />
-                        {symbol.trade_control.status === 'paused' ? (
-                          <button type="submit" name="action" value="resume" class="bg-green-600 hover:bg-green-700 text-white font-semibold py-1 px-3 rounded text-xs">
-                            Resume
-                          </button>
-                        ) : (
-                          <button type="submit" name="action" value="pause" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-1 px-3 rounded text-xs">
-                            Pause
-                          </button>
-                        )}
-                      </form>
+                      <a href={buildSymbolDetailPath(symbol.id)} class="text-blue-600 hover:underline">
+                        Open
+                      </a>
                     </td>
                   </tr>
                 ))}
