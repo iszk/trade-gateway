@@ -353,3 +353,42 @@ test('executeTenMinutelyTask: IFDOCO の close metadata 解決結果を親 order
     assert.equal(addedOrders.length, 1)
     assert.deepEqual(addedOrders[0].executed_at, new Date('2026-01-01T00:30:00Z'))
 })
+
+test('executeTenMinutelyTask: Saxo の closingExecutionFetcher で exit レコードを作成する', async () => {
+    const order: any = {
+        id: 'v2-saxo-ifd',
+        strategy: 'saxo-strategy',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        status: 'EXECUTED',
+        exit_sync_status: 'MONITORING',
+        provider_order_ids: ['ORD-saxo-entry'],
+        requested_size: 1,
+        executed_size: 1,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        executed_at: new Date('2026-01-01T00:01:00Z'),
+    }
+
+    const addedOrders: any[] = []
+    const updatedOrders: any[] = []
+
+    const ctx = makeBaseCtx({
+        getActiveIfdOrdersV2: async () => [order],
+        getOrderV2: async () => null,
+        addOrderV2: async (o) => { addedOrders.push(o) },
+        updateOrderV2: async (id, u) => { updatedOrders.push({ id, ...u }) },
+        closingExecutionFetchers: {
+            saxo: { getClosingExecution: async () => ({ price: 105, size: 1 }) },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(addedOrders.length, 1)
+    assert.equal(addedOrders[0].id, 'v2-saxo-ifd-exit')
+    assert.equal(addedOrders[0].broker, 'saxo')
+    assert.equal(addedOrders[0].executed_price, 105)
+    assert.deepEqual(updatedOrders[0], { id: 'v2-saxo-ifd', exit_sync_status: 'COMPLETED' })
+})

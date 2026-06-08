@@ -29,4 +29,37 @@ export type BitflyerParentOrderMetadata = {
     }>
 }
 
-export type BrokerOrderMetadata = BitflyerParentOrderMetadata
+export type SaxoRelatedOrderRole = 'TAKE_PROFIT' | 'STOP_LOSS'
+
+export type SaxoExpectedRelatedOrder = {
+    role: SaxoRelatedOrderRole
+    side: OrderSide
+    order_type: 'Limit' | 'StopIfTraded'
+    size: number
+    price: number
+}
+
+export type SaxoResolvedRelatedOrder = {
+    order_id: string | null
+}
+
+export type SaxoOrderMetadata = {
+    kind: 'saxo_order_v1'
+    order_id: string
+    entry: {
+        expected: {
+            side: OrderSide
+            order_type: 'Market'
+            size: number
+        }
+        resolved: {
+            order_id: string
+        }
+    }
+    exits: Array<{
+        expected: SaxoExpectedRelatedOrder
+        resolved: SaxoResolvedRelatedOrder
+    }>
+}
+
+export type BrokerOrderMetadata = BitflyerParentOrderMetadata | SaxoOrderMetadata

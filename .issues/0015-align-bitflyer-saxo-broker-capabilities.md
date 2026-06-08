@@ -1,6 +1,6 @@
 ---
 title: bitFlyer と Saxo のブローカー実装世代差を解消する
-status: todo
+status: wip
 ---
 
 # 概要
@@ -28,11 +28,11 @@ bitFlyer と Saxo のブローカー実装を棚卸しし、`orders_v2` 前提�
 # 実装/修正プラン
 
 - [ ] `ExecutionPriceFetcherLike` / `ClosingExecutionFetcherLike` を `orders_v2` 前提に寄せ、旧形メソッドを残す場合も互換用途に限定する
-- [ ] Saxo 用の `BrokerOrderMetadata` 型を追加し、entry / related orders / exit の紐付けに必要な ID と期待条件を保存できるようにする
-- [ ] Saxo の `sendMarketOrder` で stop loss / take profit 付き注文を出した場合、関連注文を後続同期できる metadata を `OrderDispatchResult` に含める
-- [ ] Saxo に `getExecutionPriceForOrderV2(order)` を追加し、entry 約定の価格・数量・約定時刻を `OrderV2` context と metadata から解決する
-- [ ] Saxo に `getClosingExecutionForOrderV2(order)` を追加し、利確・損切のどちらが約定したか、部分約定があるか、残注文がどう扱われるかを反映する
-- [ ] Saxo の exit 同期が安全に動く状態になったら `api/src/index.ts` の `closingExecutionFetchers` に Saxo を登録する
+- [x] Saxo 用の `BrokerOrderMetadata` 型を追加し、entry / related orders / exit の紐付けに必要な ID と期待条件を保存できるようにする
+- [x] Saxo の `sendMarketOrder` で stop loss / take profit 付き注文を出した場合、関連注文を後続同期できる metadata を `OrderDispatchResult` に含める
+- [x] Saxo に `getExecutionPriceForOrderV2(order)` を追加し、entry 約定の価格・数量・約定時刻を `OrderV2` context と metadata から解決する
+- [x] Saxo に `getClosingExecutionForOrderV2(order)` を追加し、利確・損切のどちらが約定したか、部分約定があるか、残注文がどう扱われるかを反映する
+- [x] Saxo の exit 同期が安全に動く状態になったら `api/src/index.ts` の `closingExecutionFetchers` に Saxo を登録する
 - [ ] Saxo の残高・証拠金取得要否を確認し、必要なら `BalanceFetcher` を broker 別実装へ分割して Saxo を追加する
 - [ ] bitFlyer 固有の `getPositions()` が `FX_BTC_JPY` 固定になっている点も、broker parity の一部として symbol 設定ベースに直すか別 issue に切り出す
 - [ ] 既存 issue 0008 と重複する作業は、0008 側を Saxo IFDOCO 詳細設計、本 issue を共通 interface / production 登録 / 横断差分の親 issue として扱う
@@ -43,3 +43,7 @@ bitFlyer と Saxo のブローカー実装を棚卸しし、`orders_v2` 前提�
 ## 2026-06-08 00:43 Codex GPT-5
 
 起票した。bitFlyer と Saxo の実装を比較したところ、`getExecutionPriceForOrderV2` / `getClosingExecutionForOrderV2` / broker metadata / cron の fetcher 登録 / 残高取得で世代差または片側実装が確認できた。特に Saxo は related orders を送信できるにもかかわらず、その後の exit 同期に必要な metadata と closing execution fetcher がなく、`orders_v2` の IFDOCO exit 追跡が production path で動かない。既存 issue 0008 は Saxo IFDOCO 個別設計として残し、本 issue では broker capability parity と共通 interface 整理を親スコープとして追う。
+
+## 2026-06-09 00:39 Codex GPT-5
+
+実装に着手し、Saxo 用 `broker_order_metadata` (`saxo_order_v1`) を追加する方針にした。まずは production path の差が大きい `orders_v2` entry/exit 同期と cron 登録を優先する。Saxo の発注レスポンスで related order id が取得できないケースは `resolved.order_id = null` として保持し、exit 同期では安全に no-op する。残高取得と bitFlyer の `getPositions()` 銘柄固定は、この変更と API 仕様確認の粒度が異なるため今回の実装範囲には含めない。

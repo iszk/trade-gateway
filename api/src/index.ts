@@ -293,7 +293,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         logger,
         positionFetcher,
         executionPriceFetchers: options.executionPriceFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
-        closingExecutionFetchers: options.closingExecutionFetchers ?? { bitflyer: bitflyerClient },
+        closingExecutionFetchers: options.closingExecutionFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
         getPendingOrdersV2,
         updateOrderV2,
         addOrderV2,

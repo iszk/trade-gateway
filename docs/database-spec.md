@@ -120,6 +120,8 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 - `exit_sync_status` (string, optional) — `MONITORING` | `COMPLETED`
 - `provider_order_ids` (string[], required)
 - `broker_order_metadata` (map, optional)
+  - `bitflyer_parent_order_v1`: parent acceptance id、entry 子注文、TP/SL 子注文の expected/resolved acceptance id を保持する
+  - `saxo_order_v1`: entry order id と、Saxo related orders の expected/resolved order id を保持する。Saxo の発注レスポンスで related order id が返らない場合、resolved order id は `null` のままとし、exit 同期は安全に no-op する
 - `created_at` (timestamp, required)
 - `updated_at` (timestamp, required)
 

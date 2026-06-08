@@ -1,6 +1,8 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient, setFirestoreDocument, updateFirestoreDocument } from '../firestore.js'
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
+import type { SaxoOrderMetadata } from '../types/broker-order-metadata.js'
+import type { OrderV2 } from '../types/order-v2.js'
 import type { Position } from '../types/position.js'
 import { defaultLogger, type Logger } from '../logger.js'
 
@@ -67,6 +69,8 @@ type SaxoNetPositionsResponse = {
 
 type SaxoOrderResponse = {
     OrderId: string
+    Orders?: Array<{ OrderId?: string }>
+    RelatedOrders?: Array<{ OrderId?: string }>
 }
 
 type SaxoOrderActivity = {
@@ -129,6 +133,54 @@ type SaxoRelatedOrder = {
 type SaxoProductInfo = {
     AssetType: string
     Uic: number
+}
+
+type OrdersV2ExecutionSyncResult = {
+    execution: { price: number, size: number, executed_at?: Date } | null
+    brokerOrderMetadata?: SaxoOrderMetadata
+}
+
+const toOrderSide = (side: 'Buy' | 'Sell'): 'BUY' | 'SELL' => side === 'Buy' ? 'BUY' : 'SELL'
+
+const buildSaxoOrderMetadata = (
+    order: OrderRequest,
+    orderId: string,
+    relatedOrders: SaxoRelatedOrder[],
+    relatedOrderIds: Array<string | null> = [],
+): SaxoOrderMetadata | undefined => {
+    if (relatedOrders.length === 0) return undefined
+
+    return {
+        kind: 'saxo_order_v1',
+        order_id: orderId,
+        entry: {
+            expected: {
+                side: order.side,
+                order_type: 'Market',
+                size: order.size,
+            },
+            resolved: {
+                order_id: orderId,
+            },
+        },
+        exits: relatedOrders.map((relatedOrder, index) => ({
+            expected: {
+                role: relatedOrder.OrderType === 'Limit' ? 'TAKE_PROFIT' : 'STOP_LOSS',
+                side: toOrderSide(relatedOrder.BuySell),
+                order_type: relatedOrder.OrderType,
+                size: relatedOrder.Amount,
+                price: relatedOrder.OrderPrice,
+            },
+            resolved: {
+                order_id: relatedOrderIds[index] ?? null,
+            },
+        })),
+    }
+}
+
+const extractSaxoRelatedOrderIds = (payload: SaxoOrderResponse): Array<string | null> => {
+    const related = payload.Orders ?? payload.RelatedOrders ?? []
+    return related.map((item) => item.OrderId ?? null)
 }
 
 export class SaxoClient {
@@ -471,7 +523,12 @@ export class SaxoClient {
                 url: `${this.baseUrl}/trade/v2/orders`,
                 body: JSON.parse(body),
             })
-            return { ok: true, broker: 'saxo', providerOrderId: 'DRY_RUN' }
+            return {
+                ok: true,
+                broker: 'saxo',
+                providerOrderId: 'DRY_RUN',
+                brokerOrderMetadata: buildSaxoOrderMetadata(order, 'DRY_RUN', relatedOrders),
+            }
         }
 
         try {
@@ -506,6 +563,12 @@ export class SaxoClient {
                 ok: true,
                 broker: 'saxo',
                 providerOrderId: payload.OrderId,
+                brokerOrderMetadata: buildSaxoOrderMetadata(
+                    order,
+                    payload.OrderId,
+                    relatedOrders,
+                    extractSaxoRelatedOrderIds(payload),
+                ),
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
@@ -633,6 +696,67 @@ export class SaxoClient {
             )
             return null
         }
+    }
+
+    async getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {
+        const providerOrderId = order.provider_order_ids[0]
+        if (!providerOrderId || providerOrderId === 'DRY_RUN') {
+            return { execution: null }
+        }
+
+        const metadata = order.broker_order_metadata
+        if (metadata?.kind !== 'saxo_order_v1') {
+            return {
+                execution: await this.getExecutionPrice(providerOrderId, order.ticker),
+            }
+        }
+
+        const entryOrderId = metadata.entry.resolved.order_id || metadata.order_id || providerOrderId
+        const execution = await this.getExecutionPrice(entryOrderId, order.ticker)
+        return {
+            execution: execution ? { ...execution, size: execution.size || order.requested_size } : null,
+            brokerOrderMetadata: metadata,
+        }
+    }
+
+    async getClosingExecutionForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {
+        const providerOrderId = order.provider_order_ids[0]
+        if (!providerOrderId || providerOrderId === 'DRY_RUN') {
+            return { execution: null }
+        }
+
+        const metadata = order.broker_order_metadata
+        if (metadata?.kind !== 'saxo_order_v1') {
+            return { execution: null }
+        }
+
+        let totalSize = 0
+        let totalValue = 0
+        let latestExecutedAt: Date | undefined
+
+        for (const exit of metadata.exits) {
+            const exitOrderId = exit.resolved.order_id
+            if (!exitOrderId) continue
+
+            const execution = await this.getExecutionPrice(exitOrderId, order.ticker)
+            if (!execution) continue
+
+            const size = execution.size || Math.min(exit.expected.size, order.requested_size)
+            totalSize += size
+            totalValue += execution.price * size
+            if (execution.executed_at && (!latestExecutedAt || execution.executed_at.getTime() > latestExecutedAt.getTime())) {
+                latestExecutedAt = execution.executed_at
+            }
+        }
+
+        return {
+            execution: totalSize > 0 ? { price: totalValue / totalSize, size: totalSize, executed_at: latestExecutedAt } : null,
+            brokerOrderMetadata: metadata,
+        }
+    }
+
+    async getClosingExecution(_parentOrderId: string, _ticker: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
+        return null
     }
 
     async searchInstruments(keyword: string): Promise<SaxoInstrument[]> {
