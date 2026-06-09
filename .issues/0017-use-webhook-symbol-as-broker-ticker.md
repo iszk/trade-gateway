@@ -1,6 +1,6 @@
 ---
 title: webhook symbol を broker ticker としてそのまま利用する
-status: wip
+status: done
 ---
 
 # 概要
