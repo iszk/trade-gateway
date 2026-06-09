@@ -23,7 +23,7 @@ TradingView から受信するアラートを正規化し、bitFlyer 向け発�
 ### 必須項目
 - `time` (string): シグナル発生時刻。ISO 8601形式の文字列（例: `2026-03-24T12:00:00Z`）
 - `occurred_at` (integer): TradingView 側からこちらに向けて Webhook が送信された時刻（unix milliseconds）
-- `symbol` (string): 取引銘柄。`"brokerName:brokerTickerCode"` の形式（例: `"bitflyer:BTC_JPY"`）を必須とする。ここからブローカーとティッカーが決定される。
+- `symbol` (string): 取引銘柄。`"brokerName:brokerTickerCode"` の形式（例: `"bitflyer:FX_BTC_JPY"`, `"saxo:CfdOnIndex:4911"`）を必須とする。ここからブローカーとティッカーが決定される。`brokerTickerCode` は broker に渡せる正規値を指定する。
 - `side` (string): `BUY` または `SELL`
 - `size` (number): 発注数量。`size > 0`
 - `webhook_secret` (string): 共有シークレット
@@ -85,7 +85,7 @@ Alert の "Message" フィールドに以下の JSON を指定（改行は削除
 {
   "time": "{{time}}",
   "occurred_at": {{timenow}},
-  "symbol": "bitflyer:{{ticker}}",
+  "symbol": "bitflyer:FX_BTC_JPY",
   "side": "{{strategy.order.action}}",
   "size": {{strategy.order.contracts}},
   "webhook_secret": "__YOUR_WEBHOOK_SECRET__",
@@ -101,7 +101,7 @@ Alert の "Message" フィールドに以下の JSON を指定（改行は削除
 > **プレースホルダの説明**:
 > - `{{time}}`: 現在時刻の ISO 8601 time（自動置換）
 > - `{{timenow}}`: 現在時刻の Unix time（milliseconds, 自動置換）
-> - `bitflyer:{{ticker}}`: 取引銘柄に応じて変更
+> - `bitflyer:FX_BTC_JPY`: 取引銘柄に応じて broker 側の正規 ticker に変更
 > - `BUY` / `SELL`: シグナルに応じて変更
 > - `0.01`: 発注単位に応じて変更
 > - `__YOUR_WEBHOOK_SECRET__`: サーバ管理者から支給されたシークレットに置き換え
@@ -117,7 +117,7 @@ alert(json.stringify(
   object.new(
     time=str.tostring(time),
     occurred_at=timenow,
-    symbol="bitflyer:BTC_JPY",
+    symbol="bitflyer:FX_BTC_JPY",
     side="BUY",
     size=0.01,
     webhook_secret="__YOUR_WEBHOOK_SECRET__",
@@ -198,7 +198,7 @@ alert(json.stringify(
 {
   "time": "2026-03-19T00:00:00.000Z",
   "occurred_at": 1773930645000,
-  "symbol": "bitflyer:BTC_JPY",
+  "symbol": "bitflyer:FX_BTC_JPY",
   "side": "BUY",
   "order_type": "MARKET",
   "size": 0.05,
@@ -214,7 +214,7 @@ alert(json.stringify(
 {
   "time": "2026-03-19T01:00:00.000Z",
   "occurred_at": 1773935200000,
-  "symbol": "saxo:FX:NAS100",
+  "symbol": "saxo:CfdOnIndex:4911",
   "side": "BUY",
   "size": 1,
   "price": 18500.0,
@@ -232,7 +232,7 @@ alert(json.stringify(
 {
   "time": "2026-03-19T02:00:00.000Z",
   "occurred_at": 1773935130000,
-  "symbol": "bitflyer:BTC_JPY",
+  "symbol": "bitflyer:FX_BTC_JPY",
   "side": "SELL",
   "size": 0.05,
   "webhook_secret": "sk_webhook_a1b2c3d4e5f6g7h8i9j0k1l2"

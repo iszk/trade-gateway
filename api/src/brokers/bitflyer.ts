@@ -112,19 +112,7 @@ const buildFailure = (
     message,
 })
 
-const normalizeProductCode = (ticker: string) => ticker.replace(/\//g, '_').toUpperCase()
-
-// webhook 側の ticker から bitflyer の product_code へのマッピング
-// マップにない ticker は normalizeProductCode にフォールバック
-const TICKER_PRODUCT_CODE_MAP: Record<string, string> = {
-    'BITFLYER:FXBTCJPY': 'FX_BTC_JPY',
-    'FXBTCJPY': 'FX_BTC_JPY',
-    'BITFLYER:BTCJPY': 'BTC_JPY',
-    'BTCJPY': 'BTC_JPY',
-}
-
-const resolveProductCode = (ticker: string): string =>
-    TICKER_PRODUCT_CODE_MAP[ticker.toUpperCase()] ?? normalizeProductCode(ticker)
+const resolveProductCode = (ticker: string): string => ticker
 
 const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): number | null => {
     if (execs.length === 0) return null
