@@ -88,7 +88,48 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `401 Unauthorized`: 認証トークン不足・不正
 - `500 Internal Server Error`: 証券会社との通信エラー等
 
-### 5. トレード統計取得
+### 5. 残高一覧取得
+- Method/Path: `GET /api/balances`
+- 認証: 必要（Bearerトークン）
+- 役割: 実装済み証券会社から現在の残高・評価額情報を取得し、日次スナップショットとして保存する
+- 対象 broker: `bitflyer`, `saxo`
+
+#### 成功レスポンス
+- `200 OK`
+
+```json
+{
+  "balances": [
+    {
+      "broker": "bitflyer",
+      "balances": [
+        { "asset": "JPY", "amount": 100000 },
+        { "asset": "CFD_JPY", "amount": 50000 }
+      ],
+      "updatedAt": 1672531200000
+    },
+    {
+      "broker": "saxo",
+      "balances": [
+        { "asset": "USD", "amount": 1000 },
+        { "asset": "USD_AVAILABLE_FOR_TRADING", "amount": 750 },
+        { "asset": "USD_TOTAL_VALUE", "amount": 1250 }
+      ],
+      "updatedAt": 1672531200000
+    }
+  ],
+  "updated_at": 1672531200000
+}
+```
+
+#### 補足
+- Saxo は `/port/v1/balances/me` の `CashBalance`, `CashAvailableForTrading`, `TotalValue`, `NetEquity` を非ゼロ項目のみ返す
+
+#### エラーレスポンス
+- `401 Unauthorized`: 認証トークン不足・不正
+- `500 Internal Server Error`: 証券会社との通信エラー等
+
+### 6. トレード統計取得
 - Method/Path: `GET /api/trade-records/stats`
 - 認証: 必要（Bearerトークン）
 - 役割: `orders_v2` の EXECUTED 注文から再構成したクローズ済みトレードの統計を、strategy 単位で返す
@@ -131,7 +172,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `401 Unauthorized`: 認証トークン不足・不正
 - `500 Internal Server Error`
 
-### 6. トレード記録一覧取得
+### 7. トレード記録一覧取得
 - Method/Path: `GET /api/trade-records`
 - 認証: 必要（Bearerトークン）
 - 役割: `orders_v2` の EXECUTED 注文から FIFO で再構成したクローズ済みトレード記録を一覧取得する（ページネーション付き）
@@ -181,7 +222,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `401 Unauthorized`: 認証トークン不足・不正
 - `500 Internal Server Error`
 
-### 7. ヘルスチェック
+### 8. ヘルスチェック
 - Method/Path: `GET /api/health`
 - 認証: 不要
 
@@ -194,7 +235,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 }
 ```
 
-### 8. Symbol 一覧・更新
+### 9. Symbol 一覧・更新
 - Method/Path: `GET /api/symbols`
 - 認証: 必要（Bearerトークン）
 - 役割: broker + ticker のメタデータと売買停止状態を一覧取得する
@@ -224,7 +265,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 }
 ```
 
-### 9. Symbol 更新
+### 10. Symbol 更新
 - Method/Path: `PUT /api/symbols/:symbol_id`
 - 認証: 必要（Bearerトークン）
 - 補足: `symbol_id` は `broker:ticker` を URL encode した値
@@ -239,7 +280,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 }
 ```
 
-### 10. Symbol 売買停止/再開
+### 11. Symbol 売買停止/再開
 - Method/Path: `PATCH /api/symbols/:symbol_id/trade-control`
 - 認証: 必要（Bearerトークン）
 

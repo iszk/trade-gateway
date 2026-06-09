@@ -257,6 +257,55 @@ test('SaxoClient.getExecutionPrice returns null when activities are empty', asyn
     assert.equal(result, null)
 })
 
+test('SaxoClient.getBalances fetches logged-in account balance and filters zero values', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    let capturedUrl = ''
+    let capturedAuthorization = ''
+
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url, init) => {
+            capturedUrl = String(url)
+            capturedAuthorization = new Headers(init?.headers).get('authorization') ?? ''
+            return new Response(
+                JSON.stringify({
+                    Currency: 'USD',
+                    CashBalance: 1000,
+                    CashAvailableForTrading: 750,
+                    TotalValue: 1250,
+                    NetEquity: 0,
+                }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getBalances()
+
+    assert.equal(capturedUrl, 'https://example.com/port/v1/balances/me')
+    assert.equal(capturedAuthorization, 'Bearer valid-token')
+    assert.deepEqual(result, [
+        { asset: 'USD', amount: 1000 },
+        { asset: 'USD_AVAILABLE_FOR_TRADING', amount: 750 },
+        { asset: 'USD_TOTAL_VALUE', amount: 1250 },
+    ])
+})
+
+test('SaxoClient.getBalances returns empty list when auth token is unavailable', async () => {
+    const client = new SaxoClient({ db: mockFirestore() })
+    const result = await client.getBalances()
+    assert.deepEqual(result, [])
+})
+
 test('SaxoClient.sendMarketOrder returns Saxo metadata for related orders', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

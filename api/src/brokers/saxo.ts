@@ -4,6 +4,7 @@ import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '..
 import type { SaxoOrderMetadata } from '../types/broker-order-metadata.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { Position } from '../types/position.js'
+import type { Balance } from '../types/balance.js'
 import { defaultLogger, type Logger } from '../logger.js'
 
 type SaxoClientOptions = {
@@ -65,6 +66,14 @@ type SaxoNetPosition = {
 
 type SaxoNetPositionsResponse = {
     Data: SaxoNetPosition[]
+}
+
+type SaxoBalanceResponse = {
+    CashBalance?: number
+    CashAvailableForTrading?: number
+    TotalValue?: number
+    NetEquity?: number
+    Currency?: string
 }
 
 type SaxoOrderResponse = {
@@ -615,6 +624,43 @@ export class SaxoClient {
             price: item.NetPositionView.AverageOpenPrice,
             pnl: item.NetPositionView.ProfitLossOnTrade,
         }))
+    }
+
+    async getBalances(): Promise<Balance[]> {
+        const accessToken = await this.getValidAccessToken()
+        if (!accessToken) {
+            return []
+        }
+
+        try {
+            const response = await this.fetchImpl(`${this.baseUrl}/port/v1/balances/me`, {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                },
+            })
+
+            if (!response.ok) {
+                const body = await response.text()
+                throw new Error(`Failed to fetch Saxo balances: ${response.status} ${body}`)
+            }
+
+            const data = (await response.json()) as SaxoBalanceResponse
+            const currency = data.Currency ?? 'ACCOUNT'
+            const balances = [
+                { asset: currency, amount: data.CashBalance },
+                { asset: `${currency}_AVAILABLE_FOR_TRADING`, amount: data.CashAvailableForTrading },
+                { asset: `${currency}_TOTAL_VALUE`, amount: data.TotalValue },
+                { asset: `${currency}_NET_EQUITY`, amount: data.NetEquity },
+            ]
+
+            return balances
+                .filter((balance): balance is Balance & { amount: number } =>
+                    typeof balance.amount === 'number' && balance.amount !== 0)
+                .map(({ asset, amount }) => ({ asset, amount }))
+        } catch (error) {
+            this.logger.warn({ event: 'saxo:get_balances_failed', error }, 'Failed to get Saxo balances')
+            return []
+        }
     }
 
     async getExecutionPrice(orderId: string, _ticker: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {

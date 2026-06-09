@@ -97,7 +97,27 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 - Firestoreトランザクションを使用して読み書きを行い、重複実行を防止する
 - TTLは不要（上書きで管理）
 
-## 5. `orders_v2`
+## 5. `daily_balances`
+
+broker 別の日次残高スナップショットを保持する。`/api/balances` と日次残高保存タスクで利用する。
+
+### ドキュメント ID
+- `{YYYY-MM-DD}_{broker}`
+- 例: `2026-06-09_bitflyer`, `2026-06-09_saxo`
+
+### フィールド
+- `broker` (string, required)
+- `balances` (array, required)
+  - `asset` (string, required)
+  - `amount` (number, required)
+- `updatedAt` (number, required) — Unix time milliseconds
+- `date` (string, required) — JST の `YYYY-MM-DD`
+
+### broker 別補足
+- bitFlyer は `/v1/me/getbalance` の非ゼロ残高と `/v1/me/getcollateral` の `collateral` を `CFD_JPY` として保存する
+- Saxo は `/port/v1/balances/me` の `CashBalance`, `CashAvailableForTrading`, `TotalValue`, `NetEquity` を非ゼロ項目のみ保存する
+
+## 6. `orders_v2`
 
 注文の source of truth。webhook 受付時に親注文を保存し、cron が約定情報と IFDOCO の exit を同期する。`/api/trade-records*` のクローズ済みトレード一覧・統計は、このコレクションの EXECUTED 注文から FIFO で再構成する。
 
