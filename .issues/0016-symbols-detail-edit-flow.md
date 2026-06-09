@@ -1,6 +1,6 @@
 ---
 title: Symbols detail edit flow
-status: wip
+status: done
 ---
 
 # 概要

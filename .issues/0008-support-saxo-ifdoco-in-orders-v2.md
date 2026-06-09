@@ -1,6 +1,6 @@
 ---
 title: Saxo の IFDOCO 注文に関する orders_v2 対応を行う
-status: wip
+status: done
 ---
 
 # 概要
