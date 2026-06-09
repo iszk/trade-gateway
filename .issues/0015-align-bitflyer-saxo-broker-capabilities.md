@@ -35,7 +35,7 @@ bitFlyer と Saxo のブローカー実装を棚卸しし、`orders_v2` 前提�
 - [x] Saxo の exit 同期が安全に動く状態になったら `api/src/index.ts` の `closingExecutionFetchers` に Saxo を登録する
 - [ ] Saxo の残高・証拠金取得要否を確認し、必要なら `BalanceFetcher` を broker 別実装へ分割して Saxo を追加する
 - [ ] bitFlyer 固有の `getPositions()` が `FX_BTC_JPY` 固定になっている点も、broker parity の一部として symbol 設定ベースに直すか別 issue に切り出す
-- [ ] 既存 issue 0008 と重複する作業は、0008 側を Saxo IFDOCO 詳細設計、本 issue を共通 interface / production 登録 / 横断差分の親 issue として扱う
+- [x] 既存 issue 0008 と重複する作業は、0008 側を Saxo IFDOCO 詳細設計、本 issue を共通 interface / production 登録 / 横断差分の親 issue として扱う
 - [ ] bitFlyer / Saxo の両方について、entry 約定、exit 約定、部分約定、metadata 更新、未約定時の no-op をテストで固定する
 
 # ログ
@@ -47,3 +47,7 @@ bitFlyer と Saxo のブローカー実装を棚卸しし、`orders_v2` 前提�
 ## 2026-06-09 00:39 Codex GPT-5
 
 実装に着手し、Saxo 用 `broker_order_metadata` (`saxo_order_v1`) を追加する方針にした。まずは production path の差が大きい `orders_v2` entry/exit 同期と cron 登録を優先する。Saxo の発注レスポンスで related order id が取得できないケースは `resolved.order_id = null` として保持し、exit 同期では安全に no-op する。残高取得と bitFlyer の `getPositions()` 銘柄固定は、この変更と API 仕様確認の粒度が異なるため今回の実装範囲には含めない。
+
+## 2026-06-09 10:36 Codex GPT-5
+
+0008 と重複する Saxo IFDOCO 範囲を整理し、0008 側を詳細設計・完了判断用の issue として更新した。追加で、Saxo の片側 related order だけが約定し、もう片側に audit activity がない場合に約定済み側だけを exit 同期するテストを追加した。Saxo IFDOCO の entry/exit metadata、同期経路、未解決 related order id の no-op 方針は `docs/ifdoco-exit-flow.md` に追記済み。0015 側には残高・ポジション銘柄固定・横断 interface 整理の未完了項目を残す。

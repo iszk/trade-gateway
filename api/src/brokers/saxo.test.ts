@@ -493,6 +493,71 @@ test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executio
     assert.deepEqual(result.execution, { price: 102.5, size: 2, executed_at: undefined })
 })
 
+test('SaxoClient.getClosingExecutionForOrderV2 uses filled related order and ignores unfilled sibling', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    const requestedOrderIds: string[] = []
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const orderId = new URL(String(url)).searchParams.get('OrderId')
+            requestedOrderIds.push(orderId ?? '')
+            const data = orderId === 'ORD-sl-single'
+                ? [{ LogId: 'L-sl-single', OrderId: orderId, Status: 'FinalFill', AveragePrice: 97.5 }]
+                : []
+            return new Response(
+                JSON.stringify({ Data: data }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getClosingExecutionForOrderV2({
+        id: 'evt-saxo-close-single',
+        strategy: 'test',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 1,
+        executed_size: 1,
+        executed_price: 100,
+        status: 'EXECUTED',
+        provider_order_ids: ['ORD-entry-single'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+        broker_order_metadata: {
+            kind: 'saxo_order_v1',
+            order_id: 'ORD-entry-single',
+            entry: {
+                expected: { side: 'BUY', order_type: 'Market', size: 1 },
+                resolved: { order_id: 'ORD-entry-single' },
+            },
+            exits: [
+                {
+                    expected: { role: 'STOP_LOSS', side: 'SELL', order_type: 'StopIfTraded', size: 1, price: 97.5 },
+                    resolved: { order_id: 'ORD-sl-single' },
+                },
+                {
+                    expected: { role: 'TAKE_PROFIT', side: 'SELL', order_type: 'Limit', size: 1, price: 103 },
+                    resolved: { order_id: 'ORD-tp-single' },
+                },
+            ],
+        },
+    })
+
+    assert.deepEqual(requestedOrderIds, ['ORD-sl-single', 'ORD-tp-single'])
+    assert.deepEqual(result.execution, { price: 97.5, size: 1, executed_at: undefined })
+})
+
 test('SaxoClient.getClosingExecutionForOrderV2 no-ops when related order ids are unresolved', async () => {
     const client = new SaxoClient({ db: mockFirestore() })
 
