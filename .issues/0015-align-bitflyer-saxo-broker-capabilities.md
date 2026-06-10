@@ -1,6 +1,6 @@
 ---
 title: bitFlyer と Saxo のブローカー実装世代差を解消する
-status: wip
+status: done
 ---
 
 # 概要
