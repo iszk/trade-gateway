@@ -84,6 +84,7 @@ const GET_EXECUTIONS_PATH = '/v1/me/getexecutions'
 const GET_CHILD_ORDERS_PATH = '/v1/me/getchildorders'
 const GET_PARENT_ORDER_PATH = '/v1/me/getparentorder'
 const DEFAULT_BITFLYER_BASE_URL = 'https://api.bitflyer.com'
+const DEFAULT_POSITION_PRODUCT_CODES = ['FX_BTC_JPY']
 
 type BitflyerParentOrderParameter = {
     product_code: string
@@ -453,27 +454,33 @@ export class BitflyerClient {
         }
     }
 
-    async getPositions(): Promise<Position[]> {
-        // bitflyer では銘柄ごとに取得する必要があるが、とりあえず主要なものを取得するようにする
-        // 本来は引数で ticker を指定するか、設定されている全ての ticker についてループする必要がある
-        // ここでは MVP として FX_BTC_JPY 固定で取得してみる（TODO: 汎用化）
-        try {
-            const productCode = 'FX_BTC_JPY'
-            const path = `${GET_POSITIONS_PATH}?product_code=${productCode}`
-            const results = await this.callApi<BitflyerPositionResponse[]>('GET', path)
+    async getPositions(productCodes: string[] = DEFAULT_POSITION_PRODUCT_CODES): Promise<Position[]> {
+        const uniqueProductCodes = [...new Set(productCodes.map((code) => code.trim()).filter((code) => code.length > 0))]
+        const targets = uniqueProductCodes.length > 0 ? uniqueProductCodes : DEFAULT_POSITION_PRODUCT_CODES
+        const positions: Position[] = []
 
-            return results.map((res) => ({
-                broker: 'bitflyer',
-                ticker: res.product_code,
-                side: res.side as any, // 'BUY' | 'SELL'
-                size: res.size,
-                price: res.price,
-                pnl: res.pnl,
-            }))
-        } catch (error) {
-            this.logger.warn({ event: 'bitflyer:get_positions_failed', error }, 'Failed to get bitflyer positions')
-            return []
+        for (const productCode of targets) {
+            try {
+                const path = `${GET_POSITIONS_PATH}?product_code=${encodeURIComponent(productCode)}`
+                const results = await this.callApi<BitflyerPositionResponse[]>('GET', path)
+
+                positions.push(...results.map((res) => ({
+                    broker: 'bitflyer' as const,
+                    ticker: res.product_code,
+                    side: res.side as Position['side'],
+                    size: res.size,
+                    price: res.price,
+                    pnl: res.pnl,
+                })))
+            } catch (error) {
+                this.logger.warn(
+                    { event: 'bitflyer:get_positions_failed', productCode, error },
+                    'Failed to get bitflyer positions',
+                )
+            }
         }
+
+        return positions
     }
 
     async getBalances(): Promise<BitflyerBalanceResponse[]> {

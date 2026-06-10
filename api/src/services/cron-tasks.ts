@@ -22,15 +22,29 @@ export type OrdersV2ExecutionSyncResult = {
     brokerOrderMetadata?: BrokerOrderMetadata
 }
 
-export type ExecutionPriceFetcherLike = {
+type LegacyExecutionPriceFetcherLike = {
     getExecutionPrice(providerOrderId: string, ticker: string): Promise<ExecutionInfo | null>
-    getExecutionPriceForOrderV2?(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+    getExecutionPriceForOrderV2?: never
 }
 
-export type ClosingExecutionFetcherLike = {
-    getClosingExecution(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
-    getClosingExecutionForOrderV2?(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+type OrdersV2ExecutionPriceFetcherLike = {
+    getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+    getExecutionPrice?(providerOrderId: string, ticker: string): Promise<ExecutionInfo | null>
 }
+
+type LegacyClosingExecutionFetcherLike = {
+    getClosingExecution(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
+    getClosingExecutionForOrderV2?: never
+}
+
+type OrdersV2ClosingExecutionFetcherLike = {
+    getClosingExecutionForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+    getClosingExecution?(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
+}
+
+export type ExecutionPriceFetcherLike = OrdersV2ExecutionPriceFetcherLike | LegacyExecutionPriceFetcherLike
+
+export type ClosingExecutionFetcherLike = OrdersV2ClosingExecutionFetcherLike | LegacyClosingExecutionFetcherLike
 
 export type CronContext = {
     logger: Logger

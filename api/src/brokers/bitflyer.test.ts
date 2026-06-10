@@ -187,6 +187,45 @@ test('BitflyerClient.getCollateral returns collateral', async () => {
     assert.deepEqual(result, { collateral: 50000, open_pnl: 100, keep_rate: 2.5 })
 })
 
+test('BitflyerClient.getPositions fetches each requested product code', async () => {
+    const capturedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const requestUrl = String(url)
+            capturedUrls.push(requestUrl)
+            const productCode = new URL(requestUrl).searchParams.get('product_code')
+            return new Response(
+                JSON.stringify([
+                    {
+                        product_code: productCode,
+                        side: 'BUY',
+                        price: 10000000,
+                        size: 0.01,
+                        commission: 0,
+                        swap_point_accumulated: 0,
+                        require_collateral: 0,
+                        open_date: '2026-01-01T00:00:00Z',
+                        leverage: 2,
+                        pnl: 100,
+                        sfd: 0,
+                    },
+                ]),
+                { status: 200 },
+            )
+        },
+    })
+
+    const result = await client.getPositions(['FX_BTC_JPY', 'BTC_JPY'])
+
+    assert.equal(capturedUrls.length, 2)
+    assert.ok(capturedUrls[0]?.includes('/v1/me/getpositions?product_code=FX_BTC_JPY'))
+    assert.ok(capturedUrls[1]?.includes('/v1/me/getpositions?product_code=BTC_JPY'))
+    assert.deepEqual(result.map((position) => position.ticker), ['FX_BTC_JPY', 'BTC_JPY'])
+})
+
 test('BitflyerClient uses IFD when stopLoss is provided with price', async () => {
     let capturedUrl = ''
     let capturedBody = ''
@@ -861,6 +900,55 @@ test('BitflyerClient.getExecutionPriceForOrderV2 resolves entry acceptance id fr
     assert.deepEqual(result.brokerOrderMetadata?.exits[0]?.resolved, { acceptance_id: 'JRF-child-stop-meta' })
 })
 
+test('BitflyerClient.getExecutionPriceForOrderV2 returns null when resolved entry has no executions', async () => {
+    const order: OrderV2 = {
+        id: 'v2-entry-no-execution',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-parent-entry-no-execution'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-entry-no-execution',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-child-entry-no-execution' },
+            },
+            exits: [],
+        },
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            requestedUrls.push(String(url))
+            return new Response(
+                JSON.stringify([]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(order)
+
+    assert.equal(result.execution, null)
+    assert.deepEqual(result.brokerOrderMetadata, order.broker_order_metadata)
+    assert.equal(requestedUrls.length, 1)
+    assert.ok(requestedUrls[0]?.includes('child_order_acceptance_id=JRF-child-entry-no-execution'))
+})
+
 test('BitflyerClient.getClosingExecutionForOrderV2 resolves close acceptance ids from metadata even when completed child is MARKET', async () => {
     const order: OrderV2 = {
         id: 'v2-close-meta',
@@ -1037,6 +1125,76 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves stop loss MARKET chi
     assert.deepEqual(result.execution, { price: 9500000, size: 0.01, executed_at: new Date('2026-01-01T01:10:00.000Z') })
     assert.deepEqual(result.brokerOrderMetadata?.exits[0]?.resolved, { acceptance_id: 'JRF-child-stop-sl-market' })
     assert.deepEqual(result.brokerOrderMetadata?.exits[1]?.resolved, { acceptance_id: 'JRF-child-limit-sl-market' })
+})
+
+test('BitflyerClient.getClosingExecutionForOrderV2 returns partial close and no-ops unfilled exits', async () => {
+    const order: OrderV2 = {
+        id: 'v2-close-partial-noop',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0.01,
+        executed_price: 9700000,
+        status: 'EXECUTED',
+        provider_order_ids: ['JRF-parent-close-partial-noop'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-close-partial-noop',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-child-entry-partial-noop' },
+            },
+            exits: [
+                {
+                    expected: { role: 'STOP_LOSS', side: 'SELL', condition_type: 'STOP', size: 0.01, trigger_price: 9500000 },
+                    resolved: { acceptance_id: 'JRF-child-stop-partial-noop' },
+                },
+                {
+                    expected: { role: 'TAKE_PROFIT', side: 'SELL', condition_type: 'LIMIT', size: 0.01, price: 9800000 },
+                    resolved: { acceptance_id: 'JRF-child-limit-partial-noop' },
+                },
+            ],
+        },
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const urlStr = String(url)
+            requestedUrls.push(urlStr)
+            if (urlStr.includes('JRF-child-stop-partial-noop')) {
+                return new Response(
+                    JSON.stringify([
+                        { child_order_acceptance_id: 'JRF-child-stop-partial-noop', price: 9500000, size: 0.004, exec_date: '2026-01-01T01:00:00.000Z' },
+                    ]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlStr.includes('JRF-child-limit-partial-noop')) {
+                return new Response(
+                    JSON.stringify([]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            assert.fail(`unexpected url: ${urlStr}`)
+        },
+    })
+
+    const result = await client.getClosingExecutionForOrderV2(order)
+
+    assert.deepEqual(result.execution, { price: 9500000, size: 0.004, executed_at: new Date('2026-01-01T01:00:00.000Z') })
+    assert.deepEqual(result.brokerOrderMetadata, order.broker_order_metadata)
+    assert.equal(requestedUrls.length, 2)
 })
 
 test('BitflyerClient.getClosingExecution returns null when parent acceptance id cannot be resolved', async () => {

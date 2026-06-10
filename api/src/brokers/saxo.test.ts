@@ -477,6 +477,61 @@ test('SaxoClient.getExecutionPriceForOrderV2 uses order context and requested_si
     assert.deepEqual(result.execution, { price: 101.5, size: 1000, executed_at: undefined })
 })
 
+test('SaxoClient.getExecutionPriceForOrderV2 returns null when entry has no fill activity', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    const requestedOrderIds: string[] = []
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            requestedOrderIds.push(new URL(String(url)).searchParams.get('OrderId') ?? '')
+            return new Response(
+                JSON.stringify({ Data: [] }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const metadata = {
+        kind: 'saxo_order_v1' as const,
+        order_id: 'ORD-entry-no-fill',
+        entry: {
+            expected: { side: 'BUY' as const, order_type: 'Market' as const, size: 1000 },
+            resolved: { order_id: 'ORD-entry-no-fill' },
+        },
+        exits: [],
+    }
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'evt-saxo-entry-no-fill',
+        strategy: 'test',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 1000,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['ORD-entry-no-fill'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+        broker_order_metadata: metadata,
+    })
+
+    assert.deepEqual(requestedOrderIds, ['ORD-entry-no-fill'])
+    assert.equal(result.execution, null)
+    assert.deepEqual(result.brokerOrderMetadata, metadata)
+})
+
 test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executions', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

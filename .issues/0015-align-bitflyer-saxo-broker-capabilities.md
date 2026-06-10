@@ -27,16 +27,16 @@ bitFlyer と Saxo のブローカー実装を棚卸しし、`orders_v2` 前提�
 
 # 実装/修正プラン
 
-- [ ] `ExecutionPriceFetcherLike` / `ClosingExecutionFetcherLike` を `orders_v2` 前提に寄せ、旧形メソッドを残す場合も互換用途に限定する
+- [x] `ExecutionPriceFetcherLike` / `ClosingExecutionFetcherLike` を `orders_v2` 前提に寄せ、旧形メソッドを残す場合も互換用途に限定する
 - [x] Saxo 用の `BrokerOrderMetadata` 型を追加し、entry / related orders / exit の紐付けに必要な ID と期待条件を保存できるようにする
 - [x] Saxo の `sendMarketOrder` で stop loss / take profit 付き注文を出した場合、関連注文を後続同期できる metadata を `OrderDispatchResult` に含める
 - [x] Saxo に `getExecutionPriceForOrderV2(order)` を追加し、entry 約定の価格・数量・約定時刻を `OrderV2` context と metadata から解決する
 - [x] Saxo に `getClosingExecutionForOrderV2(order)` を追加し、利確・損切のどちらが約定したか、部分約定があるか、残注文がどう扱われるかを反映する
 - [x] Saxo の exit 同期が安全に動く状態になったら `api/src/index.ts` の `closingExecutionFetchers` に Saxo を登録する
 - [x] Saxo の残高・証拠金取得要否を確認し、必要なら `BalanceFetcher` を broker 別実装へ分割して Saxo を追加する
-- [ ] bitFlyer 固有の `getPositions()` が `FX_BTC_JPY` 固定になっている点も、broker parity の一部として symbol 設定ベースに直すか別 issue に切り出す
+- [x] bitFlyer 固有の `getPositions()` が `FX_BTC_JPY` 固定になっている点も、broker parity の一部として symbol 設定ベースに直すか別 issue に切り出す
 - [x] 既存 issue 0008 と重複する作業は、0008 側を Saxo IFDOCO 詳細設計、本 issue を共通 interface / production 登録 / 横断差分の親 issue として扱う
-- [ ] bitFlyer / Saxo の両方について、entry 約定、exit 約定、部分約定、metadata 更新、未約定時の no-op をテストで固定する
+- [x] bitFlyer / Saxo の両方について、entry 約定、exit 約定、部分約定、metadata 更新、未約定時の no-op をテストで固定する
 
 # ログ
 
@@ -55,3 +55,11 @@ bitFlyer と Saxo のブローカー実装を棚卸しし、`orders_v2` 前提�
 ## 2026-06-09 16:14 Codex GPT-5
 
 Saxo の残高取得を追加した。公式 OpenAPI の balances endpoint に合わせて `SaxoClient.getBalances()` が `/port/v1/balances/me` を呼び、`CashBalance` / `CashAvailableForTrading` / `TotalValue` / `NetEquity` の非ゼロ値を `Balance[]` に正規化する。`BalanceFetcher` は bitFlyer / Saxo を broker 別に保存する構成に変更し、`daily_balances` の doc id は従来どおり `{YYYY-MM-DD}_{broker}` とした。テストでは Saxo 残高 API の URL・Bearer token・ゼロ除外、Saxo 単体保存、全 broker 残高取得を固定した。API/DB 仕様にも `/api/balances` と `daily_balances` の Saxo 対応を追記した。
+
+## 2026-06-10 00:26 Codex GPT-5
+
+bitFlyer のポジション取得を `FX_BTC_JPY` 固定から `tradable_symbols` ベースに変更した。`PositionFetcher` が登録済み bitFlyer ticker を解決して `BitflyerClient.getPositions(productCodes)` に渡し、銘柄設定が空または取得失敗の場合だけ互換性維持のため `FX_BTC_JPY` にフォールバックする。`BitflyerClient.getPositions()` は複数 `product_code` を順に取得し、銘柄単位の失敗をログに残して他銘柄の取得を継続する。あわせて cron の fetcher 型を `orders_v2` メソッド優先の union に整理し、旧形 `getExecutionPrice` / `getClosingExecution` は互換 fetcher としてのみ表現した。API 仕様に bitFlyer ポジション取得の銘柄解決ルールを追記し、対象テストを追加した。
+
+## 2026-06-10 09:10 Codex GPT-5
+
+最後に残っていた broker parity のテスト固定を進めた。bitFlyer は `getExecutionPriceForOrderV2` で resolved entry に約定がない場合に `execution: null` と metadata 維持になること、`getClosingExecutionForOrderV2` で片側 exit の部分約定だけを集計し、未約定 sibling は no-op になることを追加で固定した。Saxo は `getExecutionPriceForOrderV2` で entry の audit activity が空の場合に `execution: null` と metadata 維持になることを固定した。これにより issue 0015 の実装/修正プラン上のチェック項目は全て完了状態になった。クローズはユーザー確認後に実施する。
