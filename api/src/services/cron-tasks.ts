@@ -71,7 +71,7 @@ const getOrderAgeMs = (order: Pick<OrderV2, 'created_at'>, nowMs: number): numbe
 )
 
 const shouldSkipStaleSaxoPendingOrder = (order: OrderV2, nowMs: number): boolean => (
-    order.broker === 'saxo' && getOrderAgeMs(order, nowMs) > SAXO_PENDING_SYNC_MAX_AGE_MS
+    order.broker === 'saxo' && order.order_type === 'MARKET' && getOrderAgeMs(order, nowMs) > SAXO_PENDING_SYNC_MAX_AGE_MS
 )
 
 export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> => {
