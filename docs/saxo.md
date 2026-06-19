@@ -2,7 +2,7 @@
 
 ## 前提
 
-現状の実装は Saxo の 1 アカウント運用を前提にする。`saxo_auth_data/saxo_auth.accounts[0]` の `ClientKey` を audit 取得に使い、発注時の account 選択も既存実装どおり、対象 `AssetType` を扱える最初の account を使う。
+現状の実装は Saxo の 1 アカウント運用を前提にする。`saxo_auth_data/saxo_auth.accounts[0]` の `clientKey`（Saxo API レスポンス上は `ClientKey`）を audit 取得に使い、発注時の account 選択も既存実装どおり、対象 `AssetType` を扱える最初の account を使う。
 
 複数アカウント運用に拡張する場合は、少なくとも以下を見直す。
 
