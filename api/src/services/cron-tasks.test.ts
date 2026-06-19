@@ -203,7 +203,7 @@ test('executeTenMinutelyTask: 古い Saxo PENDING 注文は約定同期をスキ
     assert.equal(updatedOrders.length, 0)
 })
 
-test('executeTenMinutelyTask: Saxo PENDING 注文の約定同期は1回あたり10件までに制限する', async () => {
+test('executeTenMinutelyTask: Saxo PENDING 注文の約定同期は10件を超えてもスキップしない', async () => {
     const pendingOrders = Array.from({ length: 12 }, (_, index) => ({
         id: `v2-saxo-pending-${index}`,
         broker: 'saxo',
@@ -231,7 +231,7 @@ test('executeTenMinutelyTask: Saxo PENDING 注文の約定同期は1回あたり
 
     await executeTenMinutelyTask(ctx)
 
-    assert.equal(fetchCount, 10)
+    assert.equal(fetchCount, 12)
 })
 
 test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコードを作成・更新する (部分約定対応)', async () => {
@@ -457,7 +457,7 @@ test('executeTenMinutelyTask: Saxo の closingExecutionFetcher で exit レコ�
     assert.deepEqual(updatedOrders[0], { id: 'v2-saxo-ifd', exit_sync_status: 'COMPLETED' })
 })
 
-test('executeTenMinutelyTask: Saxo exit 同期は1回あたり10件までに制限する', async () => {
+test('executeTenMinutelyTask: Saxo exit 同期は10件を超えてもスキップしない', async () => {
     const orders = Array.from({ length: 12 }, (_, index) => ({
         id: `v2-saxo-ifd-limit-${index}`,
         strategy: 'saxo-strategy',
@@ -492,5 +492,5 @@ test('executeTenMinutelyTask: Saxo exit 同期は1回あたり10件までに制�
 
     await executeTenMinutelyTask(ctx)
 
-    assert.equal(fetchCount, 10)
+    assert.equal(fetchCount, 12)
 })

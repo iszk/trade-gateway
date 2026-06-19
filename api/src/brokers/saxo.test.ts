@@ -386,13 +386,16 @@ test('SaxoClient.sendMarketOrder returns Saxo metadata for related orders', asyn
 
     assert.equal(result.ok, true)
     assert.equal(result.ok && result.providerOrderId, 'ORD-entry-1')
+    assert.equal(requestBody.ExternalReference, 'tg:evt-saxo-meta-1')
     assert.equal(requestBody.Orders.length, 2)
+    assert.equal(requestBody.Orders[0].ExternalReference, 'tg:evt-saxo-meta-1')
     assert.deepEqual(result.ok && result.brokerOrderMetadata, {
         kind: 'saxo_order_v1',
         order_id: 'ORD-entry-1',
+        external_reference: 'tg:evt-saxo-meta-1',
         entry: {
             expected: { side: 'BUY', order_type: 'Market', size: 2 },
-            resolved: { order_id: 'ORD-entry-1' },
+            resolved: { order_id: 'ORD-entry-1', external_reference: 'tg:evt-saxo-meta-1' },
         },
         exits: [
             {
@@ -403,7 +406,7 @@ test('SaxoClient.sendMarketOrder returns Saxo metadata for related orders', asyn
                     size: 2,
                     price: 98,
                 },
-                resolved: { order_id: 'ORD-sl-1' },
+                resolved: { order_id: 'ORD-sl-1', external_reference: 'tg:evt-saxo-meta-1' },
             },
             {
                 expected: {
@@ -413,7 +416,7 @@ test('SaxoClient.sendMarketOrder returns Saxo metadata for related orders', asyn
                     size: 2,
                     price: 103,
                 },
-                resolved: { order_id: 'ORD-tp-1' },
+                resolved: { order_id: 'ORD-tp-1', external_reference: 'tg:evt-saxo-meta-1' },
             },
         ],
     })
@@ -458,7 +461,7 @@ test('SaxoClient.sendMarketOrder keeps related order ids nullable when response 
     }
 })
 
-test('SaxoClient.getExecutionPriceForOrderV2 uses order context and requested_size fallback', async () => {
+test('SaxoClient.getExecutionPriceForOrderV2 uses batched audit activities and fill amount', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'valid-token',
@@ -474,7 +477,11 @@ test('SaxoClient.getExecutionPriceForOrderV2 uses order context and requested_si
         fetchImpl: async () =>
             new Response(
                 JSON.stringify({
-                    Data: [{ LogId: 'L1', OrderId: 'ORD-entry-3', Status: 'FinalFill', AveragePrice: 101.5 }],
+                    Data: [
+                        { LogId: 'L1', OrderId: 'ORD-entry-3', Status: 'Fill', ExecutionPrice: 101, FillAmount: 400, ActivityTime: '2026-01-01T00:05:00Z' },
+                        { LogId: 'L2', OrderId: 'ORD-entry-3', Status: 'FinalFill', ExecutionPrice: 102, FillAmount: 600, ActivityTime: '2026-01-01T00:06:00Z' },
+                    ],
+                    __nextPoll: '/cs/v1/audit/orderactivities/subscriptions/sub-1',
                 }),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             ),
@@ -505,10 +512,10 @@ test('SaxoClient.getExecutionPriceForOrderV2 uses order context and requested_si
         },
     })
 
-    assert.deepEqual(result.execution, { price: 101.5, size: 1000, executed_at: undefined })
+    assert.deepEqual(result.execution, { price: 101.6, size: 1000, executed_at: new Date('2026-01-01T00:06:00Z') })
 })
 
-test('SaxoClient.getExecutionPriceForOrderV2 returns null when entry has no fill activity', async () => {
+test('SaxoClient.getExecutionPriceForOrderV2 returns null when batch has no entry fill activity', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'valid-token',
@@ -518,12 +525,12 @@ test('SaxoClient.getExecutionPriceForOrderV2 returns null when entry has no fill
         },
     })
 
-    const requestedOrderIds: string[] = []
+    const requestedUrls: string[] = []
     const client = new SaxoClient({
         db,
         baseUrl: 'https://example.com',
         fetchImpl: async (url) => {
-            requestedOrderIds.push(new URL(String(url)).searchParams.get('OrderId') ?? '')
+            requestedUrls.push(String(url))
             return new Response(
                 JSON.stringify({ Data: [] }),
                 { status: 200, headers: { 'content-type': 'application/json' } },
@@ -558,12 +565,13 @@ test('SaxoClient.getExecutionPriceForOrderV2 returns null when entry has no fill
         broker_order_metadata: metadata,
     })
 
-    assert.deepEqual(requestedOrderIds, ['ORD-entry-no-fill'])
+    assert.equal(requestedUrls.length, 1)
+    assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('OrderId'), null)
     assert.equal(result.execution, null)
     assert.deepEqual(result.brokerOrderMetadata, metadata)
 })
 
-test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executions', async () => {
+test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executions from one audit batch', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'valid-token',
@@ -573,17 +581,18 @@ test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executio
         },
     })
 
-    const requestedOrderIds: string[] = []
+    let fetchCount = 0
     const client = new SaxoClient({
         db,
         baseUrl: 'https://example.com',
-        fetchImpl: async (url) => {
-            const orderId = new URL(String(url)).searchParams.get('OrderId')
-            requestedOrderIds.push(orderId ?? '')
-            const averagePrice = orderId === 'ORD-sl-4' ? 98 : 104
+        fetchImpl: async () => {
+            fetchCount += 1
             return new Response(
                 JSON.stringify({
-                    Data: [{ LogId: `L-${orderId}`, OrderId: orderId, Status: 'FinalFill', AveragePrice: averagePrice }],
+                    Data: [
+                        { LogId: 'L-sl-4', OrderId: 'ORD-sl-4', Status: 'FinalFill', ExecutionPrice: 98, FillAmount: 0.5 },
+                        { LogId: 'L-tp-4', OrderId: 'ORD-tp-4', Status: 'FinalFill', ExecutionPrice: 104, FillAmount: 1.5 },
+                    ],
                 }),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             )
@@ -624,7 +633,7 @@ test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executio
         },
     })
 
-    assert.deepEqual(requestedOrderIds, ['ORD-sl-4', 'ORD-tp-4'])
+    assert.equal(fetchCount, 1)
     assert.deepEqual(result.execution, { price: 102.5, size: 2, executed_at: undefined })
 })
 
@@ -638,16 +647,13 @@ test('SaxoClient.getClosingExecutionForOrderV2 uses filled related order and ign
         },
     })
 
-    const requestedOrderIds: string[] = []
+    let fetchCount = 0
     const client = new SaxoClient({
         db,
         baseUrl: 'https://example.com',
-        fetchImpl: async (url) => {
-            const orderId = new URL(String(url)).searchParams.get('OrderId')
-            requestedOrderIds.push(orderId ?? '')
-            const data = orderId === 'ORD-sl-single'
-                ? [{ LogId: 'L-sl-single', OrderId: orderId, Status: 'FinalFill', AveragePrice: 97.5 }]
-                : []
+        fetchImpl: async () => {
+            fetchCount += 1
+            const data = [{ LogId: 'L-sl-single', OrderId: 'ORD-sl-single', Status: 'FinalFill', AveragePrice: 97.5, FilledAmount: 1 }]
             return new Response(
                 JSON.stringify({ Data: data }),
                 { status: 200, headers: { 'content-type': 'application/json' } },
@@ -689,8 +695,61 @@ test('SaxoClient.getClosingExecutionForOrderV2 uses filled related order and ign
         },
     })
 
-    assert.deepEqual(requestedOrderIds, ['ORD-sl-single', 'ORD-tp-single'])
+    assert.equal(fetchCount, 1)
     assert.deepEqual(result.execution, { price: 97.5, size: 1, executed_at: undefined })
+})
+
+test('SaxoClient.getExecutionPriceForOrderV2 ignores stale next poll cursor after 30 minutes', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ clientKey: 'test-client' }],
+        },
+        'cron_metadata/saxo_orderactivities_poll_state': {
+            last_poll_at: '2026-01-01T00:00:00Z',
+            next_poll_url: '/cs/v1/audit/orderactivities/subscriptions/stale',
+        },
+    })
+
+    let requestedUrl = ''
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            requestedUrl = String(url)
+            return new Response(
+                JSON.stringify({
+                    Data: [{ LogId: 'L-stale', OrderId: 'ORD-stale-cursor', Status: 'FinalFill', AveragePrice: 101, FilledAmount: 1 }],
+                }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'evt-stale-cursor',
+        strategy: 'test',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'MARKET',
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['ORD-stale-cursor'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.ok(requestedUrl.startsWith('https://example.com/cs/v1/audit/orderactivities/'))
+    assert.equal(new URL(requestedUrl).searchParams.get('ClientKey'), 'test-client')
+    assert.equal(new URL(requestedUrl).searchParams.get('OrderId'), null)
+    assert.notEqual(requestedUrl, 'https://example.com/cs/v1/audit/orderactivities/subscriptions/stale')
+    assert.deepEqual(result.execution, { price: 101, size: 1, executed_at: undefined })
 })
 
 test('SaxoClient.getClosingExecutionForOrderV2 no-ops when related order ids are unresolved', async () => {

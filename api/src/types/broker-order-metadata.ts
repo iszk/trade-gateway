@@ -46,6 +46,7 @@ export type SaxoResolvedRelatedOrder = {
 export type SaxoOrderMetadata = {
     kind: 'saxo_order_v1'
     order_id: string
+    external_reference?: string
     entry: {
         expected: {
             side: OrderSide
@@ -54,11 +55,14 @@ export type SaxoOrderMetadata = {
         }
         resolved: {
             order_id: string
+            external_reference?: string
         }
     }
     exits: Array<{
         expected: SaxoExpectedRelatedOrder
-        resolved: SaxoResolvedRelatedOrder
+        resolved: SaxoResolvedRelatedOrder & {
+            external_reference?: string
+        }
     }>
 }
 
