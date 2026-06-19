@@ -56,7 +56,10 @@ export class PositionFetcher {
             ]
             return tickers.length > 0 ? tickers : DEFAULT_BITFLYER_POSITION_TICKERS
         } catch (error) {
-            console.error('Failed to list tradable symbols for bitflyer positions', error)
+            defaultLogger.warn(
+                { event: 'position_fetcher:list_tradable_symbols_failed', error },
+                'failed to list tradable symbols for bitflyer positions',
+            )
             return DEFAULT_BITFLYER_POSITION_TICKERS
         }
     }
