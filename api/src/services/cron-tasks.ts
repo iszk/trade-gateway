@@ -12,7 +12,6 @@ type PositionFetcherLike = {
 }
 
 const SAXO_PENDING_SYNC_MAX_AGE_MS = 24 * 60 * 60 * 1000
-const SAXO_MAX_SYNC_ORDERS_PER_RUN = 10
 
 export type ExecutionInfo = {
     price: number
@@ -125,8 +124,6 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
         'syncing pending orders_v2',
     )
 
-    let saxoSyncOrders = 0
-
     for (const order of pendingOrders) {
         if (shouldSkipStaleSaxoPendingOrder(order, ctx.nowMs)) {
             ctx.logger.warn(
@@ -139,21 +136,6 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                 'skipping stale Saxo pending order execution sync',
             )
             continue
-        }
-
-        if (order.broker === 'saxo') {
-            if (saxoSyncOrders >= SAXO_MAX_SYNC_ORDERS_PER_RUN) {
-                ctx.logger.warn(
-                    {
-                        event: 'cron:saxo_pending_order_sync_skipped_limit',
-                        orderId: order.id,
-                        maxOrdersPerRun: SAXO_MAX_SYNC_ORDERS_PER_RUN,
-                    },
-                    'skipping Saxo pending order execution sync due to per-run limit',
-                )
-                continue
-            }
-            saxoSyncOrders += 1
         }
 
         const fetcher = ctx.executionPriceFetchers[order.broker]
@@ -236,24 +218,7 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
         ids: activeIfdos.map((o) => o.id),
     }, 'syncing exits for executed IFD/IFDOCO orders, count: ' + activeIfdos.length)
 
-    let saxoSyncOrders = 0
-
     for (const order of activeIfdos) {
-        if (order.broker === 'saxo') {
-            if (saxoSyncOrders >= SAXO_MAX_SYNC_ORDERS_PER_RUN) {
-                ctx.logger.warn(
-                    {
-                        event: 'cron:saxo_exit_sync_skipped_limit',
-                        orderId: order.id,
-                        maxOrdersPerRun: SAXO_MAX_SYNC_ORDERS_PER_RUN,
-                    },
-                    'skipping Saxo exit execution sync due to per-run limit',
-                )
-                continue
-            }
-            saxoSyncOrders += 1
-        }
-
         const exitId = `${order.id}-exit`
 
         // 既存の exit レコードを取得

@@ -87,14 +87,23 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 
 ### ドキュメント ID
 - `task_status`（固定）
+- `saxo_orderactivities_poll_state` — Saxo audit orderactivities の batch polling 状態
 
 ### フィールド
+`task_status`:
+
 - `last_slot_10m` (number, required) — 10分周期タスクが最後に実行されたスロットID
 - `last_slot_1h` (number, required) — 1時間周期タスクが最後に実行されたスロットID
 - 新しい周期タスクを追加する場合は、対応する `last_slot_<interval>` フィールドを追加する
 
+`saxo_orderactivities_poll_state`:
+
+- `last_poll_at` (timestamp string, optional) — 最後に Saxo audit orderactivities の batch polling を試行した時刻
+- `next_poll_url` (string, optional) — Saxo の `__nextPoll` URL。空文字の場合は未保持として扱う
+
 ### 制約
-- Firestoreトランザクションを使用して読み書きを行い、重複実行を防止する
+- `task_status` は Firestoreトランザクションを使用して読み書きを行い、重複実行を防止する
+- `saxo_orderactivities_poll_state` は Saxo audit polling の cursor/lookback 管理専用で、30分超の実行間隔では `last_poll_at` から30分巻き戻して再取得する
 - TTLは不要（上書きで管理）
 
 ## 5. `daily_balances`
@@ -141,7 +150,7 @@ broker 別の日次残高スナップショットを保持する。`/api/balance
 - `provider_order_ids` (string[], required)
 - `broker_order_metadata` (map, optional)
   - `bitflyer_parent_order_v1`: parent acceptance id、entry 子注文、TP/SL 子注文の expected/resolved acceptance id を保持する
-  - `saxo_order_v1`: entry order id と、Saxo related orders の expected/resolved order id を保持する。Saxo の発注レスポンスで related order id が返らない場合、resolved order id は `null` のままとし、exit 同期は安全に no-op する
+  - `saxo_order_v1`: entry order id、`ExternalReference`、Saxo related orders の expected/resolved order id を保持する。Saxo の発注レスポンスで related order id が返らない場合、resolved order id は `null` のままとし、exit 同期は安全に no-op する。現状は Saxo 1アカウント前提のため account/client は保存していない。複数アカウント対応時は [saxo.md](./saxo.md) を参照して metadata と polling 状態を account/client ごとに分離する
 - `created_at` (timestamp, required)
 - `updated_at` (timestamp, required)
 

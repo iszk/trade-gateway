@@ -1,6 +1,6 @@
 ---
 title: Saxo の cron 約定同期を audit orderactivities の一括取得に寄せて API call 数を削減する
-status: todo
+status: wip
 ---
 
 # 概要
@@ -60,16 +60,16 @@ API call 削減は、注文ごとの audit call を減らし、cron 1 回あた�
 
 # 実装/修正プラン
 
-- [ ] Saxo 発注時に entry order と related/OCO child orders へ `ExternalReference` を付与する
-- [ ] `SaxoOrderMetadata` に `external_reference` など、必要な識別情報を保存する
-- [ ] Saxo audit activities を一括取得するメソッドを追加する
-- [ ] `OrderId` ごとの fill activity を集約し、価格・数量・約定時刻を算出するロジックを追加する
-- [ ] `cron-tasks` の Saxo PENDING / IFDOCO exit 同期で、可能な場合は一括取得結果を使って更新する
-- [ ] `OrderId` 単位の個別 audit call はフォールバックまたは移行期間用に限定する
-- [ ] rate limit 時は既存の cooldown 挙動を維持する
-- [ ] 一括取得で取りこぼしにくいように lookback window / cursor 保存方針を決める
-- [ ] Saxo API レスポンス例を使った単体テストを追加する
-- [ ] `mise run test` を通す
+- [x] Saxo 発注時に entry order と related/OCO child orders へ `ExternalReference` を付与する
+- [x] `SaxoOrderMetadata` に `external_reference` など、必要な識別情報を保存する
+- [x] Saxo audit activities を一括取得するメソッドを追加する
+- [x] `OrderId` ごとの fill activity を集約し、価格・数量・約定時刻を算出するロジックを追加する
+- [x] `cron-tasks` の Saxo PENDING / IFDOCO exit 同期で、可能な場合は一括取得結果を使って更新する
+- [x] `OrderId` 単位の個別 audit call はフォールバックまたは移行期間用に限定する
+- [x] rate limit 時は既存の cooldown 挙動を維持する
+- [x] 一括取得で取りこぼしにくいように lookback window / cursor 保存方針を決める
+- [x] Saxo API レスポンス例を使った単体テストを追加する
+- [x] `mise run test` を通す
 
 # 注意点
 
@@ -100,3 +100,16 @@ API call 削減は、注文ごとの audit call を減らし、cron 1 回あた�
 ## 2026-06-19 Codex
 
 起票した。Saxo の `ExternalReference` は識別補助として使い、API call 削減は `audit/orderactivities` の一括 polling と `OrderId` / metadata 突合で進める方針。
+
+## 2026-06-19 16:11 Codex GPT-5
+
+内容精査後、以下の方針で実装を進めた。
+
+- Saxo は現状どおり 1アカウント前提とし、`accounts[0].clientKey` を `orderactivities` batch polling に使う
+- 複数アカウント対応時に `account_key` / `client_key` の metadata 保存と polling 状態分離が必要な旨を `docs/saxo.md` に記載する
+- `cron_metadata/saxo_orderactivities_poll_state` に `last_poll_at` / `next_poll_url` を保存する
+- 前回 polling から30分以内で cursor がある場合は `__nextPoll` を使い、30分を超える場合は `last_poll_at` から30分巻き戻した時間範囲で取得する
+- 初回は48時間 lookback で取得する
+- orders_v2 の Saxo 同期は注文ごとの audit call ではなく、同一 client 内の batch cache から `OrderId` 突合する
+- `ExternalReference` は `tg:<event id 短縮値>` として entry / related orders に付与し、検索キーではなく識別補助として扱う
+- `mise run test` で typecheck と API/UI test が通過した

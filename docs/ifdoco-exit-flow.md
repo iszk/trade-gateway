@@ -72,8 +72,9 @@ Saxo は entry の Market order に `Orders` として関連注文を付ける�
 | `entry.resolved.order_id` | entry order id |
 | `exits[].expected` | `TAKE_PROFIT` / `STOP_LOSS`、side、order type、size、price |
 | `exits[].resolved.order_id` | Saxo の related order id。レスポンスに含まれない場合は `null` |
+| `external_reference` | Saxo 発注時に付与した `tg:` prefix の識別補助 |
 
-exit 同期では、解決済みの related order id ごとに `cs/v1/audit/orderactivities` を確認し、`FinalFill` または `Fill` の `AveragePrice` を約定価格として使う。Saxo の audit activity から数量を取れていないため、現時点では metadata の expected size と親注文の requested size から同期数量を決める。
+exit 同期では、`cs/v1/audit/orderactivities` を時間範囲または poll cursor で一括取得し、解決済みの related order id と突合する。`FinalFill` または `Fill` の `ExecutionPrice` / `AveragePrice` を約定価格として使い、`FillAmount` を優先して数量を合算する。`FillAmount` がない場合は `FilledAmount` / `Amount` を累積数量として扱う。数量フィールドがない古いレスポンスでは、互換 fallback として metadata の expected size と親注文の requested size から同期数量を決める。
 
 片側の related order だけが約定している場合は、その約定だけを exit レコードへ反映する。もう片側が未約定またはキャンセル済みで audit activity がない場合は無視する。Saxo の発注レスポンスで related order id が返らず `resolved.order_id === null` の場合、誤同期を避けるため exit 同期は no-op になる。
 

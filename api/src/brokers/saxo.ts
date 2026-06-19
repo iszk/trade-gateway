@@ -87,6 +87,11 @@ type SaxoOrderActivity = {
     LogId: string
     OrderId: string
     Status: string
+    ExternalReference?: string
+    Amount?: number
+    FillAmount?: number
+    FilledAmount?: number
+    ExecutionPrice?: number
     AveragePrice?: number
     ActivityTime?: string
     ExecutionTime?: string
@@ -95,6 +100,13 @@ type SaxoOrderActivity = {
 
 type SaxoOrderActivitiesResponse = {
     Data: SaxoOrderActivity[]
+    __next?: string
+    __nextPoll?: string
+}
+
+type SaxoOrderActivitiesPollState = {
+    last_poll_at?: string
+    next_poll_url?: string
 }
 
 const parseSaxoActivityTime = (activity: SaxoOrderActivity): Date | undefined => {
@@ -121,7 +133,14 @@ type SaxoInstrumentResponse = {
 
 const FIRESTORE_COLLECTION = 'saxo_auth_data'
 const FIRESTORE_DOC = 'saxo_auth'
+const CRON_METADATA_COLLECTION = 'cron_metadata'
+const SAXO_ORDER_ACTIVITIES_POLL_DOC = 'saxo_orderactivities_poll_state'
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000
+const SAXO_AUDIT_INITIAL_LOOKBACK_MS = 48 * 60 * 60 * 1000
+const SAXO_AUDIT_OVERLAP_MS = 30 * 60 * 1000
+const SAXO_AUDIT_CURSOR_MAX_IDLE_MS = 30 * 60 * 1000
+const SAXO_AUDIT_BATCH_CACHE_MS = 60 * 1000
+const SAXO_AUDIT_MAX_PAGES_PER_POLL = 10
 
 const parseRetryAfterMs = (value: string | null): number | null => {
     if (!value) return null
@@ -135,6 +154,87 @@ const parseRetryAfterMs = (value: string | null): number | null => {
     if (Number.isNaN(retryAt)) return null
 
     return Math.max(0, retryAt - Date.now())
+}
+
+const isSaxoFillActivity = (activity: SaxoOrderActivity): boolean => (
+    (activity.Status === 'FinalFill' || activity.Status === 'Fill') &&
+    (typeof activity.ExecutionPrice === 'number' || typeof activity.AveragePrice === 'number')
+)
+
+const getSaxoActivityPrice = (activity: SaxoOrderActivity): number | null => (
+    typeof activity.ExecutionPrice === 'number'
+        ? activity.ExecutionPrice
+        : typeof activity.AveragePrice === 'number'
+            ? activity.AveragePrice
+            : null
+)
+
+const getSaxoActivityFillAmount = (activity: SaxoOrderActivity): number | null => {
+    if (typeof activity.FillAmount !== 'number') return null
+    const amount = Math.abs(activity.FillAmount)
+    return amount > 0 ? amount : null
+}
+
+const getSaxoActivityCumulativeAmount = (activity: SaxoOrderActivity): number | null => {
+    const rawAmount = typeof activity.FilledAmount === 'number'
+        ? activity.FilledAmount
+        : typeof activity.Amount === 'number'
+            ? activity.Amount
+            : undefined
+    if (typeof rawAmount !== 'number') return null
+    const amount = Math.abs(rawAmount)
+    return amount > 0 ? amount : null
+}
+
+const aggregateSaxoExecution = (
+    activities: SaxoOrderActivity[],
+    fallbackSize?: number,
+): { price: number, size: number, executed_at?: Date } | null => {
+    const fills = activities
+        .filter(isSaxoFillActivity)
+        .sort((a, b) => (parseSaxoActivityTime(a)?.getTime() ?? 0) - (parseSaxoActivityTime(b)?.getTime() ?? 0))
+    if (fills.length === 0) return null
+
+    let latestExecutedAt: Date | undefined
+    for (const fill of fills) {
+        const executedAt = parseSaxoActivityTime(fill)
+        if (executedAt && (!latestExecutedAt || executedAt.getTime() > latestExecutedAt.getTime())) {
+            latestExecutedAt = executedAt
+        }
+    }
+
+    const perFillAmounts = fills.map((fill) => ({
+        amount: getSaxoActivityFillAmount(fill),
+        price: getSaxoActivityPrice(fill),
+    }))
+    if (perFillAmounts.some((item) => item.amount !== null)) {
+        let totalSize = 0
+        let totalValue = 0
+        for (const item of perFillAmounts) {
+            if (item.amount === null || item.price === null) continue
+            totalSize += item.amount
+            totalValue += item.price * item.amount
+        }
+        if (totalSize > 0) {
+            return { price: totalValue / totalSize, size: totalSize, executed_at: latestExecutedAt }
+        }
+    }
+
+    const latestFill = fills[fills.length - 1]
+    if (!latestFill) return null
+    const latestPrice = getSaxoActivityPrice(latestFill)
+    if (latestPrice === null) return null
+
+    const cumulativeSize = Math.max(
+        ...fills
+            .map(getSaxoActivityCumulativeAmount)
+            .filter((amount): amount is number => amount !== null),
+        0,
+    )
+    const size = cumulativeSize > 0 ? cumulativeSize : fallbackSize
+    if (typeof size !== 'number' || size <= 0) return null
+
+    return { price: latestPrice, size, executed_at: latestExecutedAt }
 }
 
 function parsePercentage(value: string): number | null {
@@ -153,6 +253,7 @@ type SaxoRelatedOrder = {
     OrderType: 'StopIfTraded' | 'Limit'
     OrderPrice: number
     OrderDuration: { DurationType: string }
+    ExternalReference?: string
 }
 
 type SaxoProductInfo = {
@@ -167,6 +268,11 @@ type OrdersV2ExecutionSyncResult = {
 
 const toOrderSide = (side: 'Buy' | 'Sell'): 'BUY' | 'SELL' => side === 'Buy' ? 'BUY' : 'SELL'
 
+const buildSaxoExternalReference = (eventId: string): string => {
+    const normalized = eventId.trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 47)
+    return `tg:${normalized || 'order'}`
+}
+
 const buildSaxoOrderMetadata = (
     order: OrderRequest,
     orderId: string,
@@ -175,9 +281,12 @@ const buildSaxoOrderMetadata = (
 ): SaxoOrderMetadata | undefined => {
     if (relatedOrders.length === 0) return undefined
 
+    const externalReference = buildSaxoExternalReference(order.eventId)
+
     return {
         kind: 'saxo_order_v1',
         order_id: orderId,
+        external_reference: externalReference,
         entry: {
             expected: {
                 side: order.side,
@@ -186,6 +295,7 @@ const buildSaxoOrderMetadata = (
             },
             resolved: {
                 order_id: orderId,
+                external_reference: externalReference,
             },
         },
         exits: relatedOrders.map((relatedOrder, index) => ({
@@ -198,6 +308,7 @@ const buildSaxoOrderMetadata = (
             },
             resolved: {
                 order_id: relatedOrderIds[index] ?? null,
+                external_reference: relatedOrder.ExternalReference,
             },
         })),
     }
@@ -219,6 +330,10 @@ export class SaxoClient {
     private readonly logger: Logger
     private readonly rateLimitCooldownMs: number
     private rateLimitedUntilMs = 0
+    private auditActivitiesCache?: {
+        fetchedAtMs: number
+        activities: SaxoOrderActivity[]
+    }
 
     constructor(options: SaxoClientOptions = {}) {
         this.appKey = options.appKey
@@ -234,6 +349,16 @@ export class SaxoClient {
 
     private getFirestore(): Firestore {
         return this.db ?? getFirestoreClient()
+    }
+
+    private buildSaxoApiUrl(pathOrUrl: string): string {
+        if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
+            return pathOrUrl
+        }
+        if (pathOrUrl.startsWith('/')) {
+            return `${this.baseUrl}${pathOrUrl}`
+        }
+        return `${this.baseUrl}/${pathOrUrl}`
     }
 
     private buildFailure(
@@ -265,6 +390,142 @@ export class SaxoClient {
             },
             'Saxo API rate limited; suppressing audit calls temporarily',
         )
+    }
+
+    private async getOrderActivitiesPollState(): Promise<SaxoOrderActivitiesPollState> {
+        const doc = await this.getFirestore()
+            .collection(CRON_METADATA_COLLECTION)
+            .doc(SAXO_ORDER_ACTIVITIES_POLL_DOC)
+            .get()
+        return doc.exists ? doc.data() as SaxoOrderActivitiesPollState : {}
+    }
+
+    private async saveOrderActivitiesPollState(state: SaxoOrderActivitiesPollState): Promise<void> {
+        const docRef = this.getFirestore()
+            .collection(CRON_METADATA_COLLECTION)
+            .doc(SAXO_ORDER_ACTIVITIES_POLL_DOC)
+        await setFirestoreDocument(
+            docRef,
+            state as Record<string, unknown>,
+            {
+                collection: CRON_METADATA_COLLECTION,
+                docId: SAXO_ORDER_ACTIVITIES_POLL_DOC,
+                logger: this.logger,
+            },
+            { merge: true },
+        )
+    }
+
+    private buildOrderActivitiesInitialUrl(auth: SaxoAuthData, state: SaxoOrderActivitiesPollState, now: Date): string {
+        const params = new URLSearchParams()
+        const clientKey = auth.accounts?.[0]?.clientKey
+        if (clientKey) {
+            params.append('ClientKey', clientKey)
+        }
+        params.append('$top', '1000')
+
+        const lastPollMs = state.last_poll_at ? Date.parse(state.last_poll_at) : NaN
+        const hasRecentCursor = Number.isFinite(lastPollMs) &&
+            now.getTime() - lastPollMs <= SAXO_AUDIT_CURSOR_MAX_IDLE_MS &&
+            state.next_poll_url
+
+        if (hasRecentCursor && state.next_poll_url) {
+            return this.buildSaxoApiUrl(state.next_poll_url)
+        }
+
+        const fromMs = Number.isFinite(lastPollMs)
+            ? Math.max(0, lastPollMs - SAXO_AUDIT_OVERLAP_MS)
+            : now.getTime() - SAXO_AUDIT_INITIAL_LOOKBACK_MS
+
+        params.append('FromDateTime', new Date(fromMs).toISOString())
+        params.append('ToDateTime', now.toISOString())
+        return `${this.baseUrl}/cs/v1/audit/orderactivities/?${params.toString()}`
+    }
+
+    private async fetchOrderActivitiesBatch(): Promise<SaxoOrderActivity[]> {
+        if (this.auditActivitiesCache && Date.now() - this.auditActivitiesCache.fetchedAtMs <= SAXO_AUDIT_BATCH_CACHE_MS) {
+            return this.auditActivitiesCache.activities
+        }
+
+        const cacheActivities = (activities: SaxoOrderActivity[]): SaxoOrderActivity[] => {
+            this.auditActivitiesCache = {
+                fetchedAtMs: Date.now(),
+                activities,
+            }
+            return activities
+        }
+
+        if (this.isRateLimited()) {
+            this.logger.warn(
+                {
+                    event: 'saxo:orderactivities_batch_skipped_rate_limited',
+                    rateLimitedUntil: new Date(this.rateLimitedUntilMs).toISOString(),
+                },
+                'skipping Saxo audit batch request while rate limited',
+            )
+            return cacheActivities([])
+        }
+
+        const accessToken = await this.getValidAccessToken()
+        if (!accessToken) return cacheActivities([])
+
+        const auth = await this.getAuth()
+        if (!auth) return cacheActivities([])
+
+        const now = new Date()
+        const state = await this.getOrderActivitiesPollState()
+        let url: string | undefined = this.buildOrderActivitiesInitialUrl(auth, state, now)
+        const activities: SaxoOrderActivity[] = []
+        let nextPollUrl: string | undefined
+
+        for (let page = 0; url && page < SAXO_AUDIT_MAX_PAGES_PER_POLL; page += 1) {
+            const response = await this.fetchImpl(url, {
+                headers: { Authorization: `Bearer ${accessToken}` },
+            })
+
+            if (!response.ok) {
+                if (response.status === 429) {
+                    this.markRateLimited(response)
+                }
+                this.logger.warn(
+                    {
+                        event: 'saxo:orderactivities_batch_failed',
+                        status: response.status,
+                        response: await response.text(),
+                    },
+                    'failed to fetch Saxo audit orderactivities batch',
+                )
+                return cacheActivities([])
+            }
+
+            const data = (await response.json()) as SaxoOrderActivitiesResponse
+            activities.push(...(data.Data ?? []))
+            nextPollUrl = data.__nextPoll ?? nextPollUrl
+            url = data.__next ? this.buildSaxoApiUrl(data.__next) : undefined
+        }
+
+        if (url) {
+            this.logger.warn(
+                {
+                    event: 'saxo:orderactivities_batch_page_limit_reached',
+                    maxPages: SAXO_AUDIT_MAX_PAGES_PER_POLL,
+                },
+                'Saxo audit orderactivities page limit reached; poll state was not advanced',
+            )
+        } else {
+            await this.saveOrderActivitiesPollState({
+                last_poll_at: now.toISOString(),
+                next_poll_url: nextPollUrl ?? '',
+            })
+        }
+
+        return cacheActivities(activities)
+    }
+
+    private async getExecutionFromRecentActivities(orderId: string, fallbackSize?: number): Promise<{ price: number, size: number, executed_at?: Date } | null> {
+        const activities = await this.fetchOrderActivitiesBatch()
+        const matchingActivities = activities.filter((activity) => activity.OrderId === orderId)
+        return aggregateSaxoExecution(matchingActivities, fallbackSize)
     }
 
     async getAuth(): Promise<SaxoAuthData | null> {
@@ -488,6 +749,7 @@ export class SaxoClient {
         // TODO: AssetType をサポートする account が複数あった場合の対応
 
         const closingSide = order.side === 'BUY' ? 'Sell' : 'Buy'
+        const externalReference = buildSaxoExternalReference(order.eventId)
 
         const relatedOrders: SaxoRelatedOrder[] = []
 
@@ -519,6 +781,7 @@ export class SaxoClient {
                         OrderType: 'StopIfTraded',
                         OrderPrice: stopPrice,
                         OrderDuration: { DurationType: 'GoodTillCancel' },
+                        ExternalReference: externalReference,
                     })
                 }
             }
@@ -543,6 +806,7 @@ export class SaxoClient {
                         OrderType: 'Limit',
                         OrderPrice: limitPrice,
                         OrderDuration: { DurationType: 'GoodTillCancel' },
+                        ExternalReference: externalReference,
                     })
                 }
             }
@@ -557,6 +821,7 @@ export class SaxoClient {
             OrderType: 'Market',
             OrderDuration: { DurationType: 'DayOrder' },
             ManualOrder: false,
+            ExternalReference: externalReference,
             ...(relatedOrders.length > 0 ? { Orders: relatedOrders } : {}),
         }
 
@@ -805,12 +1070,12 @@ export class SaxoClient {
         const metadata = order.broker_order_metadata
         if (metadata?.kind !== 'saxo_order_v1') {
             return {
-                execution: await this.getExecutionPrice(providerOrderId, order.ticker),
+                execution: await this.getExecutionFromRecentActivities(providerOrderId, order.requested_size),
             }
         }
 
         const entryOrderId = metadata.entry.resolved.order_id || metadata.order_id || providerOrderId
-        const execution = await this.getExecutionPrice(entryOrderId, order.ticker)
+        const execution = await this.getExecutionFromRecentActivities(entryOrderId, metadata.entry.expected.size)
         return {
             execution: execution ? { ...execution, size: execution.size || order.requested_size } : null,
             brokerOrderMetadata: metadata,
@@ -836,7 +1101,7 @@ export class SaxoClient {
             const exitOrderId = exit.resolved.order_id
             if (!exitOrderId) continue
 
-            const execution = await this.getExecutionPrice(exitOrderId, order.ticker)
+            const execution = await this.getExecutionFromRecentActivities(exitOrderId, Math.min(exit.expected.size, order.requested_size))
             if (!execution) continue
 
             const size = execution.size || Math.min(exit.expected.size, order.requested_size)
