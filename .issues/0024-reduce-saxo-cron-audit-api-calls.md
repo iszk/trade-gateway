@@ -1,6 +1,6 @@
 ---
 title: Saxo の cron 約定同期を audit orderactivities の一括取得に寄せて API call 数を削減する
-status: wip
+status: done
 ---
 
 # 概要
