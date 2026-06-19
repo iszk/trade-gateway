@@ -170,6 +170,70 @@ test('executeTenMinutelyTask: orders_v2 の entry metadata 解決結果を保存
     assert.equal(updatedOrders[0].status, undefined)
 })
 
+test('executeTenMinutelyTask: 古い Saxo PENDING 注文は約定同期をスキップする', async () => {
+    const oldPendingOrder: any = {
+        id: 'v2-saxo-stale-pending',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        order_type: 'MARKET',
+        status: 'PENDING',
+        provider_order_ids: ['ORD-stale-pending'],
+        requested_size: 1000,
+        created_at: new Date(Date.now() - 25 * 60 * 60 * 1000),
+    }
+    let fetchCount = 0
+    const updatedOrders: any[] = []
+
+    const ctx = makeBaseCtx({
+        getPendingOrdersV2: async () => [oldPendingOrder],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPrice: async () => {
+                    fetchCount += 1
+                    return { price: 101.5, size: 1000 }
+                },
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(fetchCount, 0)
+    assert.equal(updatedOrders.length, 0)
+})
+
+test('executeTenMinutelyTask: Saxo PENDING 注文の約定同期は1回あたり10件までに制限する', async () => {
+    const pendingOrders = Array.from({ length: 12 }, (_, index) => ({
+        id: `v2-saxo-pending-${index}`,
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        order_type: 'MARKET',
+        status: 'PENDING',
+        provider_order_ids: [`ORD-saxo-pending-${index}`],
+        requested_size: 1000,
+        created_at: new Date(),
+    } as any))
+    let fetchCount = 0
+
+    const ctx = makeBaseCtx({
+        getPendingOrdersV2: async () => pendingOrders,
+        updateOrderV2: async () => { },
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPrice: async () => {
+                    fetchCount += 1
+                    return null
+                },
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(fetchCount, 10)
+})
+
 test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコードを作成・更新する (部分約定対応)', async () => {
     const order: any = {
         id: 'v2-ifd-partial',
@@ -391,4 +455,42 @@ test('executeTenMinutelyTask: Saxo の closingExecutionFetcher で exit レコ�
     assert.equal(addedOrders[0].broker, 'saxo')
     assert.equal(addedOrders[0].executed_price, 105)
     assert.deepEqual(updatedOrders[0], { id: 'v2-saxo-ifd', exit_sync_status: 'COMPLETED' })
+})
+
+test('executeTenMinutelyTask: Saxo exit 同期は1回あたり10件までに制限する', async () => {
+    const orders = Array.from({ length: 12 }, (_, index) => ({
+        id: `v2-saxo-ifd-limit-${index}`,
+        strategy: 'saxo-strategy',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        status: 'EXECUTED',
+        exit_sync_status: 'MONITORING',
+        provider_order_ids: [`ORD-saxo-entry-${index}`],
+        requested_size: 1,
+        executed_size: 1,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        executed_at: new Date('2026-01-01T00:01:00Z'),
+    } as any))
+    let fetchCount = 0
+
+    const ctx = makeBaseCtx({
+        getActiveIfdOrdersV2: async () => orders,
+        getOrderV2: async () => null,
+        addOrderV2: async () => { },
+        updateOrderV2: async () => { },
+        closingExecutionFetchers: {
+            saxo: {
+                getClosingExecution: async () => {
+                    fetchCount += 1
+                    return null
+                },
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(fetchCount, 10)
 })

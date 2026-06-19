@@ -11,6 +11,9 @@ type PositionFetcherLike = {
     fetchAllPositions(broker?: string): Promise<unknown[]>
 }
 
+const SAXO_PENDING_SYNC_MAX_AGE_MS = 24 * 60 * 60 * 1000
+const SAXO_MAX_SYNC_ORDERS_PER_RUN = 10
+
 export type ExecutionInfo = {
     price: number
     size: number
@@ -22,15 +25,29 @@ export type OrdersV2ExecutionSyncResult = {
     brokerOrderMetadata?: BrokerOrderMetadata
 }
 
-export type ExecutionPriceFetcherLike = {
+type LegacyExecutionPriceFetcherLike = {
     getExecutionPrice(providerOrderId: string, ticker: string): Promise<ExecutionInfo | null>
-    getExecutionPriceForOrderV2?(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+    getExecutionPriceForOrderV2?: never
 }
 
-export type ClosingExecutionFetcherLike = {
-    getClosingExecution(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
-    getClosingExecutionForOrderV2?(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+type OrdersV2ExecutionPriceFetcherLike = {
+    getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+    getExecutionPrice?(providerOrderId: string, ticker: string): Promise<ExecutionInfo | null>
 }
+
+type LegacyClosingExecutionFetcherLike = {
+    getClosingExecution(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
+    getClosingExecutionForOrderV2?: never
+}
+
+type OrdersV2ClosingExecutionFetcherLike = {
+    getClosingExecutionForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+    getClosingExecution?(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
+}
+
+export type ExecutionPriceFetcherLike = OrdersV2ExecutionPriceFetcherLike | LegacyExecutionPriceFetcherLike
+
+export type ClosingExecutionFetcherLike = OrdersV2ClosingExecutionFetcherLike | LegacyClosingExecutionFetcherLike
 
 export type CronContext = {
     logger: Logger
@@ -49,8 +66,17 @@ const resolveExecutedAt = (order: Pick<OrderV2, 'created_at' | 'executed_at'>, e
     execution.executed_at ?? order.executed_at ?? order.created_at
 )
 
+const getOrderAgeMs = (order: Pick<OrderV2, 'created_at'>, nowMs: number): number => (
+    nowMs - order.created_at.getTime()
+)
+
+const shouldSkipStaleSaxoPendingOrder = (order: OrderV2, nowMs: number): boolean => (
+    order.broker === 'saxo' && order.order_type === 'MARKET' && getOrderAgeMs(order, nowMs) > SAXO_PENDING_SYNC_MAX_AGE_MS
+)
+
 export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:ten_minutely_task' }, '10-minute task executed')
+    const nowMs = Date.now()
 
     // saxo の oauth token リフレッシュ用
     const broker = 'saxo'
@@ -64,6 +90,7 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             executionPriceFetchers: ctx.executionPriceFetchers,
             getPendingOrdersV2: ctx.getPendingOrdersV2,
             updateOrderV2: ctx.updateOrderV2,
+            nowMs,
         })
     }
 
@@ -90,6 +117,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
     executionPriceFetchers: Partial<Record<string, ExecutionPriceFetcherLike>>
     getPendingOrdersV2: GetPendingOrdersV2Fn
     updateOrderV2: UpdateOrderV2Fn
+    nowMs: number
 }): Promise<void> => {
     const pendingOrders = await ctx.getPendingOrdersV2()
     ctx.logger.info(
@@ -97,7 +125,37 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
         'syncing pending orders_v2',
     )
 
+    let saxoSyncOrders = 0
+
     for (const order of pendingOrders) {
+        if (shouldSkipStaleSaxoPendingOrder(order, ctx.nowMs)) {
+            ctx.logger.warn(
+                {
+                    event: 'cron:saxo_pending_order_sync_skipped_stale',
+                    orderId: order.id,
+                    created_at: order.created_at.toISOString(),
+                    maxAgeMs: SAXO_PENDING_SYNC_MAX_AGE_MS,
+                },
+                'skipping stale Saxo pending order execution sync',
+            )
+            continue
+        }
+
+        if (order.broker === 'saxo') {
+            if (saxoSyncOrders >= SAXO_MAX_SYNC_ORDERS_PER_RUN) {
+                ctx.logger.warn(
+                    {
+                        event: 'cron:saxo_pending_order_sync_skipped_limit',
+                        orderId: order.id,
+                        maxOrdersPerRun: SAXO_MAX_SYNC_ORDERS_PER_RUN,
+                    },
+                    'skipping Saxo pending order execution sync due to per-run limit',
+                )
+                continue
+            }
+            saxoSyncOrders += 1
+        }
+
         const fetcher = ctx.executionPriceFetchers[order.broker]
         if (!fetcher) {
             ctx.logger.info(
@@ -178,7 +236,24 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
         ids: activeIfdos.map((o) => o.id),
     }, 'syncing exits for executed IFD/IFDOCO orders, count: ' + activeIfdos.length)
 
+    let saxoSyncOrders = 0
+
     for (const order of activeIfdos) {
+        if (order.broker === 'saxo') {
+            if (saxoSyncOrders >= SAXO_MAX_SYNC_ORDERS_PER_RUN) {
+                ctx.logger.warn(
+                    {
+                        event: 'cron:saxo_exit_sync_skipped_limit',
+                        orderId: order.id,
+                        maxOrdersPerRun: SAXO_MAX_SYNC_ORDERS_PER_RUN,
+                    },
+                    'skipping Saxo exit execution sync due to per-run limit',
+                )
+                continue
+            }
+            saxoSyncOrders += 1
+        }
+
         const exitId = `${order.id}-exit`
 
         // 既存の exit レコードを取得

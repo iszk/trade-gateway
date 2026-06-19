@@ -1,16 +1,20 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient, setFirestoreDocument } from '../firestore.js'
 import { BitflyerClient } from '../brokers/bitflyer.js'
+import { SaxoClient } from '../brokers/saxo.js'
 import { config } from '../config.js'
 import type { BrokerBalance, Balance } from '../types/balance.js'
+import type { BrokerName } from '../types/balance.js'
 
 export class BalanceFetcher {
     private readonly db: Firestore
     private readonly bitflyerClient: BitflyerClient
+    private readonly saxoClient: SaxoClient
 
-    constructor(options: { db?: Firestore, bitflyerClient?: BitflyerClient } = {}) {
+    constructor(options: { db?: Firestore, bitflyerClient?: BitflyerClient, saxoClient?: SaxoClient } = {}) {
         this.db = options.db ?? getFirestoreClient()
         this.bitflyerClient = options.bitflyerClient ?? new BitflyerClient(config.bitflyer)
+        this.saxoClient = options.saxoClient ?? new SaxoClient(config.saxo)
     }
 
     private getJstDate(): string {
@@ -22,6 +26,28 @@ export class BalanceFetcher {
             day: '2-digit',
             timeZone: 'Asia/Tokyo'
         }).replace(/\//g, '-')
+    }
+
+    private async storeBrokerBalance(broker: BrokerName, balances: Balance[]): Promise<BrokerBalance> {
+        const brokerBalance: BrokerBalance = {
+            broker,
+            balances,
+            updatedAt: Date.now()
+        }
+
+        const date = this.getJstDate()
+        const docId = `${date}_${broker}`
+        const docRef = this.db.collection('daily_balances').doc(docId)
+
+        await setFirestoreDocument(docRef, {
+            ...brokerBalance,
+            date
+        }, {
+            collection: 'daily_balances',
+            docId,
+        })
+
+        return brokerBalance
     }
 
     async fetchAndStoreBitflyerBalances(): Promise<BrokerBalance> {
@@ -44,30 +70,19 @@ export class BalanceFetcher {
             })
         }
 
-        const brokerBalance: BrokerBalance = {
-            broker: 'bitflyer',
-            balances: filteredBalances,
-            updatedAt: Date.now()
-        }
+        return this.storeBrokerBalance('bitflyer', filteredBalances)
+    }
 
-        const date = this.getJstDate()
-        const docId = `${date}_bitflyer`
-        const docRef = this.db.collection('daily_balances').doc(docId)
-
-        await setFirestoreDocument(docRef, {
-            ...brokerBalance,
-            date
-        }, {
-            collection: 'daily_balances',
-            docId,
-        })
-
-        return brokerBalance
+    async fetchAndStoreSaxoBalances(): Promise<BrokerBalance> {
+        const balances = await this.saxoClient.getBalances()
+        return this.storeBrokerBalance('saxo', balances)
     }
 
     async fetchAllBalances(): Promise<BrokerBalance[]> {
-        // For now, only bitflyer is implemented as requested
-        const bitflyerBalance = await this.fetchAndStoreBitflyerBalances()
-        return [bitflyerBalance]
+        const [bitflyerBalance, saxoBalance] = await Promise.all([
+            this.fetchAndStoreBitflyerBalances(),
+            this.fetchAndStoreSaxoBalances(),
+        ])
+        return [bitflyerBalance, saxoBalance]
     }
 }
