@@ -257,6 +257,37 @@ test('SaxoClient.getExecutionPrice returns null when activities are empty', asyn
     assert.equal(result, null)
 })
 
+test('SaxoClient.getExecutionPrice suppresses audit calls after rate limit response', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    let fetchCount = 0
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            fetchCount += 1
+            return new Response('Too Many Requests', {
+                status: 429,
+                headers: { 'retry-after': '60' },
+            })
+        },
+    })
+
+    const first = await client.getExecutionPrice('ORD-rate-limited-1', 'USDJPY')
+    const second = await client.getExecutionPrice('ORD-rate-limited-2', 'USDJPY')
+
+    assert.equal(first, null)
+    assert.equal(second, null)
+    assert.equal(fetchCount, 1)
+})
+
 test('SaxoClient.getBalances fetches logged-in account balance and filters zero values', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

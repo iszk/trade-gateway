@@ -16,6 +16,7 @@ type SaxoClientOptions = {
     fetchImpl?: typeof fetch
     db?: Firestore
     logger?: Logger
+    rateLimitCooldownMs?: number
 }
 
 type SaxoAccountInfo = {
@@ -120,6 +121,21 @@ type SaxoInstrumentResponse = {
 
 const FIRESTORE_COLLECTION = 'saxo_auth_data'
 const FIRESTORE_DOC = 'saxo_auth'
+const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000
+
+const parseRetryAfterMs = (value: string | null): number | null => {
+    if (!value) return null
+
+    const seconds = Number(value)
+    if (Number.isFinite(seconds) && seconds > 0) {
+        return seconds * 1000
+    }
+
+    const retryAt = Date.parse(value)
+    if (Number.isNaN(retryAt)) return null
+
+    return Math.max(0, retryAt - Date.now())
+}
 
 function parsePercentage(value: string): number | null {
     const match = value.trim().match(/^(\d+(?:\.\d+)?)%$/)
@@ -201,6 +217,8 @@ export class SaxoClient {
     private readonly fetchImpl: typeof fetch
     private readonly db?: Firestore
     private readonly logger: Logger
+    private readonly rateLimitCooldownMs: number
+    private rateLimitedUntilMs = 0
 
     constructor(options: SaxoClientOptions = {}) {
         this.appKey = options.appKey
@@ -211,6 +229,7 @@ export class SaxoClient {
         this.fetchImpl = options.fetchImpl ?? fetch
         this.db = options.db
         this.logger = options.logger ?? defaultLogger
+        this.rateLimitCooldownMs = options.rateLimitCooldownMs ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS
     }
 
     private getFirestore(): Firestore {
@@ -227,6 +246,25 @@ export class SaxoClient {
             code,
             message,
         }
+    }
+
+    private isRateLimited(): boolean {
+        return this.rateLimitedUntilMs > Date.now()
+    }
+
+    private markRateLimited(response: Response): void {
+        const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'))
+        const cooldownMs = retryAfterMs ?? this.rateLimitCooldownMs
+        this.rateLimitedUntilMs = Date.now() + cooldownMs
+        this.logger.warn(
+            {
+                event: 'saxo:rate_limited',
+                status: response.status,
+                cooldownMs,
+                rateLimitedUntil: new Date(this.rateLimitedUntilMs).toISOString(),
+            },
+            'Saxo API rate limited; suppressing audit calls temporarily',
+        )
     }
 
     async getAuth(): Promise<SaxoAuthData | null> {
@@ -665,6 +703,17 @@ export class SaxoClient {
 
     async getExecutionPrice(orderId: string, _ticker: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
         if (orderId === 'DRY_RUN') return null
+        if (this.isRateLimited()) {
+            this.logger.warn(
+                {
+                    event: 'saxo:get_execution_price_skipped_rate_limited',
+                    orderId,
+                    rateLimitedUntil: new Date(this.rateLimitedUntilMs).toISOString(),
+                },
+                'skipping Saxo audit request while rate limited',
+            )
+            return null
+        }
 
         const accessToken = await this.getValidAccessToken()
         if (!accessToken) return null
@@ -686,6 +735,9 @@ export class SaxoClient {
             })
 
             if (!response.ok) {
+                if (response.status === 429) {
+                    this.markRateLimited(response)
+                }
                 this.logger.warn(
                     {
                         event: 'saxo:get_execution_price_failed',
