@@ -1,6 +1,6 @@
 ---
 title: fetchAllBalances 実行時に broker 間で daily_balances の日付がずれる問題を解消する
-status: todo
+status: wip
 ---
 
 # 概要
@@ -35,3 +35,9 @@ status: todo
 ## 2026-06-19 12:35 GitHub Copilot GPT-5.3-Codex
 
 起票した。`fetchAllBalances()` の並列保存で日付境界をまたぐと broker ごとの `docId` が分かれる可能性があり、同一バッチ内での日付固定が必要。
+
+## 2026-06-23 00:27 Codex GPT-5
+
+`fetchAllBalances()` 開始時点で JST 日付を 1 回だけ確定し、bitFlyer/Saxo の保存処理へ同じ日付を渡すように変更した。
+日付境界直前に基準日付を確定した場合でも両 broker の `daily_balances` docId と `date` が一致するテストを追加した。
+DB仕様に、`fetchAllBalances()` 1 回の保存では開始時点の JST 日付を全 broker に共通適用する旨を追記した。

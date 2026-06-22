@@ -126,3 +126,53 @@ test('BalanceFetcher fetches all implemented broker balances', async () => {
     assert.ok(capturedDocIds.some(id => id.endsWith('_bitflyer')))
     assert.ok(capturedDocIds.some(id => id.endsWith('_saxo')))
 })
+
+test('BalanceFetcher uses one JST date for all broker stores in fetchAllBalances', async () => {
+    const mockBitflyerClient = {
+        getBalances: async () => [
+            { currency_code: 'JPY', amount: 100, available: 100 },
+        ],
+        getCollateral: async () => null,
+    } as unknown as BitflyerClient
+    const mockSaxoClient = {
+        getBalances: async () => [
+            { asset: 'USD', amount: 1000 },
+        ],
+    } as unknown as SaxoClient
+
+    const capturedDocIds: string[] = []
+    const capturedDates: string[] = []
+
+    const mockFirestore = {
+        collection: (_col: string) => ({
+            doc: (docId: string) => ({
+                set: async (data: any) => {
+                    capturedDocIds.push(docId)
+                    capturedDates.push(data.date)
+                }
+            })
+        })
+    } as any
+
+    let nowCallCount = 0
+    const fetcher = new BalanceFetcher({
+        db: mockFirestore,
+        bitflyerClient: mockBitflyerClient,
+        saxoClient: mockSaxoClient,
+        now: () => {
+            nowCallCount += 1
+            return nowCallCount === 1
+                ? new Date('2026-01-01T14:59:59.999Z')
+                : new Date('2026-01-01T15:00:00.000Z')
+        },
+    })
+
+    await fetcher.fetchAllBalances()
+
+    assert.equal(nowCallCount, 1)
+    assert.deepEqual(capturedDocIds.sort(), [
+        '2026-01-01_bitflyer',
+        '2026-01-01_saxo',
+    ])
+    assert.deepEqual(capturedDates, ['2026-01-01', '2026-01-01'])
+})

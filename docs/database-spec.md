@@ -113,6 +113,7 @@ broker 別の日次残高スナップショットを保持する。`/api/balance
 ### ドキュメント ID
 - `{YYYY-MM-DD}_{broker}`
 - 例: `2026-06-09_bitflyer`, `2026-06-09_saxo`
+- `BalanceFetcher.fetchAllBalances()` 1 回の保存では、開始時点の JST 日付を全 broker のキーに共通適用する
 
 ### フィールド
 - `broker` (string, required)

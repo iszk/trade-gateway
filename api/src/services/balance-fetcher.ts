@@ -10,15 +10,17 @@ export class BalanceFetcher {
     private readonly db: Firestore
     private readonly bitflyerClient: BitflyerClient
     private readonly saxoClient: SaxoClient
+    private readonly now: () => Date
 
-    constructor(options: { db?: Firestore, bitflyerClient?: BitflyerClient, saxoClient?: SaxoClient } = {}) {
+    constructor(options: { db?: Firestore, bitflyerClient?: BitflyerClient, saxoClient?: SaxoClient, now?: () => Date } = {}) {
         this.db = options.db ?? getFirestoreClient()
         this.bitflyerClient = options.bitflyerClient ?? new BitflyerClient(config.bitflyer)
         this.saxoClient = options.saxoClient ?? new SaxoClient(config.saxo)
+        this.now = options.now ?? (() => new Date())
     }
 
     private getJstDate(): string {
-        const now = new Date()
+        const now = this.now()
         // Format as YYYY-MM-DD in JST
         return now.toLocaleDateString('ja-JP', {
             year: 'numeric',
@@ -28,14 +30,13 @@ export class BalanceFetcher {
         }).replace(/\//g, '-')
     }
 
-    private async storeBrokerBalance(broker: BrokerName, balances: Balance[]): Promise<BrokerBalance> {
+    private async storeBrokerBalance(broker: BrokerName, balances: Balance[], date: string): Promise<BrokerBalance> {
         const brokerBalance: BrokerBalance = {
             broker,
             balances,
             updatedAt: Date.now()
         }
 
-        const date = this.getJstDate()
         const docId = `${date}_${broker}`
         const docRef = this.db.collection('daily_balances').doc(docId)
 
@@ -50,7 +51,7 @@ export class BalanceFetcher {
         return brokerBalance
     }
 
-    async fetchAndStoreBitflyerBalances(): Promise<BrokerBalance> {
+    async fetchAndStoreBitflyerBalances(date = this.getJstDate()): Promise<BrokerBalance> {
         const [balances, collateral] = await Promise.all([
             this.bitflyerClient.getBalances(),
             this.bitflyerClient.getCollateral()
@@ -70,18 +71,19 @@ export class BalanceFetcher {
             })
         }
 
-        return this.storeBrokerBalance('bitflyer', filteredBalances)
+        return this.storeBrokerBalance('bitflyer', filteredBalances, date)
     }
 
-    async fetchAndStoreSaxoBalances(): Promise<BrokerBalance> {
+    async fetchAndStoreSaxoBalances(date = this.getJstDate()): Promise<BrokerBalance> {
         const balances = await this.saxoClient.getBalances()
-        return this.storeBrokerBalance('saxo', balances)
+        return this.storeBrokerBalance('saxo', balances, date)
     }
 
     async fetchAllBalances(): Promise<BrokerBalance[]> {
+        const date = this.getJstDate()
         const [bitflyerBalance, saxoBalance] = await Promise.all([
-            this.fetchAndStoreBitflyerBalances(),
-            this.fetchAndStoreSaxoBalances(),
+            this.fetchAndStoreBitflyerBalances(date),
+            this.fetchAndStoreSaxoBalances(date),
         ])
         return [bitflyerBalance, saxoBalance]
     }
