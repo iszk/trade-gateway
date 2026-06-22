@@ -1,6 +1,6 @@
 ---
 title: bitFlyer ポジション取得の固定 ticker フォールバックを廃止する
-status: todo
+status: wip
 ---
 
 # 概要
@@ -34,3 +34,7 @@ issue 0015 で bitFlyer ポジション取得は `tradable_symbols` ベースに
 ## 2026-06-11 00:05 Codex GPT-5
 
 起票した。`cron-tasks.ts:208` と同じ「新しい設定があれば使い、なければ旧固定値へ戻る」系の互換処理として、`PositionFetcher` の bitFlyer ticker 解決に `FX_BTC_JPY` フォールバックが残っている。注文同期とは別ドメインなので、適度な粒度として独立 issue にした。
+
+## 2026-06-22 00:00 Codex GPT-5
+
+実装に着手し、status を `wip` に変更した。`PositionFetcher` から固定 ticker フォールバックを削除し、`tradable_symbols` に bitFlyer 銘柄がない場合、または `listTradableSymbols()` が失敗した場合は bitFlyer のポジション取得をスキップして空配列を返す方針にした。`BitflyerClient.getPositions([])` は既存のデフォルト product code に戻るため、呼び出し前に早期 return する実装にしている。

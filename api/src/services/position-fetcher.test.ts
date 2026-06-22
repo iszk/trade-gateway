@@ -52,7 +52,7 @@ test('PositionFetcher passes bitflyer tradable symbol tickers to BitflyerClient'
     assert.deepEqual(positions, bitflyerPositions)
 })
 
-test('PositionFetcher falls back to FX_BTC_JPY when bitflyer symbols are unavailable', async () => {
+test('PositionFetcher skips bitflyer positions when bitflyer symbols are unavailable', async () => {
     const requestedProductCodes: string[][] = []
     const fetcher = new PositionFetcher({
         bitflyerClient: {
@@ -70,5 +70,27 @@ test('PositionFetcher falls back to FX_BTC_JPY when bitflyer symbols are unavail
 
     await fetcher.fetchAllPositions('bitflyer')
 
-    assert.deepEqual(requestedProductCodes, [['FX_BTC_JPY']])
+    assert.deepEqual(requestedProductCodes, [])
+})
+
+test('PositionFetcher skips bitflyer positions when no bitflyer symbols are configured', async () => {
+    const requestedProductCodes: string[][] = []
+    const fetcher = new PositionFetcher({
+        bitflyerClient: {
+            getPositions: async (productCodes?: string[]) => {
+                requestedProductCodes.push(productCodes ?? [])
+                return []
+            },
+        } as any,
+        dummyClient: { getPositions: async () => [] } as any,
+        saxoClient: { getPositions: async () => [] } as any,
+        listTradableSymbols: async () => [
+            makeSymbol('FxSpot:21', 'saxo'),
+            makeSymbol('   '),
+        ],
+    })
+
+    await fetcher.fetchAllPositions('bitflyer')
+
+    assert.deepEqual(requestedProductCodes, [])
 })
