@@ -14,8 +14,6 @@ type PositionFetcherOptions = {
     listTradableSymbols?: ListTradableSymbolsFn
 }
 
-const DEFAULT_BITFLYER_POSITION_TICKERS = ['FX_BTC_JPY']
-
 export class PositionFetcher {
     private readonly bitflyerClient: BitflyerClient
     private readonly dummyClient: DummyClient
@@ -54,13 +52,19 @@ export class PositionFetcher {
                         .filter((ticker) => ticker.length > 0),
                 ),
             ]
-            return tickers.length > 0 ? tickers : DEFAULT_BITFLYER_POSITION_TICKERS
+            if (tickers.length === 0) {
+                defaultLogger.warn(
+                    { event: 'position_fetcher:no_bitflyer_tradable_symbols' },
+                    'no tradable symbols configured for bitflyer positions',
+                )
+            }
+            return tickers
         } catch (error) {
             defaultLogger.warn(
                 { event: 'position_fetcher:list_tradable_symbols_failed', error },
                 'failed to list tradable symbols for bitflyer positions',
             )
-            return DEFAULT_BITFLYER_POSITION_TICKERS
+            return []
         }
     }
 
@@ -70,8 +74,11 @@ export class PositionFetcher {
         const fetchPromises = brokersToFetch.map(async (b) => {
             try {
                 switch (b) {
-                    case 'bitflyer':
-                        return await this.bitflyerClient.getPositions(await this.getBitflyerPositionTickers())
+                    case 'bitflyer': {
+                        const tickers = await this.getBitflyerPositionTickers()
+                        if (tickers.length === 0) return []
+                        return await this.bitflyerClient.getPositions(tickers)
+                    }
                     case 'dummy':
                         return await this.dummyClient.getPositions()
                     case 'saxo':

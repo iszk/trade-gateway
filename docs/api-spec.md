@@ -60,7 +60,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 ### 4. ポジション一覧取得
 - Method/Path: `GET /api/positions`
 - 認証: 必要（Bearerトークン）
-- 役割: 各証券会社から現在のポジション一覧を取得する。bitFlyer は `tradable_symbols` に登録された bitFlyer 銘柄ごとに取得し、登録がない場合は互換性のため `FX_BTC_JPY` を取得する。
+- 役割: 各証券会社から現在のポジション一覧を取得する。bitFlyer は `tradable_symbols` に登録された bitFlyer 銘柄ごとに取得し、登録がない場合や取得に失敗した場合は bitFlyer のポジション取得をスキップする。
 
 #### Query Parameters
 - `broker` (optional): `bitflyer`, `saxo`, `dummy`. 指定がない場合は全ての証券会社から取得する
