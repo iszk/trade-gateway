@@ -68,9 +68,10 @@ test('PositionFetcher skips bitflyer positions when bitflyer symbols are unavail
         },
     })
 
-    await fetcher.fetchAllPositions('bitflyer')
+    const positions = await fetcher.fetchAllPositions('bitflyer')
 
     assert.deepEqual(requestedProductCodes, [])
+    assert.deepEqual(positions, [])
 })
 
 test('PositionFetcher skips bitflyer positions when no bitflyer symbols are configured', async () => {
@@ -90,7 +91,8 @@ test('PositionFetcher skips bitflyer positions when no bitflyer symbols are conf
         ],
     })
 
-    await fetcher.fetchAllPositions('bitflyer')
+    const positions = await fetcher.fetchAllPositions('bitflyer')
 
     assert.deepEqual(requestedProductCodes, [])
+    assert.deepEqual(positions, [])
 })
