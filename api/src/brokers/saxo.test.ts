@@ -464,6 +464,58 @@ test('SaxoClient.getExecutionPriceForOrderV2 returns null when batch has no entr
     assert.deepEqual(result.brokerOrderMetadata, metadata)
 })
 
+test('SaxoClient.getExecutionPriceForOrderV2 returns null when fill size fields are unavailable', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () =>
+            new Response(
+                JSON.stringify({
+                    Data: [
+                        { LogId: 'L-no-size', OrderId: 'ORD-entry-no-size', Status: 'FinalFill', ExecutionPrice: 101 },
+                    ],
+                }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            ),
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'evt-saxo-entry-no-size',
+        strategy: 'test',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 1000,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['ORD-entry-no-size'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+        broker_order_metadata: {
+            kind: 'saxo_order_v1',
+            order_id: 'ORD-entry-no-size',
+            entry: {
+                expected: { side: 'BUY', order_type: 'Market', size: 1000 },
+                resolved: { order_id: 'ORD-entry-no-size' },
+            },
+            exits: [],
+        },
+    })
+
+    assert.equal(result.execution, null)
+})
+
 test('SaxoClient.getExecutionPriceForOrderV2 logs when audit activities do not match the requested order id', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
@@ -680,6 +732,63 @@ test('SaxoClient.getClosingExecutionForOrderV2 uses filled related order and ign
 
     assert.equal(fetchCount, 1)
     assert.deepEqual(result.execution, { price: 97.5, size: 1, executed_at: undefined })
+})
+
+test('SaxoClient.getClosingExecutionForOrderV2 returns null when exit fill size fields are unavailable', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () =>
+            new Response(
+                JSON.stringify({
+                    Data: [
+                        { LogId: 'L-sl-no-size', OrderId: 'ORD-sl-no-size', Status: 'FinalFill', ExecutionPrice: 98 },
+                    ],
+                }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            ),
+    })
+
+    const result = await client.getClosingExecutionForOrderV2({
+        id: 'evt-saxo-close-no-size',
+        strategy: 'test',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 1,
+        executed_size: 1,
+        executed_price: 100,
+        status: 'EXECUTED',
+        provider_order_ids: ['ORD-entry-no-size'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+        broker_order_metadata: {
+            kind: 'saxo_order_v1',
+            order_id: 'ORD-entry-no-size',
+            entry: {
+                expected: { side: 'BUY', order_type: 'Market', size: 1 },
+                resolved: { order_id: 'ORD-entry-no-size' },
+            },
+            exits: [
+                {
+                    expected: { role: 'STOP_LOSS', side: 'SELL', order_type: 'StopIfTraded', size: 1, price: 98 },
+                    resolved: { order_id: 'ORD-sl-no-size' },
+                },
+            ],
+        },
+    })
+
+    assert.equal(result.execution, null)
 })
 
 test('SaxoClient.getExecutionPriceForOrderV2 ignores stale next poll cursor after 30 minutes', async () => {

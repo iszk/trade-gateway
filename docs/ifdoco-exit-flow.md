@@ -74,7 +74,7 @@ Saxo は entry の Market order に `Orders` として関連注文を付ける�
 | `exits[].resolved.order_id` | Saxo の related order id。レスポンスに含まれない場合は `null` |
 | `external_reference` | Saxo 発注時に付与した `tg:` prefix の識別補助 |
 
-exit 同期では、`cs/v1/audit/orderactivities` を時間範囲または poll cursor で一括取得し、解決済みの related order id と突合する。`FinalFill` または `Fill` の `ExecutionPrice` / `AveragePrice` を約定価格として使い、`FillAmount` を優先して数量を合算する。`FillAmount` がない場合は `FilledAmount` / `Amount` を累積数量として扱う。数量フィールドがない古いレスポンスでは、互換 fallback として metadata の expected size と親注文の requested size から同期数量を決める。
+exit 同期では、`cs/v1/audit/orderactivities` を時間範囲または poll cursor で一括取得し、解決済みの related order id と突合する。`FinalFill` または `Fill` の `ExecutionPrice` / `AveragePrice` を約定価格として使い、`FillAmount` を優先して数量を合算する。`FillAmount` がない場合は `FilledAmount` / `Amount` を累積数量として扱う。数量フィールドがないレスポンスは、誤同期を避けるため約定未確定として扱う。
 
 片側の related order だけが約定している場合は、その約定だけを exit レコードへ反映する。もう片側が未約定またはキャンセル済みで audit activity がない場合は無視する。Saxo の発注レスポンスで related order id が返らず `resolved.order_id === null` の場合、誤同期を避けるため exit 同期は no-op になる。
 `broker_order_metadata.kind !== 'saxo_order_v1'` の場合も warn ログを出して no-op にし、entry order id だけを使った旧探索へはフォールバックしない。
