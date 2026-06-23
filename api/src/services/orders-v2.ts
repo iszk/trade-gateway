@@ -4,10 +4,6 @@ import type { OrderV2 } from '../types/order-v2.js'
 
 const COLLECTION_NAME = 'orders_v2'
 
-const getEffectiveOrderTime = (order: Pick<OrderV2, 'created_at' | 'executed_at'>): Date => (
-    order.executed_at ?? order.created_at
-)
-
 const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => ({
     ...data,
     // Firestore の Timestamp を Date に変換
@@ -79,34 +75,17 @@ export const createGetActiveIfdOrdersV2Fn = (db: Firestore = getFirestoreClient(
 
 export const createListOrdersV2ByDateRangeFn = (db: Firestore = getFirestoreClient()) => {
     return async (from: Date, to: Date): Promise<OrderV2[]> => {
-        const [executedSnapshot, createdSnapshot] = await Promise.all([
-            db
-                .collection(COLLECTION_NAME)
-                .where('executed_at', '>=', from)
-                .where('executed_at', '<=', to)
-                .orderBy('executed_at', 'desc')
-                .get(),
-            db
-                .collection(COLLECTION_NAME)
-                .where('created_at', '>=', from)
-                .where('created_at', '<=', to)
-                .orderBy('created_at', 'desc')
-                .get(),
-        ])
+        const snapshot = await db
+            .collection(COLLECTION_NAME)
+            .where('executed_at', '>=', from)
+            .where('executed_at', '<=', to)
+            .orderBy('executed_at', 'desc')
+            .get()
 
-        const deduped = new Map<string, OrderV2>()
-
-        for (const doc of [...executedSnapshot.docs, ...createdSnapshot.docs]) {
-            const order = fromFirestoreOrderV2(doc.data() as OrderV2)
-            deduped.set(order.id, order)
-        }
-
-        return Array.from(deduped.values())
-            .filter((order) => {
-                const time = getEffectiveOrderTime(order)
-                return time >= from && time <= to
-            })
-            .sort((a, b) => getEffectiveOrderTime(b).getTime() - getEffectiveOrderTime(a).getTime())
+        return snapshot.docs
+            .map((doc) => fromFirestoreOrderV2(doc.data() as OrderV2))
+            .filter((order) => order.executed_at !== undefined)
+            .sort((a, b) => b.executed_at!.getTime() - a.executed_at!.getTime() || a.id.localeCompare(b.id))
     }
 }
 

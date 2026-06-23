@@ -235,7 +235,34 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 }
 ```
 
-### 9. Symbol 一覧・更新
+### 9. Orders V2 統計取得
+- Method/Path: `GET /api/v2/orders/stats`
+- 認証: 必要（Bearerトークン）
+- 役割: `orders_v2` の注文を strategy 単位で集計する。期間指定は `executed_at` を基準にする。
+
+#### Query Parameters
+- `from` (optional, `YYYY-MM-DD`): JST 日付の期間開始（デフォルト: 直近 30 日）
+- `to` (optional, `YYYY-MM-DD`): JST 日付の期間終了日（デフォルト: 今日）
+
+#### 補足
+- `status=EXECUTED` の注文は `executed_at` が必須。欠落している既存データは集計対象外とし、`created_at` へはフォールバックしない。
+
+### 10. Orders V2 一覧取得
+- Method/Path: `GET /api/v2/orders`
+- 認証: 必要（Bearerトークン）
+- 役割: `orders_v2` の注文を `executed_at` 降順で一覧取得する。
+
+#### Query Parameters
+- `from` (optional, `YYYY-MM-DD`): JST 日付の期間開始（デフォルト: 直近 30 日）
+- `to` (optional, `YYYY-MM-DD`): JST 日付の期間終了日（デフォルト: 今日）
+- `strategy` (optional): strategy の完全一致で絞り込み
+- `limit` (optional, number, 1–200): 1 ページあたり件数（デフォルト: 50）
+- `page` (optional, number): ページ番号（デフォルト: 1）
+
+#### 補足
+- 期間指定は `executed_at` を基準にする。`executed_at` が欠落している注文は一覧対象外とし、`created_at` へはフォールバックしない。
+
+### 11. Symbol 一覧・更新
 - Method/Path: `GET /api/symbols`
 - 認証: 必要（Bearerトークン）
 - 役割: broker + ticker のメタデータと売買停止状態を一覧取得する

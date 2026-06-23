@@ -7,7 +7,7 @@ export type OrderTypeV2 = 'MARKET' | 'IFDOCO' | 'LIMIT' | 'STOP'
 
 export type ExitSyncStatus = 'MONITORING' | 'COMPLETED'
 
-export type OrderV2 = {
+type BaseOrderV2 = {
     /** 注文のユニークID（WebhookのeventIdなど） */
     id: string
     /** 集計の唯一の軸となる戦略名 */
@@ -24,12 +24,6 @@ export type OrderV2 = {
     requested_size: number
     /** 実約定数量 */
     executed_size: number
-    /** 実約定価格 */
-    executed_price: number | null
-    /** 実約定時刻。取得できない場合は未設定または created_at 相当を使う */
-    executed_at?: Date
-    /** 注文の現在のステータス */
-    status: OrderStatusV2
     /** IFDOCO 親注文の exit 監視状態 */
     exit_sync_status?: ExitSyncStatus
     /** Broker側で発行された注文ID。IFD-OCO等の複数IDに対応するため配列 */
@@ -41,3 +35,23 @@ export type OrderV2 = {
     /** 最終更新日時 */
     updated_at: Date
 }
+
+export type ExecutedOrderV2 = BaseOrderV2 & {
+    /** 実約定価格 */
+    executed_price: number
+    /** 実約定時刻。EXECUTED 注文では必須 */
+    executed_at: Date
+    /** 注文の現在のステータス */
+    status: 'EXECUTED'
+}
+
+export type NonExecutedOrderV2 = BaseOrderV2 & {
+    /** 実約定価格 */
+    executed_price: number | null
+    /** 実約定時刻。EXECUTED 以外では未設定を許可する */
+    executed_at?: Date
+    /** 注文の現在のステータス */
+    status: Exclude<OrderStatusV2, 'EXECUTED'>
+}
+
+export type OrderV2 = ExecutedOrderV2 | NonExecutedOrderV2

@@ -24,14 +24,15 @@ export type StatsV2 = {
  */
 const EPSILON = 0.00000001
 
-export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => {
-    const getSortTime = (order: OrderV2) => (order.executed_at ?? order.created_at).getTime()
+const isExecutedOrderWithExecutedAt = (order: OrderV2): order is OrderV2 & { status: 'EXECUTED'; executed_at: Date } => (
+    order.status === 'EXECUTED' && order.executed_at !== undefined
+)
 
-    // 確定済みの注文だけを対象に、古い順にソートする
-    // executed_at があればそれを優先し、未設定時は created_at にフォールバックする
+export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => {
+    // EXECUTED 注文は executed_at を日時基準にする。欠落した旧データは集計対象外。
     const executedOrders = orders
-        .filter((o) => o.status === 'EXECUTED' && o.executed_price !== null)
-        .sort((a, b) => getSortTime(a) - getSortTime(b) || a.id.localeCompare(b.id))
+        .filter(isExecutedOrderWithExecutedAt)
+        .sort((a, b) => a.executed_at.getTime() - b.executed_at.getTime() || a.id.localeCompare(b.id))
 
     const openOrders = orders.filter((o) => o.status === 'PENDING').length
 

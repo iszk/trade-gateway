@@ -18,8 +18,9 @@ const makeOrder = (overrides: Partial<OrderV2>): OrderV2 => ({
     provider_order_ids: ['provider-1'],
     created_at: new Date('2026-01-01T00:00:00Z'),
     updated_at: new Date('2026-01-01T00:00:00Z'),
+    executed_at: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
-})
+} as OrderV2)
 
 test('buildTradeRecordsFromOrdersV2: BUY と SELL を FIFO でペアリングする', () => {
     const entry = makeOrder({ id: 'entry', side: 'BUY', executed_price: 100, executed_at: new Date('2026-01-01T00:00:00Z') })

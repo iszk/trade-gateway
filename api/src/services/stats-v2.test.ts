@@ -17,13 +17,14 @@ const makeOrder = (overrides: Partial<OrderV2>): OrderV2 => ({
     provider_order_ids: ['test-id'],
     created_at: new Date(),
     updated_at: new Date(),
+    executed_at: new Date(),
     ...overrides,
-})
+} as OrderV2)
 
 test('computeStatsV2: basic buy and sell', () => {
     const orders: OrderV2[] = [
-        makeOrder({ side: 'BUY', executed_price: 1000000, created_at: new Date('2026-01-01T00:00:00Z') }),
-        makeOrder({ side: 'SELL', executed_price: 1100000, created_at: new Date('2026-01-01T01:00:00Z') }),
+        makeOrder({ side: 'BUY', executed_price: 1000000, executed_at: new Date('2026-01-01T00:00:00Z') }),
+        makeOrder({ side: 'SELL', executed_price: 1100000, executed_at: new Date('2026-01-01T01:00:00Z') }),
     ]
     const stats = computeStatsV2(orders, 'test-strategy')
     assert.equal(stats.current_position, 0)
@@ -57,10 +58,35 @@ test('computeStatsV2: executed_at を created_at より優先して時系列判�
     assert.equal(stats.total_trades, 1)
 })
 
+test('computeStatsV2: executed_at がない EXECUTED 注文は集計対象外にする', () => {
+    const orders: OrderV2[] = [
+        makeOrder({
+            id: 'legacy-buy-without-executed-at',
+            side: 'BUY',
+            executed_price: 1000000,
+            created_at: new Date('2026-01-01T00:00:00Z'),
+            executed_at: undefined,
+        }),
+        makeOrder({
+            id: 'sell-with-executed-at',
+            side: 'SELL',
+            executed_price: 1100000,
+            created_at: new Date('2026-01-01T01:00:00Z'),
+            executed_at: new Date('2026-01-01T01:00:00Z'),
+        }),
+    ]
+
+    const stats = computeStatsV2(orders, 'test-strategy')
+
+    assert.equal(stats.current_position, -0.01)
+    assert.equal(stats.realized_pnl, 0)
+    assert.equal(stats.total_trades, 0)
+})
+
 test('computeStatsV2: partial close', () => {
     const orders: OrderV2[] = [
-        makeOrder({ side: 'BUY', executed_price: 1000000, executed_size: 0.01, created_at: new Date('2026-01-01T00:00:00Z') }),
-        makeOrder({ side: 'SELL', executed_price: 1100000, executed_size: 0.004, created_at: new Date('2026-01-01T01:00:00Z') }),
+        makeOrder({ side: 'BUY', executed_price: 1000000, executed_size: 0.01, executed_at: new Date('2026-01-01T00:00:00Z') }),
+        makeOrder({ side: 'SELL', executed_price: 1100000, executed_size: 0.004, executed_at: new Date('2026-01-01T01:00:00Z') }),
     ]
     const stats = computeStatsV2(orders, 'test-strategy')
     assert.equal(stats.current_position, 0.006)
@@ -70,8 +96,8 @@ test('computeStatsV2: partial close', () => {
 
 test('computeStatsV2: doten (reverse position)', () => {
     const orders: OrderV2[] = [
-        makeOrder({ side: 'BUY', executed_price: 1000000, executed_size: 0.01, created_at: new Date('2026-01-01T00:00:00Z') }),
-        makeOrder({ side: 'SELL', executed_price: 1100000, executed_size: 0.015, created_at: new Date('2026-01-01T01:00:00Z') }),
+        makeOrder({ side: 'BUY', executed_price: 1000000, executed_size: 0.01, executed_at: new Date('2026-01-01T00:00:00Z') }),
+        makeOrder({ side: 'SELL', executed_price: 1100000, executed_size: 0.015, executed_at: new Date('2026-01-01T01:00:00Z') }),
     ]
     const stats = computeStatsV2(orders, 'test-strategy')
     assert.equal(stats.current_position, -0.005)

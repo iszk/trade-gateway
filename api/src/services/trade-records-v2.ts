@@ -4,8 +4,8 @@ import type { ListOrdersV2ByDateRangeFn } from './orders-v2.js'
 
 const EPSILON = 0.00000001
 
-const getOrderTime = (order: Pick<OrderV2, 'created_at' | 'executed_at'>): Date => (
-    order.executed_at ?? order.created_at
+const isExecutedOrderWithExecutedAt = (order: OrderV2): order is OrderV2 & { status: 'EXECUTED'; executed_at: Date } => (
+    order.status === 'EXECUTED' && order.executed_at !== undefined
 )
 
 export type TradeRecord = {
@@ -79,9 +79,9 @@ type OpenLot = {
 
 export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWithId[] => {
     const executedOrders = orders
-        .filter((order) => order.status === 'EXECUTED' && order.executed_price !== null)
+        .filter(isExecutedOrderWithExecutedAt)
         .filter((order) => (order.executed_size || order.requested_size) > EPSILON)
-        .sort((a, b) => getOrderTime(a).getTime() - getOrderTime(b).getTime() || a.id.localeCompare(b.id))
+        .sort((a, b) => a.executed_at.getTime() - b.executed_at.getTime() || a.id.localeCompare(b.id))
 
     const lotsByKey = new Map<string, OpenLot[]>()
     const records: TradeRecordWithId[] = []
@@ -89,7 +89,7 @@ export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWit
     for (const order of executedOrders) {
         const key = `${order.strategy}|${order.ticker}|${order.broker}`
         const lots = lotsByKey.get(key) ?? []
-        const orderTime = getOrderTime(order)
+        const orderTime = order.executed_at
         let remainingSize = order.executed_size || order.requested_size
 
         while (remainingSize > EPSILON) {
