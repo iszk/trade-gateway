@@ -24,29 +24,13 @@ export type OrdersV2ExecutionSyncResult = {
     brokerOrderMetadata?: BrokerOrderMetadata
 }
 
-type LegacyExecutionPriceFetcherLike = {
-    getExecutionPrice(providerOrderId: string, ticker: string): Promise<ExecutionInfo | null>
-    getExecutionPriceForOrderV2?: never
-}
-
-type OrdersV2ExecutionPriceFetcherLike = {
+export type ExecutionPriceFetcherLike = {
     getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
-    getExecutionPrice?(providerOrderId: string, ticker: string): Promise<ExecutionInfo | null>
 }
 
-type LegacyClosingExecutionFetcherLike = {
-    getClosingExecution(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
-    getClosingExecutionForOrderV2?: never
-}
-
-type OrdersV2ClosingExecutionFetcherLike = {
+export type ClosingExecutionFetcherLike = {
     getClosingExecutionForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
-    getClosingExecution?(parentOrderId: string, ticker: string): Promise<ExecutionInfo | null>
 }
-
-export type ExecutionPriceFetcherLike = OrdersV2ExecutionPriceFetcherLike | LegacyExecutionPriceFetcherLike
-
-export type ClosingExecutionFetcherLike = OrdersV2ClosingExecutionFetcherLike | LegacyClosingExecutionFetcherLike
 
 export type CronContext = {
     logger: Logger
@@ -152,9 +136,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
             const providerOrderId = order.provider_order_ids[0]
             if (!providerOrderId) continue
 
-            const syncResult = fetcher.getExecutionPriceForOrderV2
-                ? await fetcher.getExecutionPriceForOrderV2(order)
-                : { execution: await fetcher.getExecutionPrice(providerOrderId, order.ticker) }
+            const syncResult = await fetcher.getExecutionPriceForOrderV2(order)
 
             const info = syncResult.execution
             if (info !== null || syncResult.brokerOrderMetadata !== undefined) {
@@ -231,9 +213,7 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
             const providerOrderId = order.provider_order_ids[0]
             if (!providerOrderId) continue
 
-            const syncResult = fetcher.getClosingExecutionForOrderV2
-                ? await fetcher.getClosingExecutionForOrderV2(order)
-                : { execution: await fetcher.getClosingExecution(providerOrderId, order.ticker) }
+            const syncResult = await fetcher.getClosingExecutionForOrderV2(order)
 
             if (syncResult.brokerOrderMetadata !== undefined) {
                 await ctx.updateOrderV2(order.id, {

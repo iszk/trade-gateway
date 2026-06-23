@@ -61,7 +61,7 @@ bitflyer では SL がトリガーされた後、STOP 子注文ではなく MARK
 
 `execution: null` → cron 処理はスキップ（次回まで待機）。
 
-> **Note**: `broker_order_metadata` が `bitflyer_parent_order_v1` でない場合は `getClosingExecution()` にフォールバック。こちらは `child_order_type !== 'MARKET'` かつ `child_order_state === 'COMPLETED'` の子注文を対象にする。
+`orders_v2` の cron 同期は、ブローカーごとの `getClosingExecutionForOrderV2(order)` を必ず呼び出し、cron 側から旧 `getClosingExecution(parentOrderId, ticker)` を直接呼ぶフォールバックは行わない。なお、broker 実装内部に残る metadata 欠落時の旧ロジックフォールバックは issue 0019 の対象として分離している。
 
 #### Saxo
 
