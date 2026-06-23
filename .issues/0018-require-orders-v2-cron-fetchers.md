@@ -1,6 +1,6 @@
 ---
 title: cron の約定同期 fetcher を orders_v2 専用 interface に一本化する
-status: wip
+status: done
 ---
 
 # 概要

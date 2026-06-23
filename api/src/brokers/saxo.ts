@@ -237,6 +237,14 @@ const aggregateSaxoExecution = (
     return { price: latestPrice, size, executed_at: latestExecutedAt }
 }
 
+const summarizeSaxoActivities = (activities: SaxoOrderActivity[]): Record<string, number> => {
+    const summary: Record<string, number> = {}
+    for (const activity of activities) {
+        summary[activity.Status] = (summary[activity.Status] ?? 0) + 1
+    }
+    return summary
+}
+
 function parsePercentage(value: string): number | null {
     const match = value.trim().match(/^(\d+(?:\.\d+)?)%$/)
     if (!match || !match[1]) return null
@@ -525,7 +533,45 @@ export class SaxoClient {
     private async getExecutionFromRecentActivities(orderId: string, fallbackSize?: number): Promise<{ price: number, size: number, executed_at?: Date } | null> {
         const activities = await this.fetchOrderActivitiesBatch()
         const matchingActivities = activities.filter((activity) => activity.OrderId === orderId)
-        return aggregateSaxoExecution(matchingActivities, fallbackSize)
+        const execution = aggregateSaxoExecution(matchingActivities, fallbackSize)
+
+        if (matchingActivities.length === 0) {
+            this.logger.info(
+                {
+                    event: 'saxo:execution_audit_no_match',
+                    orderId,
+                    fetchedActivityCount: activities.length,
+                    matchedActivityCount: 0,
+                },
+                'no Saxo audit activities matched the requested order id',
+            )
+            return null
+        }
+
+        if (!execution) {
+            this.logger.info(
+                {
+                    event: 'saxo:execution_audit_unresolved',
+                    orderId,
+                    fetchedActivityCount: activities.length,
+                    matchedActivityCount: matchingActivities.length,
+                    matchedStatuses: summarizeSaxoActivities(matchingActivities),
+                    matchedActivities: matchingActivities.map((activity) => ({
+                        logId: activity.LogId,
+                        status: activity.Status,
+                        executionPrice: activity.ExecutionPrice,
+                        averagePrice: activity.AveragePrice,
+                        fillAmount: activity.FillAmount,
+                        filledAmount: activity.FilledAmount,
+                        amount: activity.Amount,
+                        activityTime: activity.ActivityTime ?? activity.ExecutionTime ?? activity.UtcTime,
+                    })),
+                },
+                'matched Saxo audit activities could not be aggregated into an execution',
+            )
+        }
+
+        return execution
     }
 
     async getAuth(): Promise<SaxoAuthData | null> {

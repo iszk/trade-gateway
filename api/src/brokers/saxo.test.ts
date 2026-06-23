@@ -38,6 +38,27 @@ const mockFirestore = (data: Record<string, any> = {}) => {
     return db as unknown as Firestore
 }
 
+const createCapturingLogger = () => {
+    const infoLogs: Array<{ obj: Record<string, unknown>, msg?: string }> = []
+    const warnLogs: Array<{ obj: Record<string, unknown>, msg?: string }> = []
+    const errorLogs: Array<{ obj: Record<string, unknown>, msg?: string }> = []
+
+    const logger = {
+        info: (obj: Record<string, unknown>, msg?: string) => {
+            infoLogs.push({ obj, msg })
+        },
+        warn: (obj: Record<string, unknown>, msg?: string) => {
+            warnLogs.push({ obj, msg })
+        },
+        error: (obj: Record<string, unknown>, msg?: string) => {
+            errorLogs.push({ obj, msg })
+        },
+        child: () => logger,
+    }
+
+    return { logger, infoLogs, warnLogs, errorLogs }
+}
+
 test('SaxoClient.getLoginUrl returns correct URL', () => {
     const client = new SaxoClient({
         appKey: 'test-app-key',
@@ -569,6 +590,52 @@ test('SaxoClient.getExecutionPriceForOrderV2 returns null when batch has no entr
     assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('OrderId'), null)
     assert.equal(result.execution, null)
     assert.deepEqual(result.brokerOrderMetadata, metadata)
+})
+
+test('SaxoClient.getExecutionPriceForOrderV2 logs when audit activities do not match the requested order id', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({
+        db,
+        logger: logger as any,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () =>
+            new Response(
+                JSON.stringify({
+                    Data: [
+                        { LogId: 'L-no-match', OrderId: 'ORD-other', Status: 'FinalFill', AveragePrice: 101, FilledAmount: 1 },
+                    ],
+                }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            ),
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'evt-saxo-no-match',
+        strategy: 'test',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'MARKET',
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['ORD-requested'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.equal(result.execution, null)
+    assert.ok(infoLogs.some((log) => log.obj.event === 'saxo:execution_audit_no_match'))
 })
 
 test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executions from one audit batch', async () => {
