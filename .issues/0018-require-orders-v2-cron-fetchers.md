@@ -41,3 +41,7 @@ status: wip
 ## 2026-06-23 15:46 Codex GPT-5
 
 実装完了。cron の fetcher contract は `getExecutionPriceForOrderV2(order)` / `getClosingExecutionForOrderV2(order)` 必須に統一し、旧 providerOrderId/ticker 経由の分岐を削除した。`cron-tasks.test.ts` の注入 stub はすべて v2 fetcher へ更新済み。`getExecutionPrice` / `getClosingExecution` の production 参照は broker 内部の v2 fetcher metadata 欠落時フォールバックに残っており、これは既存 issue `0019-require-broker-metadata-for-orders-v2-sync.md` の対象として整理済み。`mise run test` は typecheck、api test 167 件、ui test 3 件がすべて pass。
+
+## 2026-06-23 16:01 Codex GPT-5
+
+PR review 対応。`docs/ifdoco-exit-flow.md` の「旧 `getClosingExecution` へのフォールバックは行わない」という記述が、broker 実装内部の metadata 欠落時フォールバックまで無いように読めるという指摘が妥当だったため、cron 側から旧 method を直接呼ばない範囲の説明に修正し、broker 内部の残件は issue 0019 対象であることを明記した。
