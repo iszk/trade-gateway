@@ -188,7 +188,6 @@ const getSaxoActivityCumulativeAmount = (activity: SaxoOrderActivity): number | 
 
 const aggregateSaxoExecution = (
     activities: SaxoOrderActivity[],
-    fallbackSize?: number,
 ): { price: number, size: number, executed_at?: Date } | null => {
     const fills = activities
         .filter(isSaxoFillActivity)
@@ -231,10 +230,9 @@ const aggregateSaxoExecution = (
             .filter((amount): amount is number => amount !== null),
         0,
     )
-    const size = cumulativeSize > 0 ? cumulativeSize : fallbackSize
-    if (typeof size !== 'number' || size <= 0) return null
+    if (cumulativeSize <= 0) return null
 
-    return { price: latestPrice, size, executed_at: latestExecutedAt }
+    return { price: latestPrice, size: cumulativeSize, executed_at: latestExecutedAt }
 }
 
 const summarizeSaxoActivities = (activities: SaxoOrderActivity[]): Record<string, number> => {
@@ -530,10 +528,10 @@ export class SaxoClient {
         return cacheActivities(activities)
     }
 
-    private async getExecutionFromRecentActivities(orderId: string, fallbackSize?: number): Promise<{ price: number, size: number, executed_at?: Date } | null> {
+    private async getExecutionFromRecentActivities(orderId: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
         const activities = await this.fetchOrderActivitiesBatch()
         const matchingActivities = activities.filter((activity) => activity.OrderId === orderId)
-        const execution = aggregateSaxoExecution(matchingActivities, fallbackSize)
+        const execution = aggregateSaxoExecution(matchingActivities)
 
         if (matchingActivities.length === 0) {
             this.logger.info(
@@ -1034,9 +1032,9 @@ export class SaxoClient {
         }
 
         const entryOrderId = metadata.entry.resolved.order_id || metadata.order_id || providerOrderId
-        const execution = await this.getExecutionFromRecentActivities(entryOrderId, metadata.entry.expected.size)
+        const execution = await this.getExecutionFromRecentActivities(entryOrderId)
         return {
-            execution: execution ? { ...execution, size: execution.size || order.requested_size } : null,
+            execution,
             brokerOrderMetadata: metadata,
         }
     }
@@ -1070,10 +1068,10 @@ export class SaxoClient {
             const exitOrderId = exit.resolved.order_id
             if (!exitOrderId) continue
 
-            const execution = await this.getExecutionFromRecentActivities(exitOrderId, Math.min(exit.expected.size, order.requested_size))
+            const execution = await this.getExecutionFromRecentActivities(exitOrderId)
             if (!execution) continue
 
-            const size = execution.size || Math.min(exit.expected.size, order.requested_size)
+            const size = execution.size
             totalSize += size
             totalValue += execution.price * size
             if (execution.executed_at && (!latestExecutedAt || execution.executed_at.getTime() > latestExecutedAt.getTime())) {
