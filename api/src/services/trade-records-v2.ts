@@ -1,12 +1,9 @@
+import { isExecutedOrderV2 } from '../types/order-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import { createDefaultListOrdersV2ByDateRangeFn } from './orders-v2.js'
 import type { ListOrdersV2ByDateRangeFn } from './orders-v2.js'
 
 const EPSILON = 0.00000001
-
-const isExecutableOrder = (order: OrderV2): order is OrderV2 & { status: 'EXECUTED'; executed_at: Date; executed_price: number } => (
-    order.status === 'EXECUTED' && order.executed_at !== undefined && order.executed_price !== null
-)
 
 export type TradeRecord = {
     strategy: string
@@ -79,7 +76,7 @@ type OpenLot = {
 
 export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWithId[] => {
     const executedOrders = orders
-        .filter(isExecutableOrder)
+        .filter(isExecutedOrderV2)
         .filter((order) => (order.executed_size || order.requested_size) > EPSILON)
         .sort((a, b) => a.executed_at.getTime() - b.executed_at.getTime() || a.id.localeCompare(b.id))
 

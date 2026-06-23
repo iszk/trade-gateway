@@ -39,16 +39,16 @@ const toFirestoreOrder = (order: OrderV2) => ({
 
 const createDbStub = (orders: OrderV2[]) => {
     const state: {
-        whereFields: string[]
+        whereCalls: { field: string; op: string; value: unknown }[]
         orderByFields: string[]
     } = {
-        whereFields: [],
+        whereCalls: [],
         orderByFields: [],
     }
 
     const query = {
-        where: (field: string) => {
-            state.whereFields.push(field)
+        where: (field: string, op: string, value: unknown) => {
+            state.whereCalls.push({ field, op, value })
             return query
         },
         orderBy: (field: string) => {
@@ -159,7 +159,10 @@ test('createListOrdersV2ByDateRangeFn: executed_at のみで期間抽出し降�
 
     const orders = await listOrdersV2ByDateRange(rangeFrom, rangeTo)
 
-    assert.deepEqual(state.whereFields, ['executed_at', 'executed_at'])
+    assert.deepEqual(state.whereCalls, [
+        { field: 'executed_at', op: '>=', value: rangeFrom },
+        { field: 'executed_at', op: '<', value: rangeTo },
+    ])
     assert.deepEqual(state.orderByFields, ['executed_at'])
     assert.deepEqual(
         orders.map((order) => order.id),

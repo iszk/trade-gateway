@@ -78,7 +78,7 @@ export const createListOrdersV2ByDateRangeFn = (db: Firestore = getFirestoreClie
         const snapshot = await db
             .collection(COLLECTION_NAME)
             .where('executed_at', '>=', from)
-            .where('executed_at', '<=', to)
+            .where('executed_at', '<', to)
             .orderBy('executed_at', 'desc')
             .get()
 

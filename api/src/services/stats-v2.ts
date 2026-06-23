@@ -1,3 +1,4 @@
+import { isExecutedOrderV2 } from '../types/order-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 
 export type StatsV2 = {
@@ -24,14 +25,10 @@ export type StatsV2 = {
  */
 const EPSILON = 0.00000001
 
-const isExecutableOrder = (order: OrderV2): order is OrderV2 & { status: 'EXECUTED'; executed_at: Date; executed_price: number } => (
-    order.status === 'EXECUTED' && order.executed_at !== undefined && order.executed_price !== null
-)
-
 export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => {
     // EXECUTED 注文は executed_at を日時基準にする。欠落した旧データは集計対象外。
     const executedOrders = orders
-        .filter(isExecutableOrder)
+        .filter(isExecutedOrderV2)
         .sort((a, b) => a.executed_at.getTime() - b.executed_at.getTime() || a.id.localeCompare(b.id))
 
     const openOrders = orders.filter((o) => o.status === 'PENDING').length

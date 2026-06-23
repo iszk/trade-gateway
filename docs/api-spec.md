@@ -246,6 +246,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 
 #### 補足
 - `status=EXECUTED` の注文は `executed_at` が必須。欠落している既存データは集計対象外とし、`created_at` へはフォールバックしない。
+- `open_orders` は期間指定とは独立して、現在の `PENDING` 注文を strategy 単位で集計する。
 
 ### 10. Orders V2 一覧取得
 - Method/Path: `GET /api/v2/orders`

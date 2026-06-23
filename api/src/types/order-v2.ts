@@ -55,3 +55,7 @@ export type NonExecutedOrderV2 = BaseOrderV2 & {
 }
 
 export type OrderV2 = ExecutedOrderV2 | NonExecutedOrderV2
+
+export const isExecutedOrderV2 = (order: OrderV2): order is ExecutedOrderV2 => (
+    order.status === 'EXECUTED' && order.executed_at !== undefined && order.executed_price !== null
+)
