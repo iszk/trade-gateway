@@ -464,7 +464,7 @@ test('SaxoClient.getExecutionPriceForOrderV2 returns null when batch has no entr
     assert.deepEqual(result.brokerOrderMetadata, metadata)
 })
 
-test('SaxoClient.getExecutionPriceForOrderV2 returns null when fill amount is unavailable', async () => {
+test('SaxoClient.getExecutionPriceForOrderV2 returns null when fill size fields are unavailable', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'valid-token',
@@ -734,7 +734,7 @@ test('SaxoClient.getClosingExecutionForOrderV2 uses filled related order and ign
     assert.deepEqual(result.execution, { price: 97.5, size: 1, executed_at: undefined })
 })
 
-test('SaxoClient.getClosingExecutionForOrderV2 ignores fill activities without amount', async () => {
+test('SaxoClient.getClosingExecutionForOrderV2 returns null when exit fill size fields are unavailable', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'valid-token',
