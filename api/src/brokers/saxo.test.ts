@@ -187,7 +187,7 @@ test('SaxoClient.getExecutionPrice returns null for DRY_RUN', async () => {
     assert.equal(result, null)
 })
 
-test('SaxoClient.getExecutionPrice returns AveragePrice from audit activities', async () => {
+test('SaxoClient.getExecutionPrice returns AveragePrice and FilledAmount from audit activities', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'valid-token',
@@ -209,7 +209,7 @@ test('SaxoClient.getExecutionPrice returns AveragePrice from audit activities', 
                 JSON.stringify({
                     Data: [
                         { LogId: 'L1', OrderId: 'ORD-123', Status: 'Placed' },
-                        { LogId: 'L2', OrderId: 'ORD-123', Status: 'FinalFill', AveragePrice: 18066.67, ActivityTime: '2026-01-01T00:05:00Z' },
+                        { LogId: 'L2', OrderId: 'ORD-123', Status: 'FinalFill', AveragePrice: 18066.67, FilledAmount: 1000, ActivityTime: '2026-01-01T00:05:00Z' },
                     ],
                 }),
                 { status: 200, headers: { 'content-type': 'application/json' } },
@@ -222,10 +222,39 @@ test('SaxoClient.getExecutionPrice returns AveragePrice from audit activities', 
     assert.ok(capturedUrl.includes('/cs/v1/audit/orderactivities/'))
     assert.ok(capturedUrl.includes('OrderId=ORD-123'))
     assert.ok(capturedUrl.includes('ClientKey=test-client'))
-    assert.deepEqual(result, { price: 18066.67, size: 0, executed_at: new Date('2026-01-01T00:05:00Z') })
+    assert.deepEqual(result, { price: 18066.67, size: 1000, executed_at: new Date('2026-01-01T00:05:00Z') })
 })
 
 test('SaxoClient.getExecutionPrice leaves executed_at undefined when audit activity has no timestamp', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () =>
+            new Response(
+                JSON.stringify({
+                    Data: [
+                        { LogId: 'L2', OrderId: 'ORD-123', Status: 'FinalFill', AveragePrice: 18066.67, FilledAmount: 1000 },
+                    ],
+                }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            ),
+    })
+
+    const result = await client.getExecutionPrice('ORD-123', 'USDJPY')
+
+    assert.deepEqual(result, { price: 18066.67, size: 1000, executed_at: undefined })
+})
+
+test('SaxoClient.getExecutionPrice returns null when fill activity has no amount', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'valid-token',
@@ -251,7 +280,7 @@ test('SaxoClient.getExecutionPrice leaves executed_at undefined when audit activ
 
     const result = await client.getExecutionPrice('ORD-123', 'USDJPY')
 
-    assert.deepEqual(result, { price: 18066.67, size: 0, executed_at: undefined })
+    assert.equal(result, null)
 })
 
 test('SaxoClient.getExecutionPrice returns null when activities are empty', async () => {

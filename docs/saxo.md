@@ -28,4 +28,4 @@ polling 状態は `cron_metadata/saxo_orderactivities_poll_state` に保存す�
 
 前回 polling から 30 分以内で `next_poll_url` がある場合は cursor を使う。30 分を超えている場合は cursor を捨て、`last_poll_at` から 30 分巻き戻した `FromDateTime` と現在時刻の `ToDateTime` で再取得する。初回は 48 時間 lookback で取得する。
 
-約定数量は `FillAmount` を優先して合算し、価格は約定数量による加重平均にする。`FillAmount` がない場合は `FilledAmount` / `Amount` を累積数量として扱う。古いレスポンスなどで数量がない場合のみ、注文 metadata の expected size を互換 fallback として使う。
+約定数量は `FillAmount` を優先して合算し、価格は約定数量による加重平均にする。`FillAmount` がない場合は `FilledAmount` / `Amount` を累積数量として扱う。数量フィールドがない場合、注文 metadata の expected size では補完せず、約定数量不明として同期しない。

@@ -74,7 +74,7 @@ Saxo は entry の Market order に `Orders` として関連注文を付ける�
 | `exits[].resolved.order_id` | Saxo の related order id。レスポンスに含まれない場合は `null` |
 | `external_reference` | Saxo 発注時に付与した `tg:` prefix の識別補助 |
 
-exit 同期では、`cs/v1/audit/orderactivities` を時間範囲または poll cursor で一括取得し、解決済みの related order id と突合する。`FinalFill` または `Fill` の `ExecutionPrice` / `AveragePrice` を約定価格として使い、`FillAmount` を優先して数量を合算する。`FillAmount` がない場合は `FilledAmount` / `Amount` を累積数量として扱う。数量フィールドがない古いレスポンスでは、互換 fallback として metadata の expected size と親注文の requested size から同期数量を決める。
+exit 同期では、`cs/v1/audit/orderactivities` を時間範囲または poll cursor で一括取得し、解決済みの related order id と突合する。`FinalFill` または `Fill` の `ExecutionPrice` / `AveragePrice` を約定価格として使い、`FillAmount` を優先して数量を合算する。`FillAmount` がない場合は `FilledAmount` / `Amount` を累積数量として扱う。数量フィールドがないレスポンスは約定数量を確定できないため、同期対象にしない。
 
 片側の related order だけが約定している場合は、その約定だけを exit レコードへ反映する。もう片側が未約定またはキャンセル済みで audit activity がない場合は無視する。Saxo の発注レスポンスで related order id が返らず `resolved.order_id === null` の場合、誤同期を避けるため exit 同期は no-op になる。
 
@@ -150,7 +150,7 @@ closing.size >= order.requested_size - EPSILON
 
 ## 部分約定への対応
 
-bitflyer では IFDOCO の exit 注文（STOP / LIMIT）が部分約定する可能性があります。Saxo は audit activity から正確な fill 数量をまだ取得できていないため、現在は related order の expected size を同期数量として扱います。
+bitflyer では IFDOCO の exit 注文（STOP / LIMIT）が部分約定する可能性があります。Saxo も audit activity の `FillAmount` / `FilledAmount` / `Amount` から取得できた数量だけを同期数量として扱います。
 
 - **初回約定時**：exit レコードを新規作成（`executed_size` は部分約定数量）
 - **約定進展時**：既存 exit レコードの `executed_size` / `executed_price` を更新
@@ -163,5 +163,5 @@ bitflyer では IFDOCO の exit 注文（STOP / LIMIT）が部分約定する可
 - `broker_order_metadata` が正しく設定されていない場合、子注文の識別に失敗する可能性があります
 - bitflyer API のレート制限により、大量の IFDOCO 注文を同時に処理する場合は遅延が発生する可能性があります
 - Saxo の related order id が発注レスポンスに含まれない場合、exit 同期は安全側で no-op になります
-- Saxo の部分約定数量は audit activity だけでは確定できないため、正確な fill amount の取得元が確認できたら同期数量の算出を見直す必要があります
+- Saxo の audit activity に数量フィールドが含まれない場合、約定価格があっても数量不明として同期しません
 - `EPSILON = 0.00000001` は浮動小数点の精度誤差を考慮した値です

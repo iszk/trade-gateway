@@ -1,6 +1,6 @@
 ---
 title: Saxo の約定数量を requested_size フォールバックに頼らず取得する
-status: todo
+status: wip
 ---
 
 # 概要
@@ -35,3 +35,9 @@ Saxo の約定取得で `getExecutionPrice()` が `size: 0` を返し、orders_v
 ## 2026-06-11 00:05 Codex GPT-5
 
 起票した。`saxo.ts:730` 付近で price が取れた場合に `size: 0` を返し、`saxo.ts:763` と `saxo.ts:790` で requested_size / expected.size へ補完している。これは「新ロジックがなければ旧・暫定値へ戻る」系の互換処理で、orders_v2 を実約定ベースにするうえでは別粒度で解消する必要がある。
+
+## 2026-06-23 23:18 Codex GPT-5
+
+実装に着手し、Saxo の audit activity 集計から requested_size / expected size の fallback 経路を削除した。`FillAmount` があれば fill 単位で加重平均し、なければ `FilledAmount` / `Amount` の累積数量を使う。数量フィールドが取れない場合は価格があっても `execution: null` とし、約定数量を確定できない状態として扱う。
+
+旧 `getExecutionPrice()` の `size: 0` 返却も廃止し、同じ集計ロジックに統一した。関連テストと Saxo/IFDOCO ドキュメントの互換 fallback 記述を更新した。

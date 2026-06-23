@@ -188,7 +188,6 @@ const getSaxoActivityCumulativeAmount = (activity: SaxoOrderActivity): number | 
 
 const aggregateSaxoExecution = (
     activities: SaxoOrderActivity[],
-    fallbackSize?: number,
 ): { price: number, size: number, executed_at?: Date } | null => {
     const fills = activities
         .filter(isSaxoFillActivity)
@@ -231,10 +230,9 @@ const aggregateSaxoExecution = (
             .filter((amount): amount is number => amount !== null),
         0,
     )
-    const size = cumulativeSize > 0 ? cumulativeSize : fallbackSize
-    if (typeof size !== 'number' || size <= 0) return null
+    if (cumulativeSize <= 0) return null
 
-    return { price: latestPrice, size, executed_at: latestExecutedAt }
+    return { price: latestPrice, size: cumulativeSize, executed_at: latestExecutedAt }
 }
 
 const summarizeSaxoActivities = (activities: SaxoOrderActivity[]): Record<string, number> => {
@@ -530,10 +528,10 @@ export class SaxoClient {
         return cacheActivities(activities)
     }
 
-    private async getExecutionFromRecentActivities(orderId: string, fallbackSize?: number): Promise<{ price: number, size: number, executed_at?: Date } | null> {
+    private async getExecutionFromRecentActivities(orderId: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
         const activities = await this.fetchOrderActivitiesBatch()
         const matchingActivities = activities.filter((activity) => activity.OrderId === orderId)
-        const execution = aggregateSaxoExecution(matchingActivities, fallbackSize)
+        const execution = aggregateSaxoExecution(matchingActivities)
 
         if (matchingActivities.length === 0) {
             this.logger.info(
@@ -1072,32 +1070,7 @@ export class SaxoClient {
                 return null
             }
 
-            // Amount を取得するために別の場所を見る必要があるかもしれないが、
-            // activities に入っている AveragePrice と、元々の注文数量を使えば暫定的に OK かもしれない。
-            // 本来は Fill ごとの Amount を合算すべき。
-            // SaxoOrderActivity に Amount はないようなので、とりあえず Fill があれば全量約定とみなすか、
-            // もし Amount があればそれを使う。
-
-            const fillActivity = data.Data.find((a) =>
-                (a.Status === 'FinalFill' || a.Status === 'Fill') && a.AveragePrice !== undefined
-            )
-
-            if (fillActivity?.AveragePrice !== undefined) {
-                // TODO: 正確な数量を取得する。現在は暫定的に、注文時に渡された数量が分かれば良いが、
-                // ここでは分からないので、とりあえず 0 以外を返して fetcher の呼び出し元で requested_size を使わせるか、
-                // あるいは BrokerAPI を改善して元々の数量を引数で取る。
-                // ひとまず、price があれば size: 0 (不明だが約定はした) として返し、呼び出し元で requested_size にフォールバックさせる。
-                // 
-                // 修正：SaxoClient の他のメソッドで Amount を持っている可能性のあるレスポンスを調べる。
-                // 実際には /trade/v1/orders/{OrderId} で詳細が見れるはず。
-                return {
-                    price: fillActivity.AveragePrice,
-                    size: 0,
-                    executed_at: parseSaxoActivityTime(fillActivity),
-                }
-            }
-
-            return null
+            return aggregateSaxoExecution(data.Data.filter((activity) => activity.OrderId === orderId))
         } catch (error) {
             this.logger.warn(
                 { event: 'saxo:get_execution_price_failed', orderId, error },
@@ -1116,14 +1089,13 @@ export class SaxoClient {
         const metadata = order.broker_order_metadata
         if (metadata?.kind !== 'saxo_order_v1') {
             return {
-                execution: await this.getExecutionFromRecentActivities(providerOrderId, order.requested_size),
+                execution: await this.getExecutionFromRecentActivities(providerOrderId),
             }
         }
 
         const entryOrderId = metadata.entry.resolved.order_id || metadata.order_id || providerOrderId
-        const execution = await this.getExecutionFromRecentActivities(entryOrderId, metadata.entry.expected.size)
         return {
-            execution: execution ? { ...execution, size: execution.size || order.requested_size } : null,
+            execution: await this.getExecutionFromRecentActivities(entryOrderId),
             brokerOrderMetadata: metadata,
         }
     }
@@ -1147,10 +1119,10 @@ export class SaxoClient {
             const exitOrderId = exit.resolved.order_id
             if (!exitOrderId) continue
 
-            const execution = await this.getExecutionFromRecentActivities(exitOrderId, Math.min(exit.expected.size, order.requested_size))
+            const execution = await this.getExecutionFromRecentActivities(exitOrderId)
             if (!execution) continue
 
-            const size = execution.size || Math.min(exit.expected.size, order.requested_size)
+            const size = execution.size
             totalSize += size
             totalValue += execution.price * size
             if (execution.executed_at && (!latestExecutedAt || execution.executed_at.getTime() > latestExecutedAt.getTime())) {
