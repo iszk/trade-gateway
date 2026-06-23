@@ -4,8 +4,8 @@ import type { ListOrdersV2ByDateRangeFn } from './orders-v2.js'
 
 const EPSILON = 0.00000001
 
-const isExecutedOrderWithExecutedAt = (order: OrderV2): order is OrderV2 & { status: 'EXECUTED'; executed_at: Date } => (
-    order.status === 'EXECUTED' && order.executed_at !== undefined
+const isExecutableOrder = (order: OrderV2): order is OrderV2 & { status: 'EXECUTED'; executed_at: Date; executed_price: number } => (
+    order.status === 'EXECUTED' && order.executed_at !== undefined && order.executed_price !== null
 )
 
 export type TradeRecord = {
@@ -79,7 +79,7 @@ type OpenLot = {
 
 export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWithId[] => {
     const executedOrders = orders
-        .filter(isExecutedOrderWithExecutedAt)
+        .filter(isExecutableOrder)
         .filter((order) => (order.executed_size || order.requested_size) > EPSILON)
         .sort((a, b) => a.executed_at.getTime() - b.executed_at.getTime() || a.id.localeCompare(b.id))
 
@@ -102,7 +102,7 @@ export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWit
                     broker: order.broker,
                     side: order.side,
                     remaining_size: remainingSize,
-                    price: order.executed_price!,
+                    price: order.executed_price,
                     opened_at: orderTime,
                 })
                 remainingSize = 0
@@ -112,8 +112,8 @@ export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWit
             const openLot = lots[openIndex]!
             const closeSize = Math.min(openLot.remaining_size, remainingSize)
             const pnl = openLot.side === 'BUY'
-                ? (order.executed_price! - openLot.price) * closeSize
-                : (openLot.price - order.executed_price!) * closeSize
+                ? (order.executed_price - openLot.price) * closeSize
+                : (openLot.price - order.executed_price) * closeSize
 
             records.push({
                 docId: `${openLot.event_id}:${order.id}:${records.length}`,
@@ -122,7 +122,7 @@ export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWit
                 broker: order.broker,
                 entry_side: openLot.side,
                 entry_price: openLot.price,
-                exit_price: order.executed_price!,
+                exit_price: order.executed_price,
                 size: closeSize,
                 pnl,
                 entry_event_id: openLot.event_id,

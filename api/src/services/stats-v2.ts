@@ -24,14 +24,14 @@ export type StatsV2 = {
  */
 const EPSILON = 0.00000001
 
-const isExecutedOrderWithExecutedAt = (order: OrderV2): order is OrderV2 & { status: 'EXECUTED'; executed_at: Date } => (
-    order.status === 'EXECUTED' && order.executed_at !== undefined
+const isExecutableOrder = (order: OrderV2): order is OrderV2 & { status: 'EXECUTED'; executed_at: Date; executed_price: number } => (
+    order.status === 'EXECUTED' && order.executed_at !== undefined && order.executed_price !== null
 )
 
 export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => {
     // EXECUTED 注文は executed_at を日時基準にする。欠落した旧データは集計対象外。
     const executedOrders = orders
-        .filter(isExecutedOrderWithExecutedAt)
+        .filter(isExecutableOrder)
         .sort((a, b) => a.executed_at.getTime() - b.executed_at.getTime() || a.id.localeCompare(b.id))
 
     const openOrders = orders.filter((o) => o.status === 'PENDING').length
@@ -54,7 +54,7 @@ export const computeStatsV2 = (orders: OrderV2[], strategy: string): StatsV2 => 
         const size = order.executed_size || order.requested_size
         if (size < EPSILON) continue
 
-        const price = order.executed_price!
+        const price = order.executed_price
         const isBuy = order.side === 'BUY'
 
         if (Math.abs(currentPosition) < EPSILON) {

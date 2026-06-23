@@ -83,6 +83,29 @@ test('computeStatsV2: executed_at がない EXECUTED 注文は集計対象外に
     assert.equal(stats.total_trades, 0)
 })
 
+test('computeStatsV2: executed_price が null の EXECUTED 注文は集計対象外にする', () => {
+    const orders: OrderV2[] = [
+        makeOrder({
+            id: 'legacy-buy-without-executed-price',
+            side: 'BUY',
+            executed_price: null,
+            executed_at: new Date('2026-01-01T00:00:00Z'),
+        }),
+        makeOrder({
+            id: 'sell-with-executed-price',
+            side: 'SELL',
+            executed_price: 1100000,
+            executed_at: new Date('2026-01-01T01:00:00Z'),
+        }),
+    ]
+
+    const stats = computeStatsV2(orders, 'test-strategy')
+
+    assert.equal(stats.current_position, -0.01)
+    assert.equal(stats.realized_pnl, 0)
+    assert.equal(stats.total_trades, 0)
+})
+
 test('computeStatsV2: partial close', () => {
     const orders: OrderV2[] = [
         makeOrder({ side: 'BUY', executed_price: 1000000, executed_size: 0.01, executed_at: new Date('2026-01-01T00:00:00Z') }),
