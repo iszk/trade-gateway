@@ -158,6 +158,7 @@ broker 別の日次残高スナップショットを保持する。`/api/balance
 ### 制約
 - 親注文・exit 注文ともにドキュメント ID を一意キーとして upsert / update する
 - クローズ済みトレードの read model は別コレクションに保存せず、`orders_v2` から再計算する
+- cron による `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。metadata が未設定、または broker が期待する `kind` ではない注文は warn ログを出して同期を no-op とし、旧 order id ベースの探索へフォールバックしない
 - TTL は現時点で使用しない
 
 ## 保持期間（MVP）

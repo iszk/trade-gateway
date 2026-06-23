@@ -61,7 +61,7 @@ bitflyer では SL がトリガーされた後、STOP 子注文ではなく MARK
 
 `execution: null` → cron 処理はスキップ（次回まで待機）。
 
-`orders_v2` の cron 同期は、ブローカーごとの `getClosingExecutionForOrderV2(order)` を必ず呼び出し、cron 側から旧 `getClosingExecution(parentOrderId, ticker)` を直接呼ぶフォールバックは行わない。なお、broker 実装内部に残る metadata 欠落時の旧ロジックフォールバックは issue 0019 の対象として分離している。
+`orders_v2` の cron 同期は、ブローカーごとの `getClosingExecutionForOrderV2(order)` を必ず呼び出し、cron 側から旧 `getClosingExecution(parentOrderId, ticker)` を直接呼ぶフォールバックは行わない。broker 実装内部でも `broker_order_metadata.kind === 'bitflyer_parent_order_v1'` を必須とし、metadata 欠落・不一致時は warn ログを出して no-op にする。旧 order id ベースの `getClosingExecution(parentOrderId, ticker)` へはフォールバックしない。
 
 #### Saxo
 
@@ -77,6 +77,7 @@ Saxo は entry の Market order に `Orders` として関連注文を付ける�
 exit 同期では、`cs/v1/audit/orderactivities` を時間範囲または poll cursor で一括取得し、解決済みの related order id と突合する。`FinalFill` または `Fill` の `ExecutionPrice` / `AveragePrice` を約定価格として使い、`FillAmount` を優先して数量を合算する。`FillAmount` がない場合は `FilledAmount` / `Amount` を累積数量として扱う。数量フィールドがない古いレスポンスでは、互換 fallback として metadata の expected size と親注文の requested size から同期数量を決める。
 
 片側の related order だけが約定している場合は、その約定だけを exit レコードへ反映する。もう片側が未約定またはキャンセル済みで audit activity がない場合は無視する。Saxo の発注レスポンスで related order id が返らず `resolved.order_id === null` の場合、誤同期を避けるため exit 同期は no-op になる。
+`broker_order_metadata.kind !== 'saxo_order_v1'` の場合も warn ログを出して no-op にし、entry order id だけを使った旧探索へはフォールバックしない。
 
 ### 5. バリデーション
 
@@ -160,7 +161,7 @@ bitflyer では IFDOCO の exit 注文（STOP / LIMIT）が部分約定する可
 
 ## 注意事項
 
-- `broker_order_metadata` が正しく設定されていない場合、子注文の識別に失敗する可能性があります
+- `broker_order_metadata` が正しく設定されていない場合、orders_v2 の約定・exit 同期は安全側で no-op になります。既存の metadata 欠落レコードを同期したい場合は、metadata を backfill するか、対象レコードを手動で破棄・再作成してください
 - bitflyer API のレート制限により、大量の IFDOCO 注文を同時に処理する場合は遅延が発生する可能性があります
 - Saxo の related order id が発注レスポンスに含まれない場合、exit 同期は安全側で no-op になります
 - Saxo の部分約定数量は audit activity だけでは確定できないため、正確な fill amount の取得元が確認できたら同期数量の算出を見直す必要があります

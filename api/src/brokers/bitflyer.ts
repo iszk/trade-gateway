@@ -602,9 +602,17 @@ export class BitflyerClient {
 
         const metadata = order.broker_order_metadata
         if (metadata?.kind !== 'bitflyer_parent_order_v1') {
-            return {
-                execution: await this.getExecutionPrice(providerOrderId, order.ticker),
-            }
+            this.logger.warn(
+                {
+                    event: 'bitflyer:orders_v2_metadata_missing',
+                    orderId: order.id,
+                    ticker: order.ticker,
+                    expectedKind: 'bitflyer_parent_order_v1',
+                    actualKind: metadata?.kind,
+                },
+                'orders_v2 execution sync skipped: broker_order_metadata is missing or invalid',
+            )
+            return { execution: null }
         }
 
         try {
@@ -642,9 +650,17 @@ export class BitflyerClient {
 
         const metadata = order.broker_order_metadata
         if (metadata?.kind !== 'bitflyer_parent_order_v1') {
-            return {
-                execution: await this.getClosingExecution(providerOrderId, order.ticker),
-            }
+            this.logger.warn(
+                {
+                    event: 'bitflyer:orders_v2_metadata_missing',
+                    orderId: order.id,
+                    ticker: order.ticker,
+                    expectedKind: 'bitflyer_parent_order_v1',
+                    actualKind: metadata?.kind,
+                },
+                'orders_v2 closing sync skipped: broker_order_metadata is missing or invalid',
+            )
+            return { execution: null }
         }
 
         try {

@@ -1115,9 +1115,17 @@ export class SaxoClient {
 
         const metadata = order.broker_order_metadata
         if (metadata?.kind !== 'saxo_order_v1') {
-            return {
-                execution: await this.getExecutionFromRecentActivities(providerOrderId, order.requested_size),
-            }
+            this.logger.warn(
+                {
+                    event: 'saxo:orders_v2_metadata_missing',
+                    orderId: order.id,
+                    ticker: order.ticker,
+                    expectedKind: 'saxo_order_v1',
+                    actualKind: metadata?.kind,
+                },
+                'orders_v2 execution sync skipped: broker_order_metadata is missing or invalid',
+            )
+            return { execution: null }
         }
 
         const entryOrderId = metadata.entry.resolved.order_id || metadata.order_id || providerOrderId
@@ -1136,6 +1144,16 @@ export class SaxoClient {
 
         const metadata = order.broker_order_metadata
         if (metadata?.kind !== 'saxo_order_v1') {
+            this.logger.warn(
+                {
+                    event: 'saxo:orders_v2_metadata_missing',
+                    orderId: order.id,
+                    ticker: order.ticker,
+                    expectedKind: 'saxo_order_v1',
+                    actualKind: metadata?.kind,
+                },
+                'orders_v2 closing sync skipped: broker_order_metadata is missing or invalid',
+            )
             return { execution: null }
         }
 

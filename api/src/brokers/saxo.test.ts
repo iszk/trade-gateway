@@ -632,10 +632,54 @@ test('SaxoClient.getExecutionPriceForOrderV2 logs when audit activities do not m
         provider_order_ids: ['ORD-requested'],
         created_at: new Date('2026-01-01T00:00:00Z'),
         updated_at: new Date('2026-01-01T00:00:00Z'),
+        broker_order_metadata: {
+            kind: 'saxo_order_v1',
+            order_id: 'ORD-requested',
+            entry: {
+                expected: { side: 'BUY', order_type: 'Market', size: 1 },
+                resolved: { order_id: 'ORD-requested' },
+            },
+            exits: [],
+        },
     })
 
     assert.equal(result.execution, null)
     assert.ok(infoLogs.some((log) => log.obj.event === 'saxo:execution_audit_no_match'))
+})
+
+test('SaxoClient.getExecutionPriceForOrderV2 no-ops when metadata is missing', async () => {
+    const db = mockFirestore()
+    const { logger, warnLogs } = createCapturingLogger()
+    const requestedUrls: string[] = []
+    const client = new SaxoClient({
+        db,
+        logger: logger as any,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            requestedUrls.push(String(url))
+            return new Response(JSON.stringify({ Data: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'evt-saxo-missing-metadata',
+        strategy: 'test',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'MARKET',
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['ORD-legacy'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.equal(result.execution, null)
+    assert.equal(requestedUrls.length, 0)
+    assert.ok(warnLogs.some((log) => log.obj.event === 'saxo:orders_v2_metadata_missing'))
 })
 
 test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executions from one audit batch', async () => {
@@ -810,6 +854,15 @@ test('SaxoClient.getExecutionPriceForOrderV2 ignores stale next poll cursor afte
         provider_order_ids: ['ORD-stale-cursor'],
         created_at: new Date('2026-01-01T00:00:00Z'),
         updated_at: new Date('2026-01-01T00:00:00Z'),
+        broker_order_metadata: {
+            kind: 'saxo_order_v1',
+            order_id: 'ORD-stale-cursor',
+            entry: {
+                expected: { side: 'BUY', order_type: 'Market', size: 1 },
+                resolved: { order_id: 'ORD-stale-cursor' },
+            },
+            exits: [],
+        },
     })
 
     assert.ok(requestedUrl.startsWith('https://example.com/cs/v1/audit/orderactivities/'))
@@ -854,4 +907,37 @@ test('SaxoClient.getClosingExecutionForOrderV2 no-ops when related order ids are
 
     assert.equal(result.execution, null)
     assert.equal(result.brokerOrderMetadata?.kind, 'saxo_order_v1')
+})
+
+test('SaxoClient.getClosingExecutionForOrderV2 no-ops when metadata is missing', async () => {
+    const { logger, warnLogs } = createCapturingLogger()
+    const requestedUrls: string[] = []
+    const client = new SaxoClient({
+        db: mockFirestore(),
+        logger: logger as any,
+        fetchImpl: async (url) => {
+            requestedUrls.push(String(url))
+            return new Response(JSON.stringify({ Data: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        },
+    })
+
+    const result = await client.getClosingExecutionForOrderV2({
+        id: 'evt-saxo-close-missing-metadata',
+        strategy: 'test',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 1,
+        executed_size: 1,
+        executed_price: 100,
+        status: 'EXECUTED',
+        provider_order_ids: ['ORD-entry-legacy'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.equal(result.execution, null)
+    assert.equal(requestedUrls.length, 0)
+    assert.ok(warnLogs.some((log) => log.obj.event === 'saxo:orders_v2_metadata_missing'))
 })

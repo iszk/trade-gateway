@@ -13,6 +13,21 @@ const makeOrder = () => ({
     requestId: 'req-1',
 })
 
+const createCapturingLogger = () => {
+    const warnLogs: Array<{ obj: Record<string, unknown>, msg?: string }> = []
+
+    const logger = {
+        info: () => undefined,
+        warn: (obj: Record<string, unknown>, msg?: string) => {
+            warnLogs.push({ obj, msg })
+        },
+        error: () => undefined,
+        child: () => logger,
+    }
+
+    return { logger, warnLogs }
+}
+
 test('BitflyerClient returns not configured when credentials are missing', async () => {
     const client = new BitflyerClient({
         apiKey: undefined,
@@ -949,6 +964,41 @@ test('BitflyerClient.getExecutionPriceForOrderV2 returns null when resolved entr
     assert.ok(requestedUrls[0]?.includes('child_order_acceptance_id=JRF-child-entry-no-execution'))
 })
 
+test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when metadata is missing', async () => {
+    const { logger, warnLogs } = createCapturingLogger()
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        logger: logger as any,
+        fetchImpl: async (url) => {
+            requestedUrls.push(String(url))
+            return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'v2-entry-missing-metadata',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'MARKET',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-child-legacy'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.equal(result.execution, null)
+    assert.equal(requestedUrls.length, 0)
+    assert.ok(warnLogs.some((log) => log.obj.event === 'bitflyer:orders_v2_metadata_missing'))
+})
+
 test('BitflyerClient.getClosingExecutionForOrderV2 resolves close acceptance ids from metadata even when completed child is MARKET', async () => {
     const order: OrderV2 = {
         id: 'v2-close-meta',
@@ -1195,6 +1245,41 @@ test('BitflyerClient.getClosingExecutionForOrderV2 returns partial close and no-
     assert.deepEqual(result.execution, { price: 9500000, size: 0.004, executed_at: new Date('2026-01-01T01:00:00.000Z') })
     assert.deepEqual(result.brokerOrderMetadata, order.broker_order_metadata)
     assert.equal(requestedUrls.length, 2)
+})
+
+test('BitflyerClient.getClosingExecutionForOrderV2 no-ops when metadata is missing', async () => {
+    const { logger, warnLogs } = createCapturingLogger()
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        logger: logger as any,
+        fetchImpl: async (url) => {
+            requestedUrls.push(String(url))
+            return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+        },
+    })
+
+    const result = await client.getClosingExecutionForOrderV2({
+        id: 'v2-close-missing-metadata',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0.01,
+        executed_price: 9700000,
+        status: 'EXECUTED',
+        provider_order_ids: ['JRF-parent-legacy'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.equal(result.execution, null)
+    assert.equal(requestedUrls.length, 0)
+    assert.ok(warnLogs.some((log) => log.obj.event === 'bitflyer:orders_v2_metadata_missing'))
 })
 
 test('BitflyerClient.getClosingExecution returns null when parent acceptance id cannot be resolved', async () => {
