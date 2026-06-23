@@ -602,9 +602,17 @@ export class BitflyerClient {
 
         const metadata = order.broker_order_metadata
         if (metadata?.kind !== 'bitflyer_parent_order_v1') {
-            return {
-                execution: await this.getExecutionPrice(providerOrderId, order.ticker),
-            }
+            this.logger.warn(
+                {
+                    event: 'bitflyer:orders_v2_metadata_missing',
+                    orderId: order.id,
+                    ticker: order.ticker,
+                    expectedKind: 'bitflyer_parent_order_v1',
+                    actualKind: metadata?.kind,
+                },
+                'orders_v2 execution sync skipped: broker_order_metadata is missing or invalid',
+            )
+            return { execution: null }
         }
 
         try {
@@ -642,9 +650,17 @@ export class BitflyerClient {
 
         const metadata = order.broker_order_metadata
         if (metadata?.kind !== 'bitflyer_parent_order_v1') {
-            return {
-                execution: await this.getClosingExecution(providerOrderId, order.ticker),
-            }
+            this.logger.warn(
+                {
+                    event: 'bitflyer:orders_v2_metadata_missing',
+                    orderId: order.id,
+                    ticker: order.ticker,
+                    expectedKind: 'bitflyer_parent_order_v1',
+                    actualKind: metadata?.kind,
+                },
+                'orders_v2 closing sync skipped: broker_order_metadata is missing or invalid',
+            )
+            return { execution: null }
         }
 
         try {
@@ -687,118 +703,4 @@ export class BitflyerClient {
         }
     }
 
-    async getExecutionPrice(providerOrderId: string, ticker: string): Promise<{ price: number, size: number } | null> {
-        if (providerOrderId === 'DRY_RUN') return null
-
-        const productCode = resolveProductCode(ticker)
-
-        this.logger.info({
-            event: 'bitflyer:get_execution_price_start', providerOrderId
-        }, 'fetching execution price for order ' + ticker + ' ' + providerOrderId)
-
-        try {
-            // child_order_acceptance_id として照会
-            const directExecs = await this.callApi<BitflyerExecutionEntry[]>(
-                'GET',
-                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(productCode)}&child_order_acceptance_id=${encodeURIComponent(providerOrderId)}`,
-            )
-            if (directExecs.length > 0) {
-                const price = weightedAvgExecs(directExecs)
-                const size = totalSizeExecs(directExecs)
-                if (price !== null) return { price, size }
-            }
-
-            // 親注文受付ID(JRF...)から親注文ID(JCO...)へ解決した上で、子注文一覧を取得する
-            const parentOrderId = await this.resolveParentOrderId(providerOrderId)
-            if (!parentOrderId) return null
-
-            const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
-                'GET',
-                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_id=${encodeURIComponent(parentOrderId)}`,
-            )
-            if (childOrders.length === 0) return null
-
-            const entryChild = childOrders.find(c => c.child_order_type === 'MARKET')
-            if (!entryChild) return null
-            const entryChildId = entryChild.child_order_acceptance_id
-            const childExecs = await this.callApi<BitflyerExecutionEntry[]>(
-                'GET',
-                `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(productCode)}&child_order_acceptance_id=${encodeURIComponent(entryChildId)}`,
-            )
-            if (childExecs.length > 0) {
-                const price = weightedAvgExecs(childExecs)
-                const size = totalSizeExecs(childExecs)
-                if (price !== null) return { price, size }
-            }
-            return null
-        } catch (error) {
-            this.logger.warn(
-                { event: 'bitflyer:get_execution_price_failed', providerOrderId, ticker, error },
-                'failed to get execution price for order ' + ticker + ' ' + providerOrderId,
-            )
-            return null
-        }
-    }
-
-    /**
-     * IFD/IFDOCO の決済子注文（child[1] 以降）を確認し、
-     * COMPLETED の子注文があれば約定価格を返す。
-     * 未約定なら null。
-     */
-    async getClosingExecution(parentOrderId: string, ticker: string): Promise<{ price: number, size: number } | null> {
-        if (parentOrderId === 'DRY_RUN') return null
-
-        const productCode = resolveProductCode(ticker)
-
-        try {
-            const resolvedParentOrderId = await this.resolveParentOrderId(parentOrderId)
-            if (!resolvedParentOrderId) return null
-
-            const childOrders = await this.callApi<BitflyerChildOrderEntry[]>(
-                'GET',
-                `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_id=${encodeURIComponent(resolvedParentOrderId)}`,
-            )
-
-            // 
-            this.logger.info({
-                event: 'bitflyer:get_closing_execution_child_orders_fetched',
-                url: `${GET_CHILD_ORDERS_PATH}?product_code=${encodeURIComponent(productCode)}&parent_order_id=${encodeURIComponent(resolvedParentOrderId)}`,
-                parentOrderId,
-                resolvedParentOrderId,
-                ticker,
-                childOrdersCount: childOrders.length,
-                body: childOrders,
-            }, 'fetched child orders for parent order ' + parentOrderId)
-
-            // MARKET 注文はエントリーなのでスキップし、STOP/LIMIT 等の決済注文のみ対象にする
-            // API のレスポンス順に依存せず child_order_type で判定する
-            const closingChildren = childOrders.filter(c => c.child_order_type !== 'MARKET' && c.child_order_state === 'COMPLETED')
-
-            let totalSize = 0
-            let totalValue = 0
-
-            for (const child of closingChildren) {
-                const execs = await this.callApi<BitflyerExecutionEntry[]>(
-                    'GET',
-                    `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(productCode)}&child_order_acceptance_id=${encodeURIComponent(child.child_order_acceptance_id)}`,
-                )
-                totalSize += totalSizeExecs(execs)
-                for (const e of execs) {
-                    totalValue += e.price * e.size
-                }
-            }
-
-            if (totalSize > 0) {
-                return { price: totalValue / totalSize, size: totalSize }
-            }
-
-            return null
-        } catch (error) {
-            this.logger.warn(
-                { event: 'bitflyer:get_closing_execution_failed', parentOrderId, ticker, error },
-                'failed to get closing execution for parent order ' + parentOrderId,
-            )
-            return null
-        }
-    }
 }
