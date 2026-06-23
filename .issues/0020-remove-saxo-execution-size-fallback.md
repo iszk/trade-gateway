@@ -1,6 +1,6 @@
 ---
 title: Saxo の約定数量を requested_size フォールバックに頼らず取得する
-status: wip
+status: done
 ---
 
 # 概要

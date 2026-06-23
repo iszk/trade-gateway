@@ -1,6 +1,6 @@
 ---
 title: orders_v2 同期で broker metadata 欠落時の旧ロジックフォールバックを廃止する
-status: wip
+status: done
 ---
 
 # 概要
