@@ -1,6 +1,6 @@
 ---
 title: fetchAllBalances 実行時に broker 間で daily_balances の日付がずれる問題を解消する
-status: wip
+status: done
 ---
 
 # 概要

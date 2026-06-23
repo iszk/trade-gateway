@@ -126,7 +126,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
 
     for (const order of pendingOrders) {
         if (shouldSkipStaleSaxoPendingOrder(order, ctx.nowMs)) {
-            ctx.logger.warn(
+            ctx.logger.info(
                 {
                     event: 'cron:saxo_pending_order_sync_skipped_stale',
                     orderId: order.id,

@@ -1,6 +1,6 @@
 ---
 title: createGetActiveIfdOrdersV2Fn の where 条件見直しを確認する
-status: todo
+status: done
 ---
 
 # 概要

@@ -1,6 +1,6 @@
 ---
 title: bitFlyer ポジション取得の固定 ticker フォールバックを廃止する
-status: wip
+status: done
 ---
 
 # 概要
