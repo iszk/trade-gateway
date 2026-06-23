@@ -43,7 +43,7 @@ test('executeTenMinutelyTask: orders_v2 の PENDING を EXECUTED に更新する
         getPendingOrdersV2: async () => [pendingOrder],
         updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
         executionPriceFetchers: {
-            bitflyer: { getExecutionPrice: async () => ({ price: 9800000, size: 0.01 }) },
+            bitflyer: { getExecutionPriceForOrderV2: async () => ({ execution: { price: 9800000, size: 0.01 } }) },
         },
     })
 
@@ -73,7 +73,7 @@ test('executeTenMinutelyTask: PENDING の IFDOCO 親注文が EXECUTED になっ
         getPendingOrdersV2: async () => [pendingOrder],
         updateOrderV2: async (id, u) => { updatedOrders.push({ id, ...u }) },
         executionPriceFetchers: {
-            bitflyer: { getExecutionPrice: async () => ({ price: 9800000, size: 0.01 }) },
+            bitflyer: { getExecutionPriceForOrderV2: async () => ({ execution: { price: 9800000, size: 0.01 } }) },
         },
     })
 
@@ -108,7 +108,6 @@ test('executeTenMinutelyTask: orders_v2 の実約定時刻を fetcher の値で�
         updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
         executionPriceFetchers: {
             bitflyer: {
-                getExecutionPrice: async () => null,
                 getExecutionPriceForOrderV2: async () => ({
                     execution: { price: 9810000, size: 0.01, executed_at: executedAt },
                 }),
@@ -148,7 +147,6 @@ test('executeTenMinutelyTask: orders_v2 の entry metadata 解決結果を保存
         updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
         executionPriceFetchers: {
             bitflyer: {
-                getExecutionPrice: async () => null,
                 getExecutionPriceForOrderV2: async () => ({
                     execution: null,
                     brokerOrderMetadata: {
@@ -189,9 +187,9 @@ test('executeTenMinutelyTask: 古い Saxo PENDING 注文は約定同期をスキ
         updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
         executionPriceFetchers: {
             saxo: {
-                getExecutionPrice: async () => {
+                getExecutionPriceForOrderV2: async () => {
                     fetchCount += 1
-                    return { price: 101.5, size: 1000 }
+                    return { execution: { price: 101.5, size: 1000 } }
                 },
             },
         },
@@ -221,9 +219,9 @@ test('executeTenMinutelyTask: Saxo PENDING 注文の約定同期は10件を超�
         updateOrderV2: async () => { },
         executionPriceFetchers: {
             saxo: {
-                getExecutionPrice: async () => {
+                getExecutionPriceForOrderV2: async () => {
                     fetchCount += 1
-                    return null
+                    return { execution: null }
                 },
             },
         },
@@ -261,7 +259,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         addOrderV2: async (o) => { addedOrders.push(o) },
         updateOrderV2: async (id, u) => { updatedOrders.push({ id, ...u }) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 10500000, size: 0.004 }) },
+            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10500000, size: 0.004 } }) },
         },
     })
     await executeTenMinutelyTask(ctx1)
@@ -281,7 +279,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         addOrderV2: async (o) => { addedOrders2.push(o) },
         updateOrderV2: async (id, u) => { updatedOrders2.push({ id, ...u }) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 10600000, size: 0.007 }) },
+            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10600000, size: 0.007 } }) },
         },
     })
     await executeTenMinutelyTask(ctx2)
@@ -299,7 +297,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         addOrderV2: async () => { },
         updateOrderV2: async (id, u) => { updatedOrders3.push({ id, ...u }) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 10700000, size: 0.01 }) },
+            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10700000, size: 0.01 } }) },
         },
     })
     await executeTenMinutelyTask(ctx3)
@@ -340,7 +338,7 @@ test('executeTenMinutelyTask: IFDOCO の closing.size が requested_size を超�
         addOrderV2: async (o) => { addedOrders.push(o) },
         updateOrderV2: async (id, u) => { updatedOrders.push({ id, ...u }) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecution: async () => ({ price: 10500000, size: 0.02 }) },
+            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10500000, size: 0.02 } }) },
         },
     })
 
@@ -392,7 +390,6 @@ test('executeTenMinutelyTask: IFDOCO の close metadata 解決結果を親 order
         updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
         closingExecutionFetchers: {
             bitflyer: {
-                getClosingExecution: async () => null,
                 getClosingExecutionForOrderV2: async () => ({
                     execution: { price: 10500000, size: 0.01, executed_at: new Date('2026-01-01T00:30:00Z') },
                     brokerOrderMetadata: {
@@ -444,7 +441,7 @@ test('executeTenMinutelyTask: Saxo の closingExecutionFetcher で exit レコ�
         addOrderV2: async (o) => { addedOrders.push(o) },
         updateOrderV2: async (id, u) => { updatedOrders.push({ id, ...u }) },
         closingExecutionFetchers: {
-            saxo: { getClosingExecution: async () => ({ price: 105, size: 1 }) },
+            saxo: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 105, size: 1 } }) },
         },
     })
 
@@ -482,9 +479,9 @@ test('executeTenMinutelyTask: Saxo exit 同期は10件を超えてもスキッ�
         updateOrderV2: async () => { },
         closingExecutionFetchers: {
             saxo: {
-                getClosingExecution: async () => {
+                getClosingExecutionForOrderV2: async () => {
                     fetchCount += 1
-                    return null
+                    return { execution: null }
                 },
             },
         },
