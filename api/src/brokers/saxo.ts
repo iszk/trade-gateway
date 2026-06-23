@@ -1012,101 +1012,6 @@ export class SaxoClient {
         }
     }
 
-    async getExecutionPrice(orderId: string, _ticker: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
-        if (orderId === 'DRY_RUN') return null
-        if (this.isRateLimited()) {
-            this.logger.warn(
-                {
-                    event: 'saxo:get_execution_price_skipped_rate_limited',
-                    orderId,
-                    rateLimitedUntil: new Date(this.rateLimitedUntilMs).toISOString(),
-                },
-                'skipping Saxo audit request while rate limited',
-            )
-            return null
-        }
-
-        const accessToken = await this.getValidAccessToken()
-        if (!accessToken) return null
-
-        try {
-            const auth = await this.getAuth()
-            const clientKey = auth?.accounts?.[0]?.clientKey
-
-            const params = new URLSearchParams()
-            params.append('OrderId', orderId)
-            if (clientKey) {
-                params.append('ClientKey', clientKey)
-            }
-
-            // Saxo の audit エンドポイントで約定情報を取得
-            const url = `${this.baseUrl}/cs/v1/audit/orderactivities/?${params.toString()}`
-            const response = await this.fetchImpl(url, {
-                headers: { Authorization: `Bearer ${accessToken}` },
-            })
-
-            if (!response.ok) {
-                if (response.status === 429) {
-                    this.markRateLimited(response)
-                }
-                this.logger.warn(
-                    {
-                        event: 'saxo:get_execution_price_failed',
-                        orderId,
-                        response: await response.text(),
-                        status: response.status
-                    },
-                    'failed to get execution price from Saxo audit',
-                )
-                return null
-            }
-
-            const data = (await response.json()) as SaxoOrderActivitiesResponse
-            if (!data.Data || data.Data.length === 0) {
-                this.logger.warn(
-                    {
-                        event: 'saxo:get_execution_price_no_activities', orderId,
-                    },
-                    'no activities found for order in Saxo audit',
-                )
-                return null
-            }
-
-            // Amount を取得するために別の場所を見る必要があるかもしれないが、
-            // activities に入っている AveragePrice と、元々の注文数量を使えば暫定的に OK かもしれない。
-            // 本来は Fill ごとの Amount を合算すべき。
-            // SaxoOrderActivity に Amount はないようなので、とりあえず Fill があれば全量約定とみなすか、
-            // もし Amount があればそれを使う。
-
-            const fillActivity = data.Data.find((a) =>
-                (a.Status === 'FinalFill' || a.Status === 'Fill') && a.AveragePrice !== undefined
-            )
-
-            if (fillActivity?.AveragePrice !== undefined) {
-                // TODO: 正確な数量を取得する。現在は暫定的に、注文時に渡された数量が分かれば良いが、
-                // ここでは分からないので、とりあえず 0 以外を返して fetcher の呼び出し元で requested_size を使わせるか、
-                // あるいは BrokerAPI を改善して元々の数量を引数で取る。
-                // ひとまず、price があれば size: 0 (不明だが約定はした) として返し、呼び出し元で requested_size にフォールバックさせる。
-                // 
-                // 修正：SaxoClient の他のメソッドで Amount を持っている可能性のあるレスポンスを調べる。
-                // 実際には /trade/v1/orders/{OrderId} で詳細が見れるはず。
-                return {
-                    price: fillActivity.AveragePrice,
-                    size: 0,
-                    executed_at: parseSaxoActivityTime(fillActivity),
-                }
-            }
-
-            return null
-        } catch (error) {
-            this.logger.warn(
-                { event: 'saxo:get_execution_price_failed', orderId, error },
-                'failed to get execution price',
-            )
-            return null
-        }
-    }
-
     async getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {
         const providerOrderId = order.provider_order_ids[0]
         if (!providerOrderId || providerOrderId === 'DRY_RUN') {
@@ -1180,10 +1085,6 @@ export class SaxoClient {
             execution: totalSize > 0 ? { price: totalValue / totalSize, size: totalSize, executed_at: latestExecutedAt } : null,
             brokerOrderMetadata: metadata,
         }
-    }
-
-    async getClosingExecution(_parentOrderId: string, _ticker: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
-        return null
     }
 
     async searchInstruments(keyword: string): Promise<SaxoInstrument[]> {

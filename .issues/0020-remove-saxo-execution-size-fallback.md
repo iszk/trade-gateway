@@ -5,12 +5,11 @@ status: todo
 
 # 概要
 
-Saxo の約定取得で `getExecutionPrice()` が `size: 0` を返し、orders_v2 用 fetcher 側で `execution.size || order.requested_size` や `Math.min(exit.expected.size, order.requested_size)` にフォールバックしている箇所を廃止する。
+Saxo の orders_v2 用 fetcher で `execution.size || order.requested_size` や `Math.min(exit.expected.size, order.requested_size)` にフォールバックしている箇所を廃止する。
 
 対象:
 
 - `api/src/brokers/saxo.ts`
-  - `getExecutionPrice()` の `size: 0`
   - `getExecutionPriceForOrderV2()` の `execution.size || order.requested_size`
   - `getClosingExecutionForOrderV2()` の `execution.size || Math.min(...)`
 - Saxo 関連テストの `requested_size fallback` 前提
@@ -35,3 +34,7 @@ Saxo の約定取得で `getExecutionPrice()` が `size: 0` を返し、orders_v
 ## 2026-06-11 00:05 Codex GPT-5
 
 起票した。`saxo.ts:730` 付近で price が取れた場合に `size: 0` を返し、`saxo.ts:763` と `saxo.ts:790` で requested_size / expected.size へ補完している。これは「新ロジックがなければ旧・暫定値へ戻る」系の互換処理で、orders_v2 を実約定ベースにするうえでは別粒度で解消する必要がある。
+
+## 2026-06-23 16:18 Codex GPT-5
+
+issue 0019 後の未使用メソッド削除で Saxo の旧 `getExecutionPrice()` は削除済みになった。この issue の残件は、orders_v2 用の `getExecutionPriceForOrderV2()` / `getClosingExecutionForOrderV2()` 内に残る requested_size / expected.size 補完の廃止に絞る。

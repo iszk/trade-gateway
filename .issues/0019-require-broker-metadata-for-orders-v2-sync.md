@@ -45,3 +45,7 @@ cron 側を v2 fetcher 必須にしても、broker 内部で metadata がなけ�
 ## 2026-06-23 16:16 Codex GPT-5
 
 bitFlyer/Saxo の v2 約定・exit 同期から metadata 欠落時の旧探索フォールバックを削除した。metadata 欠落・kind 不一致時は broker ごとに warn ログを出して `execution: null` を返し、外部 API は呼ばない。bitFlyer/Saxo の broker test に metadata 欠落時の no-op を追加し、Saxo の既存 v2 audit テストは metadata 前提に更新した。`docs/database-spec.md` と `docs/ifdoco-exit-flow.md` に metadata 必須と既存欠落データの運用方針を追記した。
+
+## 2026-06-23 16:18 Codex GPT-5
+
+0019 の変更で production 参照がなくなった旧 `getExecutionPrice()` / `getClosingExecution()` を bitFlyer/Saxo broker 実装から削除した。併せて旧メソッドを直接検証していた broker test を削除し、`docs/ifdoco-exit-flow.md` の旧 method 名を削除済みの parentOrderId/ticker ベース探索として表現し直した。

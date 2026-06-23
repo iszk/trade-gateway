@@ -61,7 +61,7 @@ bitflyer では SL がトリガーされた後、STOP 子注文ではなく MARK
 
 `execution: null` → cron 処理はスキップ（次回まで待機）。
 
-`orders_v2` の cron 同期は、ブローカーごとの `getClosingExecutionForOrderV2(order)` を必ず呼び出し、cron 側から旧 `getClosingExecution(parentOrderId, ticker)` を直接呼ぶフォールバックは行わない。broker 実装内部でも `broker_order_metadata.kind === 'bitflyer_parent_order_v1'` を必須とし、metadata 欠落・不一致時は warn ログを出して no-op にする。旧 order id ベースの `getClosingExecution(parentOrderId, ticker)` へはフォールバックしない。
+`orders_v2` の cron 同期は、ブローカーごとの `getClosingExecutionForOrderV2(order)` を必ず呼び出す。broker 実装内部でも `broker_order_metadata.kind === 'bitflyer_parent_order_v1'` を必須とし、metadata 欠落・不一致時は warn ログを出して no-op にする。旧 parentOrderId/ticker ベースの探索 API は削除済みで、フォールバックしない。
 
 #### Saxo
 
