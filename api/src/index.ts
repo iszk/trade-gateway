@@ -968,10 +968,14 @@ export const createApp = (options: CreateAppOptions = {}) => {
             return c.json(errorBody('INVALID_REQUEST', dates.error), 400)
         }
         try {
-            const allOrders = await listOrdersV2ByDateRange(dates.from, dates.to)
+            const [executedOrders, pendingOrders] = await Promise.all([
+                listOrdersV2ByDateRange(dates.from, dates.to),
+                getPendingOrdersV2(),
+            ])
+            const allOrders = [...executedOrders, ...pendingOrders]
 
             // strategy ごとにグループ化して集計
-            const grouped = new Map<string, typeof allOrders>()
+            const grouped = new Map<string, OrderV2[]>()
             for (const order of allOrders) {
                 const list = grouped.get(order.strategy) ?? []
                 list.push(order)

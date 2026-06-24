@@ -18,8 +18,9 @@ const makeOrder = (overrides: Partial<OrderV2>): OrderV2 => ({
     provider_order_ids: ['provider-1'],
     created_at: new Date('2026-01-01T00:00:00Z'),
     updated_at: new Date('2026-01-01T00:00:00Z'),
+    executed_at: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
-})
+} as OrderV2)
 
 test('buildTradeRecordsFromOrdersV2: BUY と SELL を FIFO でペアリングする', () => {
     const entry = makeOrder({ id: 'entry', side: 'BUY', executed_price: 100, executed_at: new Date('2026-01-01T00:00:00Z') })
@@ -32,6 +33,25 @@ test('buildTradeRecordsFromOrdersV2: BUY と SELL を FIFO でペアリングす
     assert.equal(records[0]?.entry_side, 'BUY')
     assert.equal(records[0]?.size, 0.1)
     assert.equal(records[0]?.pnl, 2)
+})
+
+test('buildTradeRecordsFromOrdersV2: executed_price が null の EXECUTED 注文は対象外にする', () => {
+    const legacyEntry = makeOrder({
+        id: 'legacy-entry',
+        side: 'BUY',
+        executed_price: null,
+        executed_at: new Date('2026-01-01T00:00:00Z'),
+    })
+    const exit = makeOrder({
+        id: 'exit',
+        side: 'SELL',
+        executed_price: 120,
+        executed_at: new Date('2026-01-02T00:00:00Z'),
+    })
+
+    const records = buildTradeRecordsFromOrdersV2([legacyEntry, exit])
+
+    assert.equal(records.length, 0)
 })
 
 test('createGetTradeRecordsFn: 範囲前に建てたポジションが範囲内で閉じられたら返す', async () => {

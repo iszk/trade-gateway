@@ -145,7 +145,7 @@ broker 別の日次残高スナップショットを保持する。`/api/balance
 - `requested_size` (number, required)
 - `executed_size` (number, required)
 - `executed_price` (number | null, required)
-- `executed_at` (timestamp, optional)
+- `executed_at` (timestamp, optional) — `status=EXECUTED` では required
 - `status` (string, required) — `PENDING` | `EXECUTED` | `FAILED` | `CANCELED`
 - `exit_sync_status` (string, optional) — `MONITORING` | `COMPLETED`
 - `provider_order_ids` (string[], required)
@@ -158,6 +158,7 @@ broker 別の日次残高スナップショットを保持する。`/api/balance
 ### 制約
 - 親注文・exit 注文ともにドキュメント ID を一意キーとして upsert / update する
 - クローズ済みトレードの read model は別コレクションに保存せず、`orders_v2` から再計算する
+- 一覧・統計・トレード再構成の日時基準は `executed_at` とする。`status=EXECUTED` で `executed_at` が欠落している既存データは集計対象外とし、`created_at` へはフォールバックしない
 - cron による `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。metadata が未設定、または broker が期待する `kind` ではない注文は warn ログを出して同期を no-op とし、旧 order id ベースの探索へフォールバックしない
 - TTL は現時点で使用しない
 

@@ -14,9 +14,6 @@ const pct = (n: number): string => `${(n * 100).toFixed(1)}%`
 const toDateInputValue = (d: Date): string =>
   d.toLocaleDateString('en-CA', { timeZone: 'Asia/Tokyo' })
 
-const getEffectiveTime = (order: Pick<OrderV2, 'created_at' | 'executed_at'>): string =>
-  String(order.executed_at ?? order.created_at)
-
 const formatJstDateTime = (value: string): string =>
   new Intl.DateTimeFormat('ja-JP', {
     timeZone: 'Asia/Tokyo',
@@ -250,7 +247,9 @@ export default createRoute(async (c) => {
                   <tbody>
                     {ordersData.orders.map((o: OrderV2, i: number) => (
                       <tr key={i} class="border-b hover:bg-gray-50">
-                        <td class="px-4 py-3 text-xs">{formatJstDateTime(getEffectiveTime(o))}</td>
+                        <td class="px-4 py-3 text-xs">
+                          {o.executed_at ? formatJstDateTime(String(o.executed_at)) : '—'}
+                        </td>
                         <td class="px-4 py-3">{o.strategy}</td>
                         <td class="px-4 py-3 capitalize">{o.broker}</td>
                         <td class="px-4 py-3">{getSymbolDisplayName(symbols, o.broker, o.ticker)}</td>

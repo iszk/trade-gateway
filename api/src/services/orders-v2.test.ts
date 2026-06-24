@@ -26,8 +26,9 @@ const makeOrder = (overrides: Partial<OrderV2>): OrderV2 => ({
     provider_order_ids: ['provider-1'],
     created_at: new Date('2026-01-01T00:00:00Z'),
     updated_at: new Date('2026-01-01T00:00:00Z'),
+    executed_at: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
-})
+} as OrderV2)
 
 const toFirestoreOrder = (order: OrderV2) => ({
     ...order,
@@ -36,21 +37,39 @@ const toFirestoreOrder = (order: OrderV2) => ({
     executed_at: order.executed_at ? toTimestamp(order.executed_at) : undefined,
 })
 
-const createDbStub = (snapshots: { executed_at: OrderV2[]; created_at: OrderV2[] }) => ({
-    collection: () => ({
-        where: (field: 'executed_at' | 'created_at') => ({
-            where: () => ({
-                orderBy: () => ({
-                    get: async () => ({
-                        docs: snapshots[field].map((order) => ({
-                            data: () => toFirestoreOrder(order),
-                        })),
-                    }),
+const createDbStub = (orders: OrderV2[]) => {
+    const state: {
+        whereCalls: { field: string; op: string; value: unknown }[]
+        orderByFields: string[]
+    } = {
+        whereCalls: [],
+        orderByFields: [],
+    }
+
+    const query = {
+        where: (field: string, op: string, value: unknown) => {
+            state.whereCalls.push({ field, op, value })
+            return query
+        },
+        orderBy: (field: string) => {
+            state.orderByFields.push(field)
+            return {
+                get: async () => ({
+                    docs: orders.map((order) => ({
+                        data: () => toFirestoreOrder(order),
+                    })),
                 }),
-            }),
-        }),
-    }),
-})
+            }
+        },
+    }
+
+    return {
+        state,
+        db: {
+            collection: () => query,
+        },
+    }
+}
 
 const createWriteDbStub = () => {
     const state: {
@@ -108,39 +127,45 @@ test('createUpdateOrderV2Fn: Firestore update 前に undefined フィールド�
     assert.ok(state.updatePayload.updated_at instanceof Date)
 })
 
-test('createListOrdersV2ByDateRangeFn: executed_at を優先しつつ created_at フォールバックで期間抽出する', async () => {
+test('createListOrdersV2ByDateRangeFn: executed_at のみで期間抽出し降順に返す', async () => {
     const rangeFrom = new Date('2026-01-10T00:00:00Z')
     const rangeTo = new Date('2026-01-20T23:59:59Z')
 
-    const executedInRange = makeOrder({
-        id: 'executed-in-range',
+    const executedEarlier = makeOrder({
+        id: 'executed-earlier',
         created_at: new Date('2026-01-01T00:00:00Z'),
         executed_at: new Date('2026-01-12T00:00:00Z'),
     })
-    const createdFallbackInRange = makeOrder({
-        id: 'created-fallback-in-range',
+    const executedLater = makeOrder({
+        id: 'executed-later',
+        created_at: new Date('2026-01-16T00:00:00Z'),
+        executed_at: new Date('2026-01-18T00:00:00Z'),
+    })
+    const legacyWithoutExecutedAt = makeOrder({
+        id: 'legacy-without-executed-at',
         created_at: new Date('2026-01-15T00:00:00Z'),
         executed_at: undefined,
     })
-    const executedOutOfRange = makeOrder({
-        id: 'executed-out-of-range',
-        created_at: new Date('2026-01-16T00:00:00Z'),
-        executed_at: new Date('2026-01-25T00:00:00Z'),
-    })
+
+    const { db, state } = createDbStub([
+        executedEarlier,
+        executedLater,
+        legacyWithoutExecutedAt,
+    ])
 
     const listOrdersV2ByDateRange = createListOrdersV2ByDateRangeFn(
-        createDbStub({
-            executed_at: [executedInRange, executedOutOfRange],
-            created_at: [createdFallbackInRange, executedOutOfRange],
-        }) as any,
+        db as any,
     )
 
     const orders = await listOrdersV2ByDateRange(rangeFrom, rangeTo)
 
+    assert.deepEqual(state.whereCalls, [
+        { field: 'executed_at', op: '>=', value: rangeFrom },
+        { field: 'executed_at', op: '<', value: rangeTo },
+    ])
+    assert.deepEqual(state.orderByFields, ['executed_at'])
     assert.deepEqual(
         orders.map((order) => order.id),
-        ['created-fallback-in-range', 'executed-in-range'],
+        ['executed-later', 'executed-earlier'],
     )
-    assert.equal(orders[0]?.executed_at, undefined)
-    assert.deepEqual(orders[1]?.executed_at, new Date('2026-01-12T00:00:00Z'))
 })

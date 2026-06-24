@@ -1,12 +1,9 @@
+import { isExecutedOrderV2 } from '../types/order-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import { createDefaultListOrdersV2ByDateRangeFn } from './orders-v2.js'
 import type { ListOrdersV2ByDateRangeFn } from './orders-v2.js'
 
 const EPSILON = 0.00000001
-
-const getOrderTime = (order: Pick<OrderV2, 'created_at' | 'executed_at'>): Date => (
-    order.executed_at ?? order.created_at
-)
 
 export type TradeRecord = {
     strategy: string
@@ -79,9 +76,9 @@ type OpenLot = {
 
 export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWithId[] => {
     const executedOrders = orders
-        .filter((order) => order.status === 'EXECUTED' && order.executed_price !== null)
+        .filter(isExecutedOrderV2)
         .filter((order) => (order.executed_size || order.requested_size) > EPSILON)
-        .sort((a, b) => getOrderTime(a).getTime() - getOrderTime(b).getTime() || a.id.localeCompare(b.id))
+        .sort((a, b) => a.executed_at.getTime() - b.executed_at.getTime() || a.id.localeCompare(b.id))
 
     const lotsByKey = new Map<string, OpenLot[]>()
     const records: TradeRecordWithId[] = []
@@ -89,7 +86,7 @@ export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWit
     for (const order of executedOrders) {
         const key = `${order.strategy}|${order.ticker}|${order.broker}`
         const lots = lotsByKey.get(key) ?? []
-        const orderTime = getOrderTime(order)
+        const orderTime = order.executed_at
         let remainingSize = order.executed_size || order.requested_size
 
         while (remainingSize > EPSILON) {
@@ -102,7 +99,7 @@ export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWit
                     broker: order.broker,
                     side: order.side,
                     remaining_size: remainingSize,
-                    price: order.executed_price!,
+                    price: order.executed_price,
                     opened_at: orderTime,
                 })
                 remainingSize = 0
@@ -112,8 +109,8 @@ export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWit
             const openLot = lots[openIndex]!
             const closeSize = Math.min(openLot.remaining_size, remainingSize)
             const pnl = openLot.side === 'BUY'
-                ? (order.executed_price! - openLot.price) * closeSize
-                : (openLot.price - order.executed_price!) * closeSize
+                ? (order.executed_price - openLot.price) * closeSize
+                : (openLot.price - order.executed_price) * closeSize
 
             records.push({
                 docId: `${openLot.event_id}:${order.id}:${records.length}`,
@@ -122,7 +119,7 @@ export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWit
                 broker: order.broker,
                 entry_side: openLot.side,
                 entry_price: openLot.price,
-                exit_price: order.executed_price!,
+                exit_price: order.executed_price,
                 size: closeSize,
                 pnl,
                 entry_event_id: openLot.event_id,

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { createApp } from './index.js'
 import type { DispatchOrderFn, BrokerName } from './types/order.js'
 import type { BrokerBalance } from './types/balance.js'
+import type { OrderV2 } from './types/order-v2.js'
 import type { Position } from './types/position.js'
 import { DuplicateEventError } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
@@ -152,6 +153,24 @@ const makeTradableSymbol = (overrides: Partial<TradableSymbol> = {}): TradableSy
     updated_at: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
 })
+
+const makeOrderV2 = (overrides: Partial<OrderV2> = {}): OrderV2 => ({
+    id: `ord-${Math.random()}`,
+    strategy: 'alpha',
+    broker: 'bitflyer',
+    ticker: 'BTC_JPY',
+    side: 'BUY',
+    order_type: 'MARKET',
+    requested_size: 0.01,
+    executed_size: 0.01,
+    executed_price: 1000000,
+    executed_at: new Date('2026-01-01T00:00:00Z'),
+    status: 'EXECUTED',
+    provider_order_ids: ['provider-1'],
+    created_at: new Date('2026-01-01T00:00:00Z'),
+    updated_at: new Date('2026-01-01T00:00:00Z'),
+    ...overrides,
+} as OrderV2)
 
 test('GET /api/health returns 200', async () => {
     const app = createAppForTests({
@@ -336,6 +355,72 @@ test('GET /api/positions returns positions when the shared key matches', async (
     assert.equal(res.status, 200)
     assert.deepEqual(body.positions, samplePositions)
     assert.equal(typeof body.updated_at, 'number')
+})
+
+test('GET /api/v2/orders/stats includes pending orders in open_orders', async () => {
+    const listedRanges: { from: Date; to: Date }[] = []
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        listOrdersV2ByDateRange: async (from, to) => {
+            listedRanges.push({ from, to })
+            return [
+                makeOrderV2({
+                    id: 'alpha-entry',
+                    strategy: 'alpha',
+                    side: 'BUY',
+                    executed_price: 1000000,
+                    executed_at: new Date('2026-01-01T00:00:00Z'),
+                }),
+                makeOrderV2({
+                    id: 'alpha-exit',
+                    strategy: 'alpha',
+                    side: 'SELL',
+                    executed_price: 1100000,
+                    executed_at: new Date('2026-01-02T00:00:00Z'),
+                }),
+            ]
+        },
+        getPendingOrdersV2: async () => [
+            makeOrderV2({
+                id: 'alpha-pending',
+                strategy: 'alpha',
+                status: 'PENDING',
+                executed_size: 0,
+                executed_price: null,
+                executed_at: undefined,
+            }),
+            makeOrderV2({
+                id: 'beta-pending',
+                strategy: 'beta',
+                status: 'PENDING',
+                executed_size: 0,
+                executed_price: null,
+                executed_at: undefined,
+            }),
+        ],
+    })
+
+    const res = await app.request('/api/v2/orders/stats?from=2026-01-01&to=2026-01-02', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+        },
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.equal(listedRanges[0]?.from.toISOString(), '2025-12-31T15:00:00.000Z')
+    assert.equal(listedRanges[0]?.to.toISOString(), '2026-01-02T15:00:00.000Z')
+    assert.deepEqual(
+        body.stats.map((stat: { strategy: string; open_orders: number; total_trades: number }) => ({
+            strategy: stat.strategy,
+            open_orders: stat.open_orders,
+            total_trades: stat.total_trades,
+        })),
+        [
+            { strategy: 'alpha', open_orders: 1, total_trades: 1 },
+            { strategy: 'beta', open_orders: 1, total_trades: 0 },
+        ],
+    )
 })
 
 test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => {

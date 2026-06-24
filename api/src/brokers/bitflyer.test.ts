@@ -636,6 +636,7 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves close acceptance ids
         executed_size: 0.01,
         executed_price: 9700000,
         status: 'EXECUTED',
+        executed_at: new Date('2026-01-01T00:10:00Z'),
         provider_order_ids: ['JRF-parent-close-meta'],
         broker_order_metadata: {
             kind: 'bitflyer_parent_order_v1',
@@ -725,6 +726,7 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves stop loss MARKET chi
         executed_size: 0.01,
         executed_price: 9700000,
         status: 'EXECUTED',
+        executed_at: new Date('2026-01-01T00:10:00Z'),
         provider_order_ids: ['JRF-parent-close-sl-market'],
         broker_order_metadata: {
             kind: 'bitflyer_parent_order_v1',
@@ -814,6 +816,7 @@ test('BitflyerClient.getClosingExecutionForOrderV2 returns partial close and no-
         executed_size: 0.01,
         executed_price: 9700000,
         status: 'EXECUTED',
+        executed_at: new Date('2026-01-01T00:10:00Z'),
         provider_order_ids: ['JRF-parent-close-partial-noop'],
         broker_order_metadata: {
             kind: 'bitflyer_parent_order_v1',
@@ -897,6 +900,7 @@ test('BitflyerClient.getClosingExecutionForOrderV2 no-ops when metadata is missi
         executed_size: 0.01,
         executed_price: 9700000,
         status: 'EXECUTED',
+        executed_at: new Date('2026-01-01T00:10:00Z'),
         provider_order_ids: ['JRF-parent-legacy'],
         created_at: new Date('2026-01-01T00:00:00Z'),
         updated_at: new Date('2026-01-01T00:00:00Z'),
