@@ -49,7 +49,7 @@ const isAlreadyExistsError = (error: unknown): boolean =>
 export type EnsureTradableSymbolFn = (input: { broker: BrokerName; ticker: string }) => Promise<void>
 export type GetTradableSymbolFn = (symbolId: string) => Promise<TradableSymbol | null>
 export type ListTradableSymbolsFn = () => Promise<TradableSymbol[]>
-export type UpsertTradableSymbolInput = {
+type UpsertTradableSymbolInput = {
     id: string
     broker: BrokerName
     ticker: string

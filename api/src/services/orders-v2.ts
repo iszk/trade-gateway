@@ -39,7 +39,7 @@ export const createUpdateOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
     }
 }
 
-export const createGetOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
+const createGetOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
     return async (id: string): Promise<OrderV2 | null> => {
         const doc = await db.collection(COLLECTION_NAME).doc(id).get()
         if (!doc.exists) {
@@ -49,7 +49,7 @@ export const createGetOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
     }
 }
 
-export const createGetPendingOrdersV2Fn = (db: Firestore = getFirestoreClient()) => {
+const createGetPendingOrdersV2Fn = (db: Firestore = getFirestoreClient()) => {
     return async (): Promise<OrderV2[]> => {
         const snapshot = await db
             .collection(COLLECTION_NAME)
@@ -60,7 +60,7 @@ export const createGetPendingOrdersV2Fn = (db: Firestore = getFirestoreClient())
     }
 }
 
-export const createGetActiveIfdOrdersV2Fn = (db: Firestore = getFirestoreClient()) => {
+const createGetActiveIfdOrdersV2Fn = (db: Firestore = getFirestoreClient()) => {
     return async (): Promise<OrderV2[]> => {
         const snapshot = await db
             .collection(COLLECTION_NAME)

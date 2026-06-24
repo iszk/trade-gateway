@@ -17,14 +17,14 @@ export type OrderRequest = {
     takeProfit?: string
 }
 
-export type OrderDispatchSuccess = {
+type OrderDispatchSuccess = {
     ok: true
     broker: BrokerName
     providerOrderId: string
     brokerOrderMetadata?: BrokerOrderMetadata
 }
 
-export type OrderDispatchFailureCode =
+type OrderDispatchFailureCode =
     | 'BROKER_NOT_SUPPORTED'
     | 'BROKER_NOT_CONFIGURED'
     | 'BROKER_REQUEST_FAILED'

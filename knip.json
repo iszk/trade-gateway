@@ -1,0 +1,26 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "workspaces": {
+    "api": {
+      "entry": [
+        "src/**/*.test.ts"
+      ],
+      "project": [
+        "src/**/*.ts"
+      ]
+    },
+    "ui": {
+      "entry": [
+        "app/client.ts",
+        "app/routes/**/*.{ts,tsx}",
+        "app/islands/**/*.{ts,tsx}"
+      ],
+      "project": [
+        "app/**/*.{ts,tsx}"
+      ],
+      "ignoreDependencies": [
+        "tailwindcss"
+      ]
+    }
+  }
+}
