@@ -65,7 +65,7 @@ bitflyer では SL がトリガーされた後、STOP 子注文ではなく MARK
 
 #### Saxo
 
-Saxo は entry の Market order に `Orders` として関連注文を付ける。`sendMarketOrder` の戻り値から `broker_order_metadata.kind === 'saxo_order_v1'` を保存し、以下を保持する。
+Saxo は entry の Market order に `Orders` として関連注文を付ける場合がある。`sendMarketOrder` の戻り値から `broker_order_metadata.kind === 'saxo_order_v1'` を保存し、関連注文を持たない単体 MARKET 注文でも entry 同期に必要な metadata を保持する。
 
 | 要素 | 内容 |
 |---|---|
