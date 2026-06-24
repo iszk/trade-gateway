@@ -33,6 +33,11 @@ run = "npm run start --workspace @trade-gateway/api"
 description = "Run type checking for all workspaces"
 run = "npm run typecheck"
 
+[tasks.check]
+depends = ["typecheck"]
+description = "Run static project checks"
+run = "npm run lint:unused"
+
 [tasks.test]
 depends = ["typecheck"]
 description = "Run all workspace tests"
