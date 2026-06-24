@@ -39,7 +39,6 @@ description = "Run static project checks"
 run = "npm run lint:unused"
 
 [tasks.test]
-depends = ["typecheck"]
 description = "Run all workspace tests"
 run = "npm run test"
 
