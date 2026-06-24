@@ -315,6 +315,61 @@ test('SaxoClient.sendMarketOrder returns Saxo metadata for related orders', asyn
     })
 })
 
+test('SaxoClient.sendMarketOrder returns Saxo entry metadata for standalone market orders', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [
+                {
+                    accountKey: 'account-1',
+                    clientKey: 'client-1',
+                    legalAssetTypes: ['FxSpot'],
+                    currency: 'USD',
+                    displayName: 'Test',
+                },
+            ],
+        },
+    })
+
+    let requestBody: any
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (_url, init) => {
+            requestBody = JSON.parse(String(init?.body))
+            return new Response(
+                JSON.stringify({ OrderId: 'ORD-market-1' }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.sendMarketOrder({
+        eventId: 'evt-saxo-market-1',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'SELL',
+        size: 1000,
+        requestId: 'req-saxo-market-1',
+    })
+
+    assert.equal(result.ok, true)
+    assert.equal(requestBody.Orders, undefined)
+    assert.deepEqual(result.ok && result.brokerOrderMetadata, {
+        kind: 'saxo_order_v1',
+        order_id: 'ORD-market-1',
+        external_reference: 'tg:evt-saxo-market-1',
+        entry: {
+            expected: { side: 'SELL', order_type: 'Market', size: 1000 },
+            resolved: { order_id: 'ORD-market-1', external_reference: 'tg:evt-saxo-market-1' },
+        },
+        exits: [],
+    })
+})
+
 test('SaxoClient.sendMarketOrder keeps related order ids nullable when response omits them', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

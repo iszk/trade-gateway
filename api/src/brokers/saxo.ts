@@ -284,9 +284,7 @@ const buildSaxoOrderMetadata = (
     orderId: string,
     relatedOrders: SaxoRelatedOrder[],
     relatedOrderIds: Array<string | null> = [],
-): SaxoOrderMetadata | undefined => {
-    if (relatedOrders.length === 0) return undefined
-
+): SaxoOrderMetadata => {
     const externalReference = buildSaxoExternalReference(order.eventId)
 
     return {
