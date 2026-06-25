@@ -1,6 +1,6 @@
 ---
 title: Saxo の MARKET 注文でも orders_v2 の PENDING を解消して約定金額を更新する
-status: wip
+status: done
 ---
 
 # 概要
