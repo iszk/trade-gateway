@@ -12,12 +12,14 @@
     "build": "npm run build --workspace @trade-gateway/api --workspace @trade-gateway/ui --if-present",
     "test": "npm run test --workspace @trade-gateway/api --workspace @trade-gateway/ui --if-present",
     "typecheck": "npm run typecheck --workspace @trade-gateway/api --workspace @trade-gateway/ui --if-present",
+    "lint:unused": "knip --no-progress",
     "dev:api": "npm run dev --workspace @trade-gateway/api",
     "dev:ui": "npm run dev --workspace @trade-gateway/ui",
     "start:ui": "npm run start --workspace @trade-gateway/ui"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
+    "knip": "^6.18.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

@@ -13,13 +13,13 @@ type PositionFetcherLike = {
 
 const SAXO_PENDING_SYNC_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
-export type ExecutionInfo = {
+type ExecutionInfo = {
     price: number
     size: number
     executed_at?: Date
 }
 
-export type OrdersV2ExecutionSyncResult = {
+type OrdersV2ExecutionSyncResult = {
     execution: ExecutionInfo | null
     brokerOrderMetadata?: BrokerOrderMetadata
 }

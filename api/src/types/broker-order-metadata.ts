@@ -1,8 +1,8 @@
 import type { OrderSide } from './order.js'
 
-export type BitflyerChildRole = 'ENTRY' | 'TAKE_PROFIT' | 'STOP_LOSS'
+type BitflyerChildRole = 'ENTRY' | 'TAKE_PROFIT' | 'STOP_LOSS'
 
-export type BitflyerExpectedChildOrder = {
+type BitflyerExpectedChildOrder = {
     role: BitflyerChildRole
     side: OrderSide
     condition_type: 'MARKET' | 'LIMIT' | 'STOP'
@@ -11,7 +11,7 @@ export type BitflyerExpectedChildOrder = {
     trigger_price?: number
 }
 
-export type BitflyerResolvedChildOrder = {
+type BitflyerResolvedChildOrder = {
     acceptance_id: string | null
 }
 
@@ -29,9 +29,9 @@ export type BitflyerParentOrderMetadata = {
     }>
 }
 
-export type SaxoRelatedOrderRole = 'TAKE_PROFIT' | 'STOP_LOSS'
+type SaxoRelatedOrderRole = 'TAKE_PROFIT' | 'STOP_LOSS'
 
-export type SaxoExpectedRelatedOrder = {
+type SaxoExpectedRelatedOrder = {
     role: SaxoRelatedOrderRole
     side: OrderSide
     order_type: 'Limit' | 'StopIfTraded'
@@ -39,7 +39,7 @@ export type SaxoExpectedRelatedOrder = {
     price: number
 }
 
-export type SaxoResolvedRelatedOrder = {
+type SaxoResolvedRelatedOrder = {
     order_id: string | null
 }
 

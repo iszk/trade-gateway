@@ -1,7 +1,7 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { addFirestoreDocument, getFirestoreClient } from '../firestore.js'
 
-export type OrderDispatchLogInput = {
+type OrderDispatchLogInput = {
     event_id: string
     broker: string
     ticker: string

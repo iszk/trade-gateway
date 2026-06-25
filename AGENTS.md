@@ -23,11 +23,15 @@ AI エージェントはタスク実行時に以下のコマンドを使用す�
 
 - **Setup**: `mise run setup`
 - **Test**: `mise run test`
+- **Check**: `mise run check`
 
 mise に PATH が通っていない場合は `/usr/local/bin/mise` または `~/.local/bin/mise` を用いること。
 
 ## Rules & Workflow
-1. **Always Test**: 作業完了（完了報告やコミット）の前に、必ず `mise run test` を実行してパスすることを確認すること。
+1. **Always Test**: 作業完了（完了報告）の前に、必ず `mise run test` を実行してパスすることを確認すること。
+   - `mise run test` は開発中にもこまめに実行するため、テストのみを実行する。
+   - 型チェックと未使用コード検出は `mise run check` で実行する。
+   - コミット前には必ず `mise run check` と `mise run test` の両方を実行してパスすることを確認すること。
 2. **Add Tests**: 新機能の追加やバグ修正を行う際は、それに対応するテストコードを必ず追加すること。
 3. **Update Docs**: コードの変更によって既存の仕様が変わる場合や、新しい機能を追加した場合は、関連するドキュメント（README やインラインコメントなど）を必ず更新すること。
 4. **Code Style**: プロジェクトの既存のコードスタイルを尊重し、一貫性を保つこと。

@@ -8,13 +8,3 @@ export type Position = {
     price?: number
     pnl?: number
 }
-
-export type GetPositionsResult = {
-    ok: true
-    positions: Position[]
-} | {
-    ok: false
-    broker: string
-    code: string
-    message: string
-}

@@ -142,7 +142,7 @@ export const buildTradeRecordsFromOrdersV2 = (orders: OrderV2[]): TradeRecordWit
     return records
 }
 
-export const computeTradeStats = (records: TradeRecord[]): Omit<GroupStats, 'strategy'> => {
+const computeTradeStats = (records: TradeRecord[]): Omit<GroupStats, 'strategy'> => {
     const total = records.length
     if (total === 0) {
         return {

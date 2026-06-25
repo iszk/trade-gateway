@@ -10,8 +10,3 @@ export type BrokerBalance = {
     balances: Balance[]
     updatedAt: number
 }
-
-export type BalanceReport = {
-    date: string // YYYY-MM-DD
-    brokers: BrokerBalance[]
-}

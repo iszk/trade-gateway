@@ -4,7 +4,7 @@ import { getFirestoreClient } from '../firestore.js'
 const CRON_METADATA_COLLECTION = 'cron_metadata'
 const TASK_STATUS_DOCUMENT = 'task_status'
 
-export type SlotKey = 'last_slot_10m' | 'last_slot_1h'
+type SlotKey = 'last_slot_10m' | 'last_slot_1h'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void

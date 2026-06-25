@@ -43,7 +43,7 @@ export const serializeLogDetails = (details: Record<string, unknown>): Record<st
     return normalized
 }
 
-export const createLogger = (
+const createLogger = (
     tsLogger: TSLogger<ILogObj>,
     additionalFields: Record<string, unknown> = {},
 ): Logger => ({

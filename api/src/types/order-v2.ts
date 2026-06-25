@@ -1,11 +1,11 @@
 import { BrokerName, OrderSide } from './order.js'
 import type { BrokerOrderMetadata } from './broker-order-metadata.js'
 
-export type OrderStatusV2 = 'PENDING' | 'EXECUTED' | 'FAILED' | 'CANCELED'
+type OrderStatusV2 = 'PENDING' | 'EXECUTED' | 'FAILED' | 'CANCELED'
 
-export type OrderTypeV2 = 'MARKET' | 'IFDOCO' | 'LIMIT' | 'STOP'
+type OrderTypeV2 = 'MARKET' | 'IFDOCO' | 'LIMIT' | 'STOP'
 
-export type ExitSyncStatus = 'MONITORING' | 'COMPLETED'
+type ExitSyncStatus = 'MONITORING' | 'COMPLETED'
 
 type BaseOrderV2 = {
     /** 注文のユニークID（WebhookのeventIdなど） */
@@ -45,7 +45,7 @@ export type ExecutedOrderV2 = BaseOrderV2 & {
     status: 'EXECUTED'
 }
 
-export type NonExecutedOrderV2 = BaseOrderV2 & {
+type NonExecutedOrderV2 = BaseOrderV2 & {
     /** 実約定価格 */
     executed_price: number | null
     /** 実約定時刻。EXECUTED 以外では未設定を許可する */
