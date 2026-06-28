@@ -59,6 +59,7 @@ type BitflyerCollateralResponse = {
 }
 
 type BitflyerExecutionEntry = {
+    id?: number
     child_order_acceptance_id: string
     price: number
     size: number
@@ -85,6 +86,9 @@ const GET_CHILD_ORDERS_PATH = '/v1/me/getchildorders'
 const GET_PARENT_ORDER_PATH = '/v1/me/getparentorder'
 const DEFAULT_BITFLYER_BASE_URL = 'https://api.bitflyer.com'
 const DEFAULT_POSITION_PRODUCT_CODES = ['FX_BTC_JPY']
+const EXECUTIONS_BATCH_COUNT = 100
+const EXECUTIONS_BATCH_MAX_PAGES = 5
+const EXECUTIONS_BATCH_CACHE_MS = 30 * 1000
 
 type BitflyerParentOrderParameter = {
     product_code: string
@@ -196,6 +200,12 @@ type OrdersV2ExecutionSyncResult = {
     brokerOrderMetadata?: BitflyerParentOrderMetadata
 }
 
+type BitflyerExecutionsBatch = {
+    fetchedAtMs: number
+    executionsByAcceptanceId: Map<string, BitflyerExecutionEntry[]>
+    reachedPageLimit: boolean
+}
+
 const extractLatestExecutionAt = (execs: BitflyerExecutionEntry[]): Date | undefined => {
     let latestMs: number | null = null
 
@@ -217,6 +227,7 @@ export class BitflyerClient {
     private readonly baseUrl: string
     private readonly fetchImpl: typeof fetch
     private readonly logger: Logger
+    private readonly executionsBatchCache = new Map<string, BitflyerExecutionsBatch>()
 
     constructor(options: BitflyerClientOptions = {}) {
         this.apiKey = options.apiKey
@@ -578,7 +589,79 @@ export class BitflyerClient {
         }
     }
 
-    private async fetchExecutionInfoByChildAcceptanceId(
+    private async fetchExecutionsByProductCode(productCode: string): Promise<BitflyerExecutionsBatch> {
+        const cached = this.executionsBatchCache.get(productCode)
+        if (cached && Date.now() - cached.fetchedAtMs <= EXECUTIONS_BATCH_CACHE_MS) {
+            return cached
+        }
+
+        const executions: BitflyerExecutionEntry[] = []
+        let before: number | undefined
+        let reachedPageLimit = false
+
+        for (let page = 0; page < EXECUTIONS_BATCH_MAX_PAGES; page += 1) {
+            const params = new URLSearchParams({
+                product_code: productCode,
+                count: String(EXECUTIONS_BATCH_COUNT),
+            })
+            if (before !== undefined) {
+                params.set('before', String(before))
+            }
+
+            const pageExecutions = await this.callApi<BitflyerExecutionEntry[]>(
+                'GET',
+                `${GET_EXECUTIONS_PATH}?${params.toString()}`,
+            )
+
+            executions.push(...pageExecutions)
+
+            if (pageExecutions.length < EXECUTIONS_BATCH_COUNT) {
+                break
+            }
+
+            const pageIds = pageExecutions
+                .map((execution) => execution.id)
+                .filter((id): id is number => typeof id === 'number')
+
+            if (pageIds.length === 0) {
+                break
+            }
+
+            before = Math.min(...pageIds)
+            reachedPageLimit = page === EXECUTIONS_BATCH_MAX_PAGES - 1
+        }
+
+        const executionsByAcceptanceId = new Map<string, BitflyerExecutionEntry[]>()
+        for (const execution of executions) {
+            const acceptanceId = execution.child_order_acceptance_id
+            const list = executionsByAcceptanceId.get(acceptanceId) ?? []
+            list.push(execution)
+            executionsByAcceptanceId.set(acceptanceId, list)
+        }
+
+        const batch = {
+            fetchedAtMs: Date.now(),
+            executionsByAcceptanceId,
+            reachedPageLimit,
+        }
+        this.executionsBatchCache.set(productCode, batch)
+
+        if (reachedPageLimit) {
+            this.logger.warn(
+                {
+                    event: 'bitflyer:executions_batch_page_limit_reached',
+                    productCode,
+                    maxPages: EXECUTIONS_BATCH_MAX_PAGES,
+                    fetchedCount: executions.length,
+                },
+                'bitFlyer executions batch page limit reached',
+            )
+        }
+
+        return batch
+    }
+
+    private async fetchExecutionInfoByChildAcceptanceIdDirect(
         childAcceptanceId: string,
         ticker: string,
     ): Promise<{ price: number, size: number, executed_at?: Date } | null> {
@@ -587,6 +670,33 @@ export class BitflyerClient {
             'GET',
             `${GET_EXECUTIONS_PATH}?product_code=${encodeURIComponent(productCode)}&child_order_acceptance_id=${encodeURIComponent(childAcceptanceId)}`,
         )
+        if (childExecs.length === 0) return null
+
+        const price = weightedAvgExecs(childExecs)
+        const size = totalSizeExecs(childExecs)
+        return price === null ? null : { price, size, executed_at: extractLatestExecutionAt(childExecs) }
+    }
+
+    private async fetchExecutionInfoByChildAcceptanceId(
+        childAcceptanceId: string,
+        ticker: string,
+    ): Promise<{ price: number, size: number, executed_at?: Date } | null> {
+        const productCode = resolveProductCode(ticker)
+        const batch = await this.fetchExecutionsByProductCode(productCode)
+        const childExecs = batch.executionsByAcceptanceId.get(childAcceptanceId) ?? []
+
+        if (childExecs.length === 0 && batch.reachedPageLimit) {
+            this.logger.warn(
+                {
+                    event: 'bitflyer:executions_batch_miss_after_page_limit',
+                    productCode,
+                    childAcceptanceId,
+                },
+                'bitFlyer executions batch did not include requested acceptance id after reaching page limit; falling back to direct lookup',
+            )
+            return this.fetchExecutionInfoByChildAcceptanceIdDirect(childAcceptanceId, ticker)
+        }
+
         if (childExecs.length === 0) return null
 
         const price = weightedAvgExecs(childExecs)
