@@ -19,4 +19,5 @@ test:
     just api test
 
 check:
+    npm run typecheck
     npm run lint:unused
