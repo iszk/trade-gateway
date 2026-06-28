@@ -6,9 +6,17 @@ mod api
 default:
     @just --choose
 
+setup:
+    mise trust
+    mise install
+    npm ci
+
 # すべてデプロイする
 deploy:
     just api deploy
 
 test:
     just api test
+
+check:
+    npm run lint:unused
