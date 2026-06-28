@@ -53,11 +53,11 @@ bitflyer では SL がトリガーされた後、STOP 子注文ではなく MARK
 
 #### 4-2. 約定情報の取得
 
-cron 1 回の実行中は、bitFlyer の `GET /v1/me/getexecutions` を `product_code` 単位で batch 取得し、`child_order_acceptance_id` ごとにメモリ上で突合する。entry / exit ともに同じ batch cache を使うため、同一 `product_code` の複数注文を同期する場合でも `getexecutions` の呼び出し数は注文数に比例しない。
+bitFlyer の `GET /v1/me/getexecutions` は `product_code` 単位で batch 取得し、`child_order_acceptance_id` ごとにメモリ上で突合する。batch cache は BitflyerClient インスタンス内のプロセス内 Map で、TTL は 30 秒。entry / exit ともに同じ batch cache を使うため、同一 `product_code` の複数注文を短時間に同期する場合でも `getexecutions` の呼び出し数は注文数に比例しない。
 
 解決済みの各 exit の `acceptance_id` に対応する executions を batch から取り出し、全ての exit の約定を **加重平均価格・合計数量** で集計して返す。
 
-batch 取得はページ上限を持つ。ページ上限に達した場合、またはレスポンスの `id` 欠落でページング継続できない場合は batch を不完全として扱う。不完全 batch で対象 `acceptance_id` が見つからない場合は、古い未同期注文の取りこぼしを避けるため、既存の `child_order_acceptance_id` 指定取得へフォールバックする。
+batch 取得はページ上限を持つ。ページ上限に達した場合、またはレスポンスの `id` 欠落でページング継続できない場合は batch を不完全として扱う。不完全 batch の場合は、部分約定の過小集計を避けるため、対象 `acceptance_id` が batch 内に見つかっていても既存の `child_order_acceptance_id` 指定取得へフォールバックする。
 
 #### 4-3. 未約定の場合
 

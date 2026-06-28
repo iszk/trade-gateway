@@ -697,15 +697,16 @@ export class BitflyerClient {
         const batch = await this.fetchExecutionsByProductCode(productCode)
         const childExecs = batch.executionsByAcceptanceId.get(childAcceptanceId) ?? []
 
-        if (childExecs.length === 0 && batch.incompleteReason) {
+        if (batch.incompleteReason) {
             this.logger.warn(
                 {
-                    event: 'bitflyer:executions_batch_miss_after_incomplete_batch',
+                    event: 'bitflyer:executions_batch_direct_lookup_after_incomplete_batch',
                     productCode,
                     childAcceptanceId,
                     reason: batch.incompleteReason,
+                    batchMatchCount: childExecs.length,
                 },
-                'bitFlyer executions batch did not include requested acceptance id after incomplete pagination; falling back to direct lookup',
+                'bitFlyer executions batch is incomplete; falling back to direct lookup',
             )
             return this.fetchExecutionInfoByChildAcceptanceIdDirect(childAcceptanceId, ticker)
         }

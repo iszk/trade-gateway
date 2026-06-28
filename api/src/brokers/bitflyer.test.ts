@@ -765,9 +765,9 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
 
             return new Response(
                 JSON.stringify(Array.from({ length: 100 }, (_, index) => ({
-                    child_order_acceptance_id: `JRF-child-other-missing-id-${index}`,
+                    child_order_acceptance_id: index === 0 ? 'JRF-child-missing-execution-ids-target' : `JRF-child-other-missing-id-${index}`,
                     price: 9600000,
-                    size: 0.001,
+                    size: index === 0 ? 0.004 : 0.001,
                     exec_date: '2026-01-01T00:00:00.000Z',
                 }))),
                 { status: 200, headers: { 'content-type': 'application/json' } },
@@ -782,8 +782,9 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
     assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('child_order_acceptance_id'), null)
     assert.equal(new URL(requestedUrls[1] ?? '').searchParams.get('child_order_acceptance_id'), 'JRF-child-missing-execution-ids-target')
     assert.equal(warnLogs[0]?.obj.event, 'bitflyer:executions_batch_pagination_incomplete')
-    assert.equal(warnLogs[1]?.obj.event, 'bitflyer:executions_batch_miss_after_incomplete_batch')
+    assert.equal(warnLogs[1]?.obj.event, 'bitflyer:executions_batch_direct_lookup_after_incomplete_batch')
     assert.equal(warnLogs[1]?.obj.reason, 'missing_execution_ids')
+    assert.equal(warnLogs[1]?.obj.batchMatchCount, 1)
 })
 
 test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when metadata is missing', async () => {
