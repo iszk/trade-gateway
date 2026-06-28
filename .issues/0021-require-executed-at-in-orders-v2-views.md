@@ -1,6 +1,6 @@
 ---
 title: orders_v2 の日時基準から created_at フォールバックを外す
-status: wip
+status: done
 ---
 
 # 概要

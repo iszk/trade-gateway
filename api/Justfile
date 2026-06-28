@@ -11,7 +11,7 @@ test:
 # Firebase のヘルスチェック（タイムアウト5秒、失敗したら即終了）
 check-firebase:
     @echo "Checking Firebase emulator..."
-    @curl --silent --fail --max-time 5 http://firebase:8080 > /dev/null \
+    @curl --silent --fail --max-time 5 http://${FIRESTORE_EMULATOR_HOST} > /dev/null \
         || (echo "❌ Firebase emulator is not reachable. Please check firebase. Aborting." && exit 1)
     @echo "✅ Firebase is up."
 
