@@ -715,6 +715,77 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
     assert.equal(new URL(requestedUrls[5] ?? '').searchParams.get('child_order_acceptance_id'), 'JRF-child-page-limit-target')
 })
 
+test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup when batch execution ids are missing', async () => {
+    const order: OrderV2 = {
+        id: 'v2-entry-missing-execution-ids',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-parent-missing-execution-ids'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-missing-execution-ids',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-child-missing-execution-ids-target' },
+            },
+            exits: [],
+        },
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+
+    const { logger, warnLogs } = createCapturingLogger()
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        logger: logger as any,
+        fetchImpl: async (url) => {
+            const urlStr = String(url)
+            requestedUrls.push(urlStr)
+            const params = new URL(urlStr).searchParams
+
+            if (params.get('child_order_acceptance_id') === 'JRF-child-missing-execution-ids-target') {
+                return new Response(
+                    JSON.stringify([
+                        { id: 1, child_order_acceptance_id: 'JRF-child-missing-execution-ids-target', price: 9700000, size: 0.01, exec_date: '2026-01-01T00:05:00.000Z' },
+                    ]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            return new Response(
+                JSON.stringify(Array.from({ length: 100 }, (_, index) => ({
+                    child_order_acceptance_id: `JRF-child-other-missing-id-${index}`,
+                    price: 9600000,
+                    size: 0.001,
+                    exec_date: '2026-01-01T00:00:00.000Z',
+                }))),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(order)
+
+    assert.deepEqual(result.execution, { price: 9700000, size: 0.01, executed_at: new Date('2026-01-01T00:05:00.000Z') })
+    assert.equal(requestedUrls.length, 2)
+    assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('child_order_acceptance_id'), null)
+    assert.equal(new URL(requestedUrls[1] ?? '').searchParams.get('child_order_acceptance_id'), 'JRF-child-missing-execution-ids-target')
+    assert.equal(warnLogs[0]?.obj.event, 'bitflyer:executions_batch_pagination_incomplete')
+    assert.equal(warnLogs[1]?.obj.event, 'bitflyer:executions_batch_miss_after_incomplete_batch')
+    assert.equal(warnLogs[1]?.obj.reason, 'missing_execution_ids')
+})
+
 test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when metadata is missing', async () => {
     const { logger, warnLogs } = createCapturingLogger()
     const requestedUrls: string[] = []

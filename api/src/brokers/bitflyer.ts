@@ -203,7 +203,7 @@ type OrdersV2ExecutionSyncResult = {
 type BitflyerExecutionsBatch = {
     fetchedAtMs: number
     executionsByAcceptanceId: Map<string, BitflyerExecutionEntry[]>
-    reachedPageLimit: boolean
+    incompleteReason?: 'page_limit' | 'missing_execution_ids'
 }
 
 const extractLatestExecutionAt = (execs: BitflyerExecutionEntry[]): Date | undefined => {
@@ -597,7 +597,7 @@ export class BitflyerClient {
 
         const executions: BitflyerExecutionEntry[] = []
         let before: number | undefined
-        let reachedPageLimit = false
+        let incompleteReason: BitflyerExecutionsBatch['incompleteReason']
 
         for (let page = 0; page < EXECUTIONS_BATCH_MAX_PAGES; page += 1) {
             const params = new URLSearchParams({
@@ -623,12 +623,15 @@ export class BitflyerClient {
                 .map((execution) => execution.id)
                 .filter((id): id is number => typeof id === 'number')
 
-            if (pageIds.length === 0) {
+            if (pageIds.length !== pageExecutions.length) {
+                incompleteReason = 'missing_execution_ids'
                 break
             }
 
             before = Math.min(...pageIds)
-            reachedPageLimit = page === EXECUTIONS_BATCH_MAX_PAGES - 1
+            if (page === EXECUTIONS_BATCH_MAX_PAGES - 1) {
+                incompleteReason = 'page_limit'
+            }
         }
 
         const executionsByAcceptanceId = new Map<string, BitflyerExecutionEntry[]>()
@@ -642,11 +645,11 @@ export class BitflyerClient {
         const batch = {
             fetchedAtMs: Date.now(),
             executionsByAcceptanceId,
-            reachedPageLimit,
+            incompleteReason,
         }
         this.executionsBatchCache.set(productCode, batch)
 
-        if (reachedPageLimit) {
+        if (incompleteReason === 'page_limit') {
             this.logger.warn(
                 {
                     event: 'bitflyer:executions_batch_page_limit_reached',
@@ -655,6 +658,15 @@ export class BitflyerClient {
                     fetchedCount: executions.length,
                 },
                 'bitFlyer executions batch page limit reached',
+            )
+        } else if (incompleteReason === 'missing_execution_ids') {
+            this.logger.warn(
+                {
+                    event: 'bitflyer:executions_batch_pagination_incomplete',
+                    productCode,
+                    fetchedCount: executions.length,
+                },
+                'bitFlyer executions batch pagination stopped because execution ids were missing',
             )
         }
 
@@ -685,14 +697,15 @@ export class BitflyerClient {
         const batch = await this.fetchExecutionsByProductCode(productCode)
         const childExecs = batch.executionsByAcceptanceId.get(childAcceptanceId) ?? []
 
-        if (childExecs.length === 0 && batch.reachedPageLimit) {
+        if (childExecs.length === 0 && batch.incompleteReason) {
             this.logger.warn(
                 {
-                    event: 'bitflyer:executions_batch_miss_after_page_limit',
+                    event: 'bitflyer:executions_batch_miss_after_incomplete_batch',
                     productCode,
                     childAcceptanceId,
+                    reason: batch.incompleteReason,
                 },
-                'bitFlyer executions batch did not include requested acceptance id after reaching page limit; falling back to direct lookup',
+                'bitFlyer executions batch did not include requested acceptance id after incomplete pagination; falling back to direct lookup',
             )
             return this.fetchExecutionInfoByChildAcceptanceIdDirect(childAcceptanceId, ticker)
         }
