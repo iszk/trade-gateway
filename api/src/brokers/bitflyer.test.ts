@@ -828,6 +828,47 @@ test('BitflyerClient.getExecutionPriceForOrderV2 resolves metadata-less MARKET o
     assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('product_code'), 'BTC_JPY')
 })
 
+test('BitflyerClient.getExecutionPriceForOrderV2 rounds split execution size totals', async () => {
+    const executions = Array.from({ length: 10 }, (_, index) => ({
+        id: 300 - index,
+        child_order_acceptance_id: 'JRF-child-split-entry',
+        price: 9700000 + index,
+        size: 0.1,
+        exec_date: '2026-01-01T00:05:00.000Z',
+    }))
+    const expectedPrice = executions.reduce((sum, execution) => sum + execution.price * execution.size, 0)
+        / executions.reduce((sum, execution) => sum + execution.size, 0)
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () =>
+            new Response(
+                JSON.stringify(executions),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            ),
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'v2-entry-split-size',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'MARKET',
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-child-split-entry'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.deepEqual(result.execution, { price: expectedPrice, size: 1, executed_at: new Date('2026-01-01T00:05:00.000Z') })
+})
+
 test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when IFDOCO metadata is missing', async () => {
     const { logger, warnLogs } = createCapturingLogger()
     const requestedUrls: string[] = []
@@ -1090,6 +1131,65 @@ test('BitflyerClient.getClosingExecutionForOrderV2 returns partial close and no-
     assert.deepEqual(result.execution, { price: 9500000, size: 0.004, executed_at: new Date('2026-01-01T01:00:00.000Z') })
     assert.deepEqual(result.brokerOrderMetadata, order.broker_order_metadata)
     assert.equal(requestedUrls.length, 1)
+})
+
+test('BitflyerClient.getClosingExecutionForOrderV2 rounds split execution size totals', async () => {
+    const executions = Array.from({ length: 10 }, (_, index) => ({
+        id: 500 - index,
+        child_order_acceptance_id: 'JRF-child-stop-split-size',
+        price: 9500000 + index,
+        size: 0.1,
+        exec_date: '2026-01-01T01:00:00.000Z',
+    }))
+    const expectedPrice = executions.reduce((sum, execution) => sum + execution.price * execution.size, 0)
+        / executions.reduce((sum, execution) => sum + execution.size, 0)
+
+    const order: OrderV2 = {
+        id: 'v2-close-split-size',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 1,
+        executed_size: 1,
+        executed_price: 9700000,
+        status: 'EXECUTED',
+        executed_at: new Date('2026-01-01T00:10:00Z'),
+        provider_order_ids: ['JRF-parent-close-split-size'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-close-split-size',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 1 },
+                resolved: { acceptance_id: 'JRF-child-entry-split-size' },
+            },
+            exits: [
+                {
+                    expected: { role: 'STOP_LOSS', side: 'SELL', condition_type: 'STOP', size: 1, trigger_price: 9500000 },
+                    resolved: { acceptance_id: 'JRF-child-stop-split-size' },
+                },
+            ],
+        },
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () =>
+            new Response(
+                JSON.stringify(executions),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            ),
+    })
+
+    const result = await client.getClosingExecutionForOrderV2(order)
+
+    assert.deepEqual(result.execution, { price: expectedPrice, size: 1, executed_at: new Date('2026-01-01T01:00:00.000Z') })
 })
 
 test('BitflyerClient.getClosingExecutionForOrderV2 no-ops when metadata is missing', async () => {
