@@ -89,6 +89,8 @@ const DEFAULT_POSITION_PRODUCT_CODES = ['FX_BTC_JPY']
 const EXECUTIONS_BATCH_COUNT = 100
 const EXECUTIONS_BATCH_MAX_PAGES = 5
 const EXECUTIONS_BATCH_CACHE_MS = 30 * 1000
+const EXECUTION_SIZE_DECIMAL_PLACES = 8
+const EXECUTION_SIZE_SCALE = 10 ** EXECUTION_SIZE_DECIMAL_PLACES
 
 type BitflyerParentOrderParameter = {
     product_code: string
@@ -119,13 +121,15 @@ const buildFailure = (
 
 const resolveProductCode = (ticker: string): string => ticker
 
+const roundExecutionSize = (size: number): number => Math.round(size * EXECUTION_SIZE_SCALE) / EXECUTION_SIZE_SCALE
+
 const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): number | null => {
     if (execs.length === 0) return null
     const totalSize = totalSizeExecs(execs)
     const totalValue = execs.reduce((sum, e) => sum + e.price * e.size, 0)
     return totalValue / totalSize
 }
-const totalSizeExecs = (execs: BitflyerExecutionEntry[]): number => execs.reduce((sum, e) => sum + e.size, 0)
+const totalSizeExecs = (execs: BitflyerExecutionEntry[]): number => roundExecutionSize(execs.reduce((sum, e) => sum + e.size, 0))
 
 const areSameNumber = (left: number | undefined, right: number | undefined): boolean => {
     if (left === undefined || right === undefined) return left === right
@@ -827,8 +831,10 @@ export class BitflyerClient {
                 }
             }
 
+            const size = roundExecutionSize(totalSize)
+
             return {
-                execution: totalSize > 0 ? { price: totalValue / totalSize, size: totalSize, executed_at: latestExecutedAt } : null,
+                execution: size > 0 ? { price: totalValue / size, size, executed_at: latestExecutedAt } : null,
                 brokerOrderMetadata: resolvedMetadata,
             }
         } catch (error) {
