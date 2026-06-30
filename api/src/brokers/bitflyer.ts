@@ -122,14 +122,15 @@ const buildFailure = (
 const resolveProductCode = (ticker: string): string => ticker
 
 const roundExecutionSize = (size: number): number => Math.round(size * EXECUTION_SIZE_SCALE) / EXECUTION_SIZE_SCALE
+const sumExecutionSize = (execs: BitflyerExecutionEntry[]): number => execs.reduce((sum, e) => sum + e.size, 0)
 
 const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): number | null => {
     if (execs.length === 0) return null
-    const totalSize = totalSizeExecs(execs)
+    const totalSize = sumExecutionSize(execs)
     const totalValue = execs.reduce((sum, e) => sum + e.price * e.size, 0)
     return totalValue / totalSize
 }
-const totalSizeExecs = (execs: BitflyerExecutionEntry[]): number => roundExecutionSize(execs.reduce((sum, e) => sum + e.size, 0))
+const totalSizeExecs = (execs: BitflyerExecutionEntry[]): number => roundExecutionSize(sumExecutionSize(execs))
 
 const areSameNumber = (left: number | undefined, right: number | undefined): boolean => {
     if (left === undefined || right === undefined) return left === right
@@ -834,7 +835,7 @@ export class BitflyerClient {
             const size = roundExecutionSize(totalSize)
 
             return {
-                execution: size > 0 ? { price: totalValue / size, size, executed_at: latestExecutedAt } : null,
+                execution: totalSize > 0 ? { price: totalValue / totalSize, size, executed_at: latestExecutedAt } : null,
                 brokerOrderMetadata: resolvedMetadata,
             }
         } catch (error) {

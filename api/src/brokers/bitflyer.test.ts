@@ -829,19 +829,23 @@ test('BitflyerClient.getExecutionPriceForOrderV2 resolves metadata-less MARKET o
 })
 
 test('BitflyerClient.getExecutionPriceForOrderV2 rounds split execution size totals', async () => {
+    const executions = Array.from({ length: 10 }, (_, index) => ({
+        id: 300 - index,
+        child_order_acceptance_id: 'JRF-child-split-entry',
+        price: 9700000 + index,
+        size: 0.1,
+        exec_date: '2026-01-01T00:05:00.000Z',
+    }))
+    const expectedPrice = executions.reduce((sum, execution) => sum + execution.price * execution.size, 0)
+        / executions.reduce((sum, execution) => sum + execution.size, 0)
+
     const client = new BitflyerClient({
         apiKey: 'test-key',
         apiSecret: 'test-secret',
         baseUrl: 'https://example.com',
         fetchImpl: async () =>
             new Response(
-                JSON.stringify(Array.from({ length: 10 }, (_, index) => ({
-                    id: 300 - index,
-                    child_order_acceptance_id: 'JRF-child-split-entry',
-                    price: 9700000,
-                    size: 0.1,
-                    exec_date: '2026-01-01T00:05:00.000Z',
-                }))),
+                JSON.stringify(executions),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             ),
     })
@@ -862,7 +866,7 @@ test('BitflyerClient.getExecutionPriceForOrderV2 rounds split execution size tot
         updated_at: new Date('2026-01-01T00:00:00Z'),
     })
 
-    assert.deepEqual(result.execution, { price: 9700000, size: 1, executed_at: new Date('2026-01-01T00:05:00.000Z') })
+    assert.deepEqual(result.execution, { price: expectedPrice, size: 1, executed_at: new Date('2026-01-01T00:05:00.000Z') })
 })
 
 test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when IFDOCO metadata is missing', async () => {
@@ -1130,6 +1134,16 @@ test('BitflyerClient.getClosingExecutionForOrderV2 returns partial close and no-
 })
 
 test('BitflyerClient.getClosingExecutionForOrderV2 rounds split execution size totals', async () => {
+    const executions = Array.from({ length: 10 }, (_, index) => ({
+        id: 500 - index,
+        child_order_acceptance_id: 'JRF-child-stop-split-size',
+        price: 9500000 + index,
+        size: 0.1,
+        exec_date: '2026-01-01T01:00:00.000Z',
+    }))
+    const expectedPrice = executions.reduce((sum, execution) => sum + execution.price * execution.size, 0)
+        / executions.reduce((sum, execution) => sum + execution.size, 0)
+
     const order: OrderV2 = {
         id: 'v2-close-split-size',
         strategy: 'MA',
@@ -1168,20 +1182,14 @@ test('BitflyerClient.getClosingExecutionForOrderV2 rounds split execution size t
         baseUrl: 'https://example.com',
         fetchImpl: async () =>
             new Response(
-                JSON.stringify(Array.from({ length: 10 }, (_, index) => ({
-                    id: 500 - index,
-                    child_order_acceptance_id: 'JRF-child-stop-split-size',
-                    price: 9500000,
-                    size: 0.1,
-                    exec_date: '2026-01-01T01:00:00.000Z',
-                }))),
+                JSON.stringify(executions),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             ),
     })
 
     const result = await client.getClosingExecutionForOrderV2(order)
 
-    assert.deepEqual(result.execution, { price: 9500000, size: 1, executed_at: new Date('2026-01-01T01:00:00.000Z') })
+    assert.deepEqual(result.execution, { price: expectedPrice, size: 1, executed_at: new Date('2026-01-01T01:00:00.000Z') })
 })
 
 test('BitflyerClient.getClosingExecutionForOrderV2 no-ops when metadata is missing', async () => {
