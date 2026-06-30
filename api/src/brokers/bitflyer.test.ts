@@ -787,17 +787,21 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
     assert.equal(warnLogs[1]?.obj.batchMatchCount, 1)
 })
 
-test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when metadata is missing', async () => {
-    const { logger, warnLogs } = createCapturingLogger()
+test('BitflyerClient.getExecutionPriceForOrderV2 resolves metadata-less MARKET order from provider order id', async () => {
     const requestedUrls: string[] = []
     const client = new BitflyerClient({
         apiKey: 'test-key',
         apiSecret: 'test-secret',
         baseUrl: 'https://example.com',
-        logger: logger as any,
         fetchImpl: async (url) => {
             requestedUrls.push(String(url))
-            return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+            return new Response(
+                JSON.stringify([
+                    { id: 201, child_order_acceptance_id: 'JRF-child-legacy', price: 9700000, size: 0.01, exec_date: '2026-01-01T00:05:00.000Z' },
+                    { id: 200, child_order_acceptance_id: 'JRF-child-other', price: 9800000, size: 0.01, exec_date: '2026-01-01T00:06:00.000Z' },
+                ]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
         },
     })
 
@@ -813,6 +817,43 @@ test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when metadata is missing
         executed_price: null,
         status: 'PENDING',
         provider_order_ids: ['JRF-child-legacy'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.deepEqual(result.execution, { price: 9700000, size: 0.01, executed_at: new Date('2026-01-01T00:05:00.000Z') })
+    assert.equal(result.brokerOrderMetadata, undefined)
+    assert.equal(requestedUrls.length, 1)
+    assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('child_order_acceptance_id'), null)
+    assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('product_code'), 'BTC_JPY')
+})
+
+test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when IFDOCO metadata is missing', async () => {
+    const { logger, warnLogs } = createCapturingLogger()
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        logger: logger as any,
+        fetchImpl: async (url) => {
+            requestedUrls.push(String(url))
+            return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'v2-ifdoco-missing-metadata',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-parent-missing-metadata'],
         created_at: new Date('2026-01-01T00:00:00Z'),
         updated_at: new Date('2026-01-01T00:00:00Z'),
     })
