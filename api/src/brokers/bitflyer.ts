@@ -725,6 +725,19 @@ export class BitflyerClient {
         }
 
         const metadata = order.broker_order_metadata
+        if (metadata === undefined && order.order_type === 'MARKET') {
+            try {
+                const execution = await this.fetchExecutionInfoByChildAcceptanceId(providerOrderId, order.ticker)
+                return { execution }
+            } catch (error) {
+                this.logger.warn(
+                    { event: 'bitflyer:get_execution_price_v2_failed', orderId: order.id, ticker: order.ticker, error },
+                    'failed to get execution price for orders_v2 order',
+                )
+                return { execution: null }
+            }
+        }
+
         if (metadata?.kind !== 'bitflyer_parent_order_v1') {
             this.logger.warn(
                 {
