@@ -4,6 +4,9 @@ import honox from 'honox/vite'
 import { defineConfig } from 'vite'
 
 export default defineConfig({
+  define: {
+    'process.env': 'process.env',
+  },
   server: {
     proxy: {
       '/api': {

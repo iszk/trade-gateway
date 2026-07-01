@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build --mode client",
-    "start": "tsx app/server.ts",
-    "test": "tsx --test app/**/*.test.ts",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build --mode client",
+    "build:server": "vite build --ssr app/server.ts --outDir dist/server",
+    "start": "node dist/server/server.js",
+    "test": "node --import tsx --test app/**/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
