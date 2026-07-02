@@ -8,3 +8,5 @@ npm-debug.log
 dist
 *.test.ts
 Taskfile.yml
+Justfile
+*.md

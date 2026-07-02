@@ -1,7 +1,6 @@
 services:
 
   api:
-    container_name: trade-gateway-api
     image: node:24-trixie
     volumes:
       - .:/app
@@ -10,34 +9,26 @@ services:
     environment:
       - FIRESTORE_EMULATOR_HOST=test-firebase:8080
       - GOOGLE_CLOUD_PROJECT=trade-gateway
-    env_file:
-      - ./api/.env
     networks:
       - default
       - firebase
     command: bash -c "npm install && npm run dev:api"
 
   ui:
-    container_name: trade-gateway-ui
     image: node:24-trixie
     volumes:
       - .:/app
       - ui-node-modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    environment:
+      - API_URL=
+      - API_SECRET=
+
     working_dir: /app
     networks:
       - default
     command: bash -c "npm install && npm run dev:ui"
-
-  ui-prod:
-    container_name: trade-gateway-ui-prod
-    build:
-      context: .
-      dockerfile: ui/Dockerfile
-    env_file:
-      - ./ui/.env.production
-    networks:
-      - default
-      - reverse-proxy
 
 volumes:
   api-node-modules:

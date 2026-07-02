@@ -7,9 +7,9 @@ default:
     @just --choose
 
 setup:
-    mise trust
-    mise install
-    npm ci
+    @mise trust --yes
+    @mise install
+    @npm ci
 
 # すべてデプロイする
 deploy:
