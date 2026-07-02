@@ -11,6 +11,7 @@
     },
     "ui": {
       "entry": [
+        "app/server.ts",
         "app/client.ts",
         "app/routes/**/*.{ts,tsx}",
         "app/islands/**/*.{ts,tsx}"

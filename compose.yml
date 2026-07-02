@@ -30,30 +30,14 @@ services:
 
   ui-prod:
     container_name: trade-gateway-ui-prod
-    image: node:24-trixie
-    volumes:
-      - .:/app
-      - ui-node-modules:/app/node_modules
-    working_dir: /app
-    env_file:
-      - ./ui/.env.production
-    networks:
-      - default
-      - reverse-proxy
-    command: bash -c "npm install && npm run dev:ui"
-
-  ui-prodx:
-    # まだ作り中
-    # ちゃんとやりたい
-    container_name: trade-gateway-ui-prodxx
     build:
       context: .
       dockerfile: ui/Dockerfile
     env_file:
       - ./ui/.env.production
     networks:
+      - default
       - reverse-proxy
-    command: 'npm run dev:ui'
 
 volumes:
   api-node-modules:
