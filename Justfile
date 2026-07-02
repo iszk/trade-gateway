@@ -1,5 +1,7 @@
 # Justfile: タスクランナー Just の設定ファイル
 
+set dotenv-load := true
+
 mod api
 
 # デフォルトタスク: タスク一覧を fzf で選択して実行する
