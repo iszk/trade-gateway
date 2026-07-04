@@ -88,48 +88,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `401 Unauthorized`: 認証トークン不足・不正
 - `500 Internal Server Error`: 証券会社との通信エラー等
 
-### 5. 残高一覧取得
-- Method/Path: `GET /api/balances`
-- 認証: 必要（Bearerトークン）
-- 役割: 実装済み証券会社から現在の残高・評価額情報を取得し、日次スナップショットとして保存する
-- 対象 broker: `bitflyer`, `saxo`
-
-#### 成功レスポンス
-- `200 OK`
-
-```json
-{
-  "balances": [
-    {
-      "broker": "bitflyer",
-      "balances": [
-        { "asset": "JPY", "amount": 100000 },
-        { "asset": "CFD_JPY", "amount": 50000 }
-      ],
-      "updatedAt": 1672531200000
-    },
-    {
-      "broker": "saxo",
-      "balances": [
-        { "asset": "USD", "amount": 1000 },
-        { "asset": "USD_AVAILABLE_FOR_TRADING", "amount": 750 },
-        { "asset": "USD_TOTAL_VALUE", "amount": 1250 }
-      ],
-      "updatedAt": 1672531200000
-    }
-  ],
-  "updated_at": 1672531200000
-}
-```
-
-#### 補足
-- Saxo は `/port/v1/balances/me` の `CashBalance`, `CashAvailableForTrading`, `TotalValue`, `NetEquity` を非ゼロ項目のみ返す
-
-#### エラーレスポンス
-- `401 Unauthorized`: 認証トークン不足・不正
-- `500 Internal Server Error`: 証券会社との通信エラー等
-
-### 6. トレード統計取得
+### 5. トレード統計取得
 - Method/Path: `GET /api/trade-records/stats`
 - 認証: 必要（Bearerトークン）
 - 役割: `orders_v2` の EXECUTED 注文から再構成したクローズ済みトレードの統計を、strategy 単位で返す
@@ -172,7 +131,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `401 Unauthorized`: 認証トークン不足・不正
 - `500 Internal Server Error`
 
-### 7. トレード記録一覧取得
+### 6. トレード記録一覧取得
 - Method/Path: `GET /api/trade-records`
 - 認証: 必要（Bearerトークン）
 - 役割: `orders_v2` の EXECUTED 注文から FIFO で再構成したクローズ済みトレード記録を一覧取得する（ページネーション付き）
@@ -222,7 +181,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `401 Unauthorized`: 認証トークン不足・不正
 - `500 Internal Server Error`
 
-### 8. ヘルスチェック
+### 7. ヘルスチェック
 - Method/Path: `GET /api/health`
 - 認証: 不要
 
@@ -235,7 +194,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 }
 ```
 
-### 9. Orders V2 統計取得
+### 8. Orders V2 統計取得
 - Method/Path: `GET /api/v2/orders/stats`
 - 認証: 必要（Bearerトークン）
 - 役割: `orders_v2` の注文を strategy 単位で集計する。期間指定は `executed_at` を基準にする。
@@ -248,7 +207,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - `status=EXECUTED` の注文は `executed_at` が必須。欠落している既存データは集計対象外とし、`created_at` へはフォールバックしない。
 - `open_orders` は期間指定とは独立して、現在の `PENDING` 注文を strategy 単位で集計する。
 
-### 10. Orders V2 一覧取得
+### 9. Orders V2 一覧取得
 - Method/Path: `GET /api/v2/orders`
 - 認証: 必要（Bearerトークン）
 - 役割: `orders_v2` の注文を `executed_at` 降順で一覧取得する。
@@ -263,7 +222,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 #### 補足
 - 期間指定は `executed_at` を基準にする。`executed_at` が欠落している注文は一覧対象外とし、`created_at` へはフォールバックしない。
 
-### 11. Symbol 一覧・更新
+### 10. Symbol 一覧・更新
 - Method/Path: `GET /api/symbols`
 - 認証: 必要（Bearerトークン）
 - 役割: broker + ticker のメタデータと売買停止状態を一覧取得する
@@ -293,7 +252,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 }
 ```
 
-### 10. Symbol 更新
+### 11. Symbol 更新
 - Method/Path: `PUT /api/symbols/:symbol_id`
 - 認証: 必要（Bearerトークン）
 - 補足: `symbol_id` は `broker:ticker` を URL encode した値
@@ -308,7 +267,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 }
 ```
 
-### 11. Symbol 売買停止/再開
+### 12. Symbol 売買停止/再開
 - Method/Path: `PATCH /api/symbols/:symbol_id/trade-control`
 - 認証: 必要（Bearerトークン）
 

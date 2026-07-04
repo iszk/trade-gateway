@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 
 import { createApp } from './index.js'
 import type { DispatchOrderFn, BrokerName } from './types/order.js'
-import type { BrokerBalance } from './types/balance.js'
 import type { OrderV2 } from './types/order-v2.js'
 import type { Position } from './types/position.js'
 import { DuplicateEventError } from './services/webhook-events.js'
@@ -23,17 +22,12 @@ const createLoggerStub = () => {
     return { logger, calls }
 }
 
-const createBalanceFetcherStub = (balances: BrokerBalance[] = []) => ({
-    fetchAllBalances: async () => balances,
-})
-
 const createPositionFetcherStub = (positions: Position[] = []) => ({
     fetchAllPositions: async (_broker?: BrokerName) => positions,
 })
 
 const createAppForTests = (options: Parameters<typeof createApp>[0] = {}) =>
     createApp({
-        balanceFetcher: createBalanceFetcherStub(),
         positionFetcher: createPositionFetcherStub(),
         getTradableSymbol: async () => null,
         listTradableSymbols: async () => [],
@@ -183,32 +177,9 @@ test('GET /api/health returns 200', async () => {
     assert.deepEqual(await res.json(), { status: 'ok' })
 })
 
-test('GET /api/balances rejects requests without the shared key', async () => {
+test('GET /api/balances is not exposed', async () => {
     const app = createAppForTests({
         apiSecret: 'test-secret',
-    })
-
-    const res = await app.request('/api/balances')
-    const body = await res.json()
-
-    assert.equal(res.status, 401)
-    assert.equal(body.error.code, 'UNAUTHORIZED')
-})
-
-test('GET /api/balances returns balances when the shared key matches', async () => {
-    const sampleBalances: BrokerBalance[] = [
-        {
-            broker: 'bitflyer',
-            balances: [
-                { asset: 'BTC', amount: 0.5 },
-            ],
-            updatedAt: 123,
-        },
-    ]
-
-    const app = createAppForTests({
-        apiSecret: 'test-secret',
-        balanceFetcher: createBalanceFetcherStub(sampleBalances),
     })
 
     const res = await app.request('/api/balances', {
@@ -216,11 +187,8 @@ test('GET /api/balances returns balances when the shared key matches', async () 
             Authorization: 'Bearer test-secret',
         },
     })
-    const body = await res.json()
 
-    assert.equal(res.status, 200)
-    assert.deepEqual(body.balances, sampleBalances)
-    assert.equal(typeof body.updated_at, 'number')
+    assert.equal(res.status, 404)
 })
 
 test('GET /api/symbols returns tradable symbols', async () => {
