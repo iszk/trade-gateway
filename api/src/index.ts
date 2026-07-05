@@ -7,7 +7,6 @@ import { z } from 'zod'
 
 import { createOrderDispatcher } from './services/order-dispatcher.js'
 import type { DispatchOrderFn, BrokerName } from './types/order.js'
-import type { BrokerBalance } from './types/balance.js'
 import type { OrderV2 } from './types/order-v2.js'
 import type { Position } from './types/position.js'
 import type { TradableSymbol } from './types/tradable-symbol.js'
@@ -26,7 +25,6 @@ import type { StatsV2 } from './services/stats-v2.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
 import { PositionFetcher } from './services/position-fetcher.js'
-import { BalanceFetcher } from './services/balance-fetcher.js'
 import { config } from './config.js'
 import { createDefaultSlotScheduler } from './services/slot-scheduler.js'
 import type { SlotScheduler } from './services/slot-scheduler.js'
@@ -194,10 +192,6 @@ const extractTraceContext = (headers: Headers): Record<string, unknown> => {
     }
 }
 
-type BalanceFetcherLike = {
-    fetchAllBalances(): Promise<BrokerBalance[]>
-}
-
 type PositionFetcherLike = {
     fetchAllPositions(broker?: BrokerName): Promise<Position[]>
 }
@@ -222,7 +216,6 @@ type CreateAppOptions = {
         apiSecret?: string
         baseUrl?: string
     }
-    balanceFetcher?: BalanceFetcherLike
     positionFetcher?: PositionFetcherLike
     slotScheduler?: SlotScheduler
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
@@ -256,7 +249,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const saxoConfig = options.saxoConfig ?? config.saxo
     const bitflyerConfig = options.bitflyerConfig ?? config.bitflyer
     const positionFetcher = options.positionFetcher ?? new PositionFetcher()
-    const balanceFetcher = options.balanceFetcher ?? new BalanceFetcher()
     const requireApiSecret = createApiSecretAuthMiddleware(apiSecret)
     const slotScheduler = options.slotScheduler ?? createDefaultSlotScheduler()
     const addOrderV2 = options.addOrderV2 ?? createDefaultAddOrderV2Fn()
@@ -824,19 +816,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
     })
 
-    app.get('/api/balances', requireApiSecret, async (c) => {
-        try {
-            const balances = await balanceFetcher.fetchAllBalances()
-            return c.json({
-                balances,
-                updated_at: Date.now(),
-            })
-        } catch (err) {
-            logger.warn({ event: 'balances:fetch_failed', error: err }, 'failed to fetch balances')
-            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch balances'), 500)
-        }
-    })
-
     app.get('/api/positions', requireApiSecret, async (c) => {
         const broker = c.req.query('broker') as BrokerName | undefined
         try {
@@ -1107,7 +1086,6 @@ if (isMainModule) {
 }
 
 export type AppType = typeof app
-export type { BrokerBalance } from './types/balance.js'
 export type { Position } from './types/position.js'
 export type { SaxoInstrument } from './brokers/saxo.js'
 export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, TradeRecordsResponse } from './services/trade-records-v2.js'

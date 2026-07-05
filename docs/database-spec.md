@@ -1,13 +1,13 @@
 # DB 仕様（MVP / Firestore）
 
 ## 目的
-webhook 重複防止、発注監査、注文状態、銘柄制御、残高スナップショット、Saxo 認証状態、cron 実行状態に必要なデータモデルを定義する。
+webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証状態、cron 実行状態に必要なデータモデルを定義する。
 
 ## 採用 DB
 - Firestore（Native mode）
 
 ## 方針
-- すべての日時は UTC で保存する。ただし `daily_balances.date` はドキュメントキー用途として JST の `YYYY-MM-DD` 文字列を保存する
+- すべての日時は UTC で保存する
 - MVP ではコレクション設計を最小限にし、過剰な正規化は行わない
 - 整合性は Firestore のトランザクションとアプリケーション制御で担保する
 - Saxo 認証トークンは現状 `saxo_auth_data` に保存している。暗号化対応は未実装のため、別 task で追跡する
@@ -125,27 +125,7 @@ broker + ticker のメタデータと、symbol 単位の売買停止状態を保
 - Webhook で未知の symbol を受けた場合、売買処理とは独立して `currency = JPY` のデフォルトレコードを事後作成する
 - `currency` は UI 表示・整理用途であり、Webhook の売買判定では参照しない
 
-## 5. `daily_balances`
-broker 別の日次残高スナップショットを保持する。`/api/balances` と日次残高保存タスクで利用する。
-
-### ドキュメント ID
-- `{YYYY-MM-DD}_{broker}`
-- 例: `2026-06-09_bitflyer`, `2026-06-09_saxo`
-- `BalanceFetcher.fetchAllBalances()` 1 回の保存では、開始時点の JST 日付を全 broker のキーに共通適用する
-
-### フィールド
-- `broker` (string, required)
-- `balances` (array, required)
-  - `asset` (string, required)
-  - `amount` (number, required)
-- `updatedAt` (number, required) — Unix time milliseconds
-- `date` (string, required) — JST の `YYYY-MM-DD`
-
-### broker 別補足
-- bitFlyer は `/v1/me/getbalance` の非ゼロ残高と `/v1/me/getcollateral` の `collateral` を `CFD_JPY` として保存する
-- Saxo は `/port/v1/balances/me` の `CashBalance`, `CashAvailableForTrading`, `TotalValue`, `NetEquity` を非ゼロ項目のみ保存する
-
-## 6. `cron_metadata`
+## 5. `cron_metadata`
 Cloud Run 上で動作するスロットスケジューラーが、各周期タスクの実行済みスロットIDを管理するために使用する（詳細は [slot-scheduler.md](./slot-scheduler.md) を参照）。また、Saxo audit orderactivities の batch polling 状態も保持する。
 
 ### ドキュメント ID
@@ -169,7 +149,7 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 - `saxo_orderactivities_poll_state` は Saxo audit polling の cursor/lookback 管理専用で、30分超の実行間隔では `last_poll_at` から30分巻き戻して再取得する
 - TTL は不要（上書きで管理）
 
-## 7. `saxo_auth_data`
+## 6. `saxo_auth_data`
 Saxo の OAuth token と account 情報を保持する。現行実装では `saxo_auth_data/saxo_auth` の固定ドキュメントを使う。
 
 ### ドキュメント ID
@@ -199,7 +179,6 @@ Saxo の OAuth token と account 情報を保持する。現行実装では `sax
 - `order_dispatch_logs`: 180 日
 - `orders_v2`: 現時点では明示的な TTL を設定しない
 - `tradable_symbols`: 明示的な TTL を設定しない
-- `daily_balances`: 現時点では明示的な TTL を設定しない
 - `cron_metadata`: TTL なし（上書きで管理）
 - `saxo_auth_data`: TTL なし（認証連携中は保持）
 
@@ -214,7 +193,7 @@ Saxo の OAuth token と account 情報を保持する。現行実装では `sax
 - 追加の複合インデックス（必要時のみ）
   - `order_dispatch_logs`: `result` 昇順 + `created_at` 降順
   - `orders_v2`: `status` / `order_type` / `exit_sync_status` の複合条件、または `executed_at` 範囲 + 降順並び替えが必要なクエリで、Firestore から要求された場合に追加する
-- `webhook_events`, `tradable_symbols`, `daily_balances`, `cron_metadata`, `saxo_auth_data` はドキュメント ID 参照または単純な一覧取得を基本とする
+- `webhook_events`, `tradable_symbols`, `cron_metadata`, `saxo_auth_data` はドキュメント ID 参照または単純な一覧取得を基本とする
 
 ## 整合性ルール
 1. `webhook_events` のドキュメント ID は `{broker}:{symbol}:{event_id}` とし、同一 broker / symbol / event の重複を拒否する

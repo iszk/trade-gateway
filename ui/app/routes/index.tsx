@@ -8,9 +8,6 @@ export default createRoute((c) => {
       <h1 class="text-3xl font-bold mb-8">Trade Gateway Dashboard</h1>
 
       <div class="flex justify-center space-x-6 mb-12">
-        <a href="/balances" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-6 rounded shadow">
-          View Balances
-        </a>
         <a href="/positions" class="bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-3 px-6 rounded shadow">
           View Positions
         </a>
