@@ -5,7 +5,6 @@ import { createApp } from './index.js'
 import type { DispatchOrderFn, BrokerName } from './types/order.js'
 import type { OrderV2 } from './types/order-v2.js'
 import type { Position } from './types/position.js'
-import type { SaxoClient } from './brokers/saxo.js'
 import { DuplicateEventError } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
@@ -328,7 +327,7 @@ test('GET /api/positions returns positions when the shared key matches', async (
 
 test('GET /api/saxo/portfolio-snapshot returns Saxo portfolio snapshot when authorized', async () => {
     const snapshot = {
-        schemaVersion: 'portfolio-snapshot.v1',
+        schemaVersion: 'portfolio-snapshot.v1' as const,
         source: {
             id: 'saxo-bank',
             provider: 'Saxo Bank',
@@ -356,9 +355,9 @@ test('GET /api/saxo/portfolio-snapshot returns Saxo portfolio snapshot when auth
     }
     const app = createAppForTests({
         apiSecret: 'test-secret',
-        saxoClient: {
+        saxoPortfolioSnapshotClient: {
             getPortfolioSnapshot: async () => snapshot,
-        } as unknown as SaxoClient,
+        },
     })
 
     const res = await app.request('/api/saxo/portfolio-snapshot', {

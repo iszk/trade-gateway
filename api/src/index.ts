@@ -196,6 +196,8 @@ type PositionFetcherLike = {
     fetchAllPositions(broker?: BrokerName): Promise<Position[]>
 }
 
+type SaxoPortfolioSnapshotClient = Pick<SaxoClient, 'getPortfolioSnapshot'>
+
 type CreateAppOptions = {
     webhookSecret?: string
     apiSecret?: string
@@ -216,7 +218,7 @@ type CreateAppOptions = {
         apiSecret?: string
         baseUrl?: string
     }
-    saxoClient?: SaxoClient
+    saxoPortfolioSnapshotClient?: SaxoPortfolioSnapshotClient
     positionFetcher?: PositionFetcherLike
     slotScheduler?: SlotScheduler
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
@@ -273,7 +275,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         logger,
     })
 
-    const saxoClient = options.saxoClient ?? new SaxoClient({
+    const saxoClient = new SaxoClient({
         appKey: saxoConfig.appKey,
         appSecret: saxoConfig.appSecret,
         authBaseUrl: saxoConfig.authBaseUrl,
@@ -281,6 +283,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         redirectUri: saxoConfig.redirectUri,
         logger,
     })
+    const saxoPortfolioSnapshotClient = options.saxoPortfolioSnapshotClient ?? saxoClient
 
     const cronCtx: CronContext = {
         logger,
@@ -900,7 +903,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
 
     app.get('/api/saxo/portfolio-snapshot', requireApiSecret, async (c) => {
         try {
-            const snapshot = await saxoClient.getPortfolioSnapshot()
+            const snapshot = await saxoPortfolioSnapshotClient.getPortfolioSnapshot()
             return c.json(snapshot)
         } catch (err) {
             logger.warn({ event: 'saxo_portfolio_snapshot:fetch_failed', error: err }, 'failed to fetch Saxo portfolio snapshot')

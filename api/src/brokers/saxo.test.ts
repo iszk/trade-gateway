@@ -378,6 +378,100 @@ test('SaxoClient.getPortfolioSnapshot maps CFD value to equity contribution and 
     assert.equal(requestedUrls.filter((url) => url.includes('/ref/v1/instruments/details/')).length, 2)
 })
 
+test('SaxoClient.getPortfolioSnapshot skips unsupported FX currencies without failing snapshot', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [
+                {
+                    accountKey: 'account-eur',
+                    clientKey: 'client-eur',
+                    legalAssetTypes: ['Stock'],
+                    currency: 'EUR',
+                    displayName: 'EUR Account',
+                },
+            ],
+        },
+    })
+
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const urlString = String(url)
+            if (urlString.endsWith('/port/v1/balances/me')) {
+                return new Response(
+                    JSON.stringify({
+                        Currency: 'EUR',
+                        CashBalance: 100,
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/port/v1/netpositions/me')) {
+                return new Response(
+                    JSON.stringify({
+                        Data: [
+                            {
+                                NetPositionId: 'Stock:333333__account-eur',
+                                NetPositionBase: {
+                                    AccountKey: 'account-eur',
+                                    AssetType: 'Stock',
+                                    Uic: 333333,
+                                    Amount: 1,
+                                    OpeningDirection: 'Buy',
+                                },
+                                NetPositionView: {
+                                    MarketValue: 100,
+                                    Currency: 'EUR',
+                                },
+                            },
+                        ],
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/ref/v1/instruments/details/333333/Stock')) {
+                return new Response(
+                    JSON.stringify({
+                        Uic: 333333,
+                        AssetType: 'Stock',
+                        Symbol: 'EURSTK:xeur',
+                        Description: 'EUR Stock',
+                        CurrencyCode: 'EUR',
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            return new Response('Not Found', { status: 404 })
+        },
+    })
+
+    const snapshot = await client.getPortfolioSnapshot()
+
+    assert.deepEqual(snapshot.cashBalances, [])
+    assert.deepEqual(snapshot.positions, [])
+    assert.deepEqual(snapshot.sourceMetadata?.skippedCashBalances, [
+        {
+            sourceAccountId: 'account-eur',
+            currency: 'EUR',
+            sourceField: 'CashBalance',
+            reason: 'unsupported_fx_rate',
+        },
+    ])
+    assert.deepEqual(snapshot.sourceMetadata?.skippedPositions, [
+        {
+            sourcePositionId: 'Stock:333333__account-eur',
+            sourceInstrumentId: 'Stock:333333',
+            reason: 'unsupported_fx_rate',
+            currency: 'EUR',
+        },
+    ])
+})
+
 test('SaxoClient.sendMarketOrder returns Saxo metadata for related orders', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

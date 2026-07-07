@@ -287,7 +287,8 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 
 #### 補足
 - 出力契約は equinaut の `portfolio-snapshot.v1` に合わせる。
-- FX rate は初期実装では固定値を使う: `JPY=1`, `USDJPY=160`, `HKDJPY=20`。
+- FX rate は初期実装では通貨コードごとの固定値を使う: `JPY=1`, `USD=160`, `HKD=20`。
+- 固定 FX rate が未対応の通貨は、対象の cash balance / position をスキップし、`sourceMetadata.skippedCashBalances` / `sourceMetadata.skippedPositions` に理由を保持する。
 - CFD / FX / Future などのレバレッジ商品は、口座純資産として理解しやすいように `valueJpy` へ未実現損益を入れる。notional exposure は `sourceMetadata.notionalValueJpy` に保持する。
 - Saxo instrument details の取得に失敗した場合は snapshot 全体を失敗させず、`AssetType:Uic` を `symbol` の fallback として使う。
 
