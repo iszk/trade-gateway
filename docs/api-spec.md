@@ -280,6 +280,70 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 }
 ```
 
+### 13. Saxo portfolio snapshot 取得
+- Method/Path: `GET /api/saxo/portfolio-snapshot`
+- 認証: 必要（Bearerトークン）
+- 役割: Saxo の現在の口座・現金残高・建玉を `portfolio-snapshot.v1` 形式で返す。
+
+#### 補足
+- 出力契約は equinaut の `portfolio-snapshot.v1` に合わせる。
+- FX rate は初期実装では固定値を使う: `JPY=1`, `USDJPY=160`, `HKDJPY=20`。
+- CFD / FX / Future などのレバレッジ商品は、口座純資産として理解しやすいように `valueJpy` へ未実現損益を入れる。notional exposure は `sourceMetadata.notionalValueJpy` に保持する。
+- Saxo instrument details の取得に失敗した場合は snapshot 全体を失敗させず、`AssetType:Uic` を `symbol` の fallback として使う。
+
+#### 成功レスポンス
+- `200 OK`
+
+```json
+{
+  "schemaVersion": "portfolio-snapshot.v1",
+  "source": {
+    "id": "saxo-bank",
+    "provider": "Saxo Bank",
+    "exporter": "trade-gateway"
+  },
+  "generatedAt": "2026-07-06T00:00:00.000Z",
+  "dataAsOf": "2026-07-06T00:00:00.000Z",
+  "baseCurrency": "JPY",
+  "accounts": [
+    {
+      "sourceAccountId": "account-1",
+      "name": "Main Account",
+      "baseCurrency": "JPY"
+    }
+  ],
+  "cashBalances": [
+    {
+      "sourceAccountId": "account-1",
+      "currency": "JPY",
+      "amount": "100000",
+      "valueJpy": "100000",
+      "fxRateToJpy": "1",
+      "sourceBalanceId": "account-1:JPY:CashBalance"
+    }
+  ],
+  "positions": [
+    {
+      "sourceAccountId": "account-1",
+      "sourcePositionId": "CfdOnIndex:111111__account-1",
+      "sourceInstrumentId": "CfdOnIndex:111111",
+      "assetClass": "cfd",
+      "symbol": "US500.I",
+      "quantity": "2",
+      "side": "long",
+      "price": "5500",
+      "priceCurrency": "USD",
+      "valueJpy": "32000",
+      "unrealizedPnlJpy": "32000",
+      "sourceMetadata": {
+        "valuationBasis": "equity_contribution",
+        "notionalValueJpy": "1760000"
+      }
+    }
+  ]
+}
+```
+
 ## エラー形式
 
 すべてのエラーは以下を返す。

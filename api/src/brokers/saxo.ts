@@ -5,6 +5,13 @@ import type { SaxoOrderMetadata } from '../types/broker-order-metadata.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { Position } from '../types/position.js'
 import type { Balance } from '../types/balance.js'
+import type {
+    PortfolioSnapshotV1,
+    PortfolioSnapshotV1AssetClass,
+    PortfolioSnapshotV1JsonValue,
+    PortfolioSnapshotV1SourceMetadata,
+} from '../types/portfolio-snapshot.js'
+import { portfolioSnapshotV1SchemaVersion } from '../types/portfolio-snapshot.js'
 import { defaultLogger, type Logger } from '../logger.js'
 
 type SaxoClientOptions = {
@@ -55,13 +62,33 @@ type SaxoAccountMeResponse = {
 
 type SaxoNetPosition = {
     NetPositionId: string
+    AccountKey?: string
+    Uic?: number
+    AssetType?: string
     NetPositionBase: {
         Amount: number
         OpeningDirection: 'Buy' | 'Sell'
+        AccountKey?: string
+        Uic?: number
+        AssetType?: string
     }
     NetPositionView: {
         AverageOpenPrice?: number
         ProfitLossOnTrade?: number
+        ProfitLossOnTradeInBaseCurrency?: number
+        MarketValue?: number
+        MarketValueInBaseCurrency?: number
+        PositionValue?: number
+        Exposure?: number
+        ExposureInBaseCurrency?: number
+        CurrentPrice?: number
+        Price?: number
+        Currency?: string
+        DisplayAndFormat?: {
+            Symbol?: string
+            Description?: string
+            Currency?: string
+        }
     }
 }
 
@@ -131,6 +158,26 @@ type SaxoInstrumentResponse = {
     Data: SaxoInstrument[]
 }
 
+type SaxoInstrumentDetails = {
+    Uic?: number
+    AssetType?: string
+    Symbol?: string
+    Description?: string
+    CurrencyCode?: string
+    ExchangeId?: string
+    DisplayAndFormat?: {
+        Symbol?: string
+        Description?: string
+        Currency?: string
+    }
+}
+
+type SaxoInstrumentDetailsResponse =
+    | (SaxoInstrumentDetails & { Data?: never })
+    | {
+        Data: SaxoInstrumentDetails[]
+    }
+
 const FIRESTORE_COLLECTION = 'saxo_auth_data'
 const FIRESTORE_DOC = 'saxo_auth'
 const CRON_METADATA_COLLECTION = 'cron_metadata'
@@ -141,6 +188,110 @@ const SAXO_AUDIT_OVERLAP_MS = 30 * 60 * 1000
 const SAXO_AUDIT_CURSOR_MAX_IDLE_MS = 30 * 60 * 1000
 const SAXO_AUDIT_BATCH_CACHE_MS = 60 * 1000
 const SAXO_AUDIT_MAX_PAGES_PER_POLL = 10
+const SAXO_INSTRUMENT_DETAILS_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const FIXED_FX_RATES_TO_JPY: Record<string, number> = {
+    JPY: 1,
+    USD: 160,
+    HKD: 20,
+}
+
+type CachedSaxoInstrumentDetails = {
+    expiresAtMs: number
+    details: SaxoInstrumentDetails
+}
+
+const saxoInstrumentDetailsCache = new Map<string, CachedSaxoInstrumentDetails>()
+
+const toDecimalString = (value: number): string => {
+    if (!Number.isFinite(value)) {
+        throw new Error(`invalid decimal value: ${value}`)
+    }
+    const normalized = Object.is(value, -0) ? 0 : value
+    if (Number.isInteger(normalized)) return String(normalized)
+    return normalized
+        .toFixed(12)
+        .replace(/0+$/, '')
+        .replace(/\.$/, '')
+}
+
+const getFixedFxRateToJpy = (currency: string): number => {
+    const rate = FIXED_FX_RATES_TO_JPY[currency.toUpperCase()]
+    if (rate === undefined) {
+        throw new Error(`unsupported currency for fixed JPY FX rate: ${currency}`)
+    }
+    return rate
+}
+
+const toJpyDecimalString = (amount: number, currency: string): string =>
+    toDecimalString(amount * getFixedFxRateToJpy(currency))
+
+const normalizeCurrencyCode = (currency?: string): string | undefined => {
+    const trimmed = currency?.trim().toUpperCase()
+    return trimmed && /^[A-Z]{3}$/.test(trimmed) ? trimmed : undefined
+}
+
+const mapSaxoAssetClass = (assetType: string): PortfolioSnapshotV1AssetClass | null => {
+    const normalized = assetType.toLowerCase()
+    if (normalized.includes('cfd')) return 'cfd'
+    if (normalized.includes('etf')) return 'etf'
+    if (normalized.includes('fx')) return 'fx'
+    if (normalized.includes('future')) return 'future'
+    if (normalized.includes('option')) return 'option'
+    if (normalized.includes('bond')) return 'bond'
+    if (normalized.includes('fund')) return 'fund'
+    if (normalized.includes('stock') || normalized.includes('equity')) return 'stock'
+    return null
+}
+
+const isEquityContributionAssetClass = (assetClass: PortfolioSnapshotV1AssetClass): boolean =>
+    assetClass === 'cfd' || assetClass === 'fx' || assetClass === 'future'
+
+const extractInstrumentReference = (
+    position: SaxoNetPosition,
+): { assetType?: string; uic?: number } => {
+    const assetType = position.NetPositionBase.AssetType ?? position.AssetType
+    const uic = position.NetPositionBase.Uic ?? position.Uic
+    if (assetType && typeof uic === 'number' && Number.isFinite(uic)) {
+        return { assetType, uic }
+    }
+
+    const prefix = position.NetPositionId.split('__')[0] ?? position.NetPositionId
+    const colonMatch = prefix.match(/^([^:]+):(\d+)$/)
+    if (colonMatch?.[1] && colonMatch[2]) {
+        return {
+            assetType: colonMatch[1],
+            uic: Number(colonMatch[2]),
+        }
+    }
+
+    return { assetType, uic }
+}
+
+const extractInstrumentDetailsPayload = (
+    payload: SaxoInstrumentDetailsResponse,
+): SaxoInstrumentDetails | null => {
+    if (payload.Data) {
+        return payload.Data[0] ?? null
+    }
+    return payload
+}
+
+const getInstrumentDisplaySymbol = (
+    details: SaxoInstrumentDetails | null,
+    fallback: string,
+): string => (
+    details?.DisplayAndFormat?.Symbol ??
+    details?.Symbol ??
+    fallback
+)
+
+const getInstrumentDisplayName = (details: SaxoInstrumentDetails | null): string | undefined => (
+    details?.DisplayAndFormat?.Description ??
+    details?.Description
+)
+
+const getInstrumentCurrency = (details: SaxoInstrumentDetails | null): string | undefined =>
+    normalizeCurrencyCode(details?.DisplayAndFormat?.Currency ?? details?.CurrencyCode)
 
 const parseRetryAfterMs = (value: string | null): number | null => {
     if (!value) return null
@@ -941,6 +1092,281 @@ export class SaxoClient {
             redirect_uri: this.redirectUri,
         })
         return `${this.authBaseUrl}/authorize?${params.toString()}`
+    }
+
+    private async getPortfolioAccounts(accessToken: string): Promise<SaxoAccountInfo[]> {
+        const auth = await this.getAuth()
+        if (auth?.accounts && auth.accounts.length > 0) {
+            return auth.accounts
+        }
+
+        const accounts = await this.fetchAccounts(accessToken)
+        if (auth) {
+            await this.saveAuth({ ...auth, accounts })
+        }
+        return accounts
+    }
+
+    private async fetchPortfolioBalance(accessToken: string): Promise<SaxoBalanceResponse> {
+        const response = await this.fetchImpl(`${this.baseUrl}/port/v1/balances/me`, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+        })
+
+        if (!response.ok) {
+            const body = await response.text()
+            throw new Error(`Failed to fetch Saxo balances: ${response.status} ${body}`)
+        }
+
+        return (await response.json()) as SaxoBalanceResponse
+    }
+
+    private async fetchNetPositions(accessToken: string): Promise<SaxoNetPosition[]> {
+        const response = await this.fetchImpl(`${this.baseUrl}/port/v1/netpositions/me`, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+        })
+
+        if (!response.ok) {
+            const body = await response.text()
+            throw new Error(`Failed to fetch Saxo positions: ${response.status} ${body}`)
+        }
+
+        const data = (await response.json()) as SaxoNetPositionsResponse
+        return data.Data
+    }
+
+    private async getInstrumentDetails(
+        accessToken: string,
+        assetType: string,
+        uic: number,
+    ): Promise<SaxoInstrumentDetails | null> {
+        const cacheKey = `${assetType}:${uic}`
+        const cached = saxoInstrumentDetailsCache.get(cacheKey)
+        if (cached && cached.expiresAtMs > Date.now()) {
+            return cached.details
+        }
+
+        const url = `${this.baseUrl}/ref/v1/instruments/details/${uic}/${encodeURIComponent(assetType)}`
+        const response = await this.fetchImpl(url, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+        })
+
+        if (!response.ok) {
+            const body = await response.text()
+            this.logger.warn(
+                {
+                    event: 'saxo:instrument_details_failed',
+                    status: response.status,
+                    response: body,
+                    assetType,
+                    uic,
+                },
+                'failed to fetch Saxo instrument details',
+            )
+            return null
+        }
+
+        const payload = (await response.json()) as SaxoInstrumentDetailsResponse
+        const details = extractInstrumentDetailsPayload(payload)
+        if (!details) {
+            return null
+        }
+
+        saxoInstrumentDetailsCache.set(cacheKey, {
+            details,
+            expiresAtMs: Date.now() + SAXO_INSTRUMENT_DETAILS_CACHE_TTL_MS,
+        })
+        return details
+    }
+
+    async getPortfolioSnapshot(): Promise<PortfolioSnapshotV1> {
+        const accessToken = await this.getValidAccessToken()
+        if (!accessToken) {
+            throw new Error('Saxo auth is missing or expired')
+        }
+
+        const accounts = await this.getPortfolioAccounts(accessToken)
+        const primaryAccount = accounts[0]
+        if (!primaryAccount) {
+            throw new Error('No Saxo accounts found')
+        }
+
+        const [balance, rawPositions] = await Promise.all([
+            this.fetchPortfolioBalance(accessToken),
+            this.fetchNetPositions(accessToken),
+        ])
+        const generatedAt = new Date().toISOString()
+        const balanceCurrency = normalizeCurrencyCode(balance.Currency) ?? normalizeCurrencyCode(primaryAccount.currency) ?? 'JPY'
+        const primaryAccountCurrency = normalizeCurrencyCode(primaryAccount.currency) ?? balanceCurrency
+        const skippedPositions: PortfolioSnapshotV1JsonValue[] = []
+        const positions: PortfolioSnapshotV1['positions'] = []
+
+        for (const rawPosition of rawPositions) {
+            const { assetType, uic } = extractInstrumentReference(rawPosition)
+            if (!assetType || typeof uic !== 'number' || !Number.isFinite(uic)) {
+                skippedPositions.push({
+                    sourcePositionId: rawPosition.NetPositionId,
+                    reason: 'missing_instrument_reference',
+                })
+                continue
+            }
+
+            const assetClass = mapSaxoAssetClass(assetType)
+            if (!assetClass) {
+                skippedPositions.push({
+                    sourcePositionId: rawPosition.NetPositionId,
+                    reason: 'unsupported_asset_type',
+                    assetType,
+                    uic,
+                })
+                continue
+            }
+
+            const sourceInstrumentId = `${assetType}:${uic}`
+            const details = await this.getInstrumentDetails(accessToken, assetType, uic)
+            const priceCurrency =
+                getInstrumentCurrency(details) ??
+                normalizeCurrencyCode(rawPosition.NetPositionView.Currency) ??
+                primaryAccountCurrency
+            const amount = Math.abs(rawPosition.NetPositionBase.Amount)
+            const price =
+                rawPosition.NetPositionView.CurrentPrice ??
+                rawPosition.NetPositionView.Price ??
+                rawPosition.NetPositionView.AverageOpenPrice
+            const accountCurrencyPnl = rawPosition.NetPositionView.ProfitLossOnTradeInBaseCurrency
+            const tradeCurrencyPnl = rawPosition.NetPositionView.ProfitLossOnTrade
+            const pnl = accountCurrencyPnl ?? tradeCurrencyPnl
+            const pnlCurrency = accountCurrencyPnl !== undefined ? primaryAccountCurrency : priceCurrency
+            const unrealizedPnlJpy = pnl !== undefined ? toJpyDecimalString(pnl, pnlCurrency) : undefined
+            const metadata: PortfolioSnapshotV1SourceMetadata = {
+                netPositionId: rawPosition.NetPositionId,
+                assetType,
+                uic,
+                instrumentLookupStatus: details ? 'hit' : 'fallback',
+            }
+
+            let valueJpy: string
+            if (isEquityContributionAssetClass(assetClass)) {
+                const exposureInBaseCurrency = rawPosition.NetPositionView.ExposureInBaseCurrency
+                const exposure = rawPosition.NetPositionView.Exposure
+                const notionalValueJpy =
+                    exposureInBaseCurrency !== undefined
+                        ? toJpyDecimalString(Math.abs(exposureInBaseCurrency), primaryAccountCurrency)
+                        : exposure !== undefined
+                            ? toJpyDecimalString(Math.abs(exposure), priceCurrency)
+                            : price !== undefined
+                                ? toJpyDecimalString(price * amount, priceCurrency)
+                                : undefined
+
+                metadata.valuationBasis = 'equity_contribution'
+                if (notionalValueJpy !== undefined) {
+                    metadata.notionalValueJpy = notionalValueJpy
+                }
+                if (unrealizedPnlJpy === undefined) {
+                    metadata.valuationStatus = 'missing_unrealized_pnl'
+                }
+                valueJpy = unrealizedPnlJpy ?? '0'
+            } else {
+                const marketValueInBaseCurrency = rawPosition.NetPositionView.MarketValueInBaseCurrency
+                const marketValue = rawPosition.NetPositionView.MarketValue ?? rawPosition.NetPositionView.PositionValue
+                if (marketValueInBaseCurrency !== undefined) {
+                    valueJpy = toJpyDecimalString(marketValueInBaseCurrency, primaryAccountCurrency)
+                    metadata.valuationBasis = 'market_value_in_base_currency'
+                } else if (marketValue !== undefined) {
+                    valueJpy = toJpyDecimalString(marketValue, priceCurrency)
+                    metadata.valuationBasis = 'market_value'
+                } else if (price !== undefined) {
+                    valueJpy = toJpyDecimalString(price * amount, priceCurrency)
+                    metadata.valuationBasis = 'price_times_quantity'
+                } else {
+                    valueJpy = '0'
+                    metadata.valuationStatus = 'missing_market_value'
+                }
+            }
+
+            positions.push({
+                sourceAccountId: rawPosition.NetPositionBase.AccountKey ?? rawPosition.AccountKey ?? primaryAccount.accountKey,
+                sourcePositionId: rawPosition.NetPositionId,
+                sourceInstrumentId,
+                assetClass,
+                symbol: getInstrumentDisplaySymbol(details, sourceInstrumentId),
+                ...(getInstrumentDisplayName(details) ? { name: getInstrumentDisplayName(details) } : {}),
+                quantity: toDecimalString(amount),
+                side: rawPosition.NetPositionBase.Amount === 0
+                    ? 'flat'
+                    : rawPosition.NetPositionBase.OpeningDirection === 'Buy'
+                        ? 'long'
+                        : 'short',
+                ...(price !== undefined ? { price: toDecimalString(price) } : {}),
+                priceCurrency,
+                valueJpy,
+                ...(unrealizedPnlJpy !== undefined ? { unrealizedPnlJpy } : {}),
+                sourceMetadata: metadata,
+            })
+        }
+
+        const cashBalances: PortfolioSnapshotV1['cashBalances'] = []
+        if (typeof balance.CashBalance === 'number') {
+            cashBalances.push({
+                sourceAccountId: primaryAccount.accountKey,
+                currency: balanceCurrency,
+                amount: toDecimalString(balance.CashBalance),
+                valueJpy: toJpyDecimalString(balance.CashBalance, balanceCurrency),
+                fxRateToJpy: toDecimalString(getFixedFxRateToJpy(balanceCurrency)),
+                sourceBalanceId: `${primaryAccount.accountKey}:${balanceCurrency}:CashBalance`,
+                sourceMetadata: {
+                    sourceField: 'CashBalance',
+                },
+            })
+        }
+
+        const balanceMetadata: PortfolioSnapshotV1SourceMetadata = {}
+        for (const [key, value] of Object.entries({
+            cashAvailableForTrading: balance.CashAvailableForTrading,
+            totalValue: balance.TotalValue,
+            netEquity: balance.NetEquity,
+        })) {
+            if (typeof value === 'number') {
+                balanceMetadata[key] = value
+            }
+        }
+
+        const sourceMetadata: PortfolioSnapshotV1SourceMetadata = {
+            contractOwner: 'equinaut',
+            fxRatesToJpy: FIXED_FX_RATES_TO_JPY,
+            balanceCurrency,
+            ...(Object.keys(balanceMetadata).length > 0 ? { balance: balanceMetadata } : {}),
+            ...(skippedPositions.length > 0 ? { skippedPositions } : {}),
+        }
+
+        return {
+            schemaVersion: portfolioSnapshotV1SchemaVersion,
+            source: {
+                id: 'saxo-bank',
+                provider: 'Saxo Bank',
+                exporter: 'trade-gateway',
+            },
+            generatedAt,
+            dataAsOf: generatedAt,
+            baseCurrency: 'JPY',
+            accounts: accounts.map((account) => ({
+                sourceAccountId: account.accountKey,
+                name: account.displayName,
+                baseCurrency: normalizeCurrencyCode(account.currency),
+                sourceMetadata: {
+                    clientKey: account.clientKey,
+                    legalAssetTypes: account.legalAssetTypes,
+                },
+            })),
+            cashBalances,
+            positions,
+            sourceMetadata,
+        }
     }
 
     async getPositions(): Promise<Position[]> {

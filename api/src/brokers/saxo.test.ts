@@ -230,6 +230,154 @@ test('SaxoClient.getBalances returns empty list when auth token is unavailable',
     assert.deepEqual(result, [])
 })
 
+test('SaxoClient.getPortfolioSnapshot maps CFD value to equity contribution and caches instruments', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [
+                {
+                    accountKey: 'account-1',
+                    clientKey: 'client-1',
+                    legalAssetTypes: ['CfdOnIndex', 'Stock'],
+                    currency: 'JPY',
+                    displayName: 'Main Account',
+                },
+            ],
+        },
+    })
+
+    let instrumentDetailFetchCount = 0
+    const requestedUrls: string[] = []
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const urlString = String(url)
+            requestedUrls.push(urlString)
+            if (urlString.endsWith('/port/v1/balances/me')) {
+                return new Response(
+                    JSON.stringify({
+                        Currency: 'JPY',
+                        CashBalance: 100000,
+                        CashAvailableForTrading: 90000,
+                        TotalValue: 132000,
+                        NetEquity: 132000,
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/port/v1/netpositions/me')) {
+                return new Response(
+                    JSON.stringify({
+                        Data: [
+                            {
+                                NetPositionId: 'CfdOnIndex:111111__account-1',
+                                NetPositionBase: {
+                                    AccountKey: 'account-1',
+                                    AssetType: 'CfdOnIndex',
+                                    Uic: 111111,
+                                    Amount: 2,
+                                    OpeningDirection: 'Buy',
+                                },
+                                NetPositionView: {
+                                    AverageOpenPrice: 5500,
+                                    ProfitLossOnTrade: 200,
+                                    Exposure: 11000,
+                                    Currency: 'USD',
+                                },
+                            },
+                            {
+                                NetPositionId: 'Stock:222222__account-1',
+                                NetPositionBase: {
+                                    AccountKey: 'account-1',
+                                    AssetType: 'Stock',
+                                    Uic: 222222,
+                                    Amount: 3,
+                                    OpeningDirection: 'Buy',
+                                },
+                                NetPositionView: {
+                                    AverageOpenPrice: 500,
+                                    MarketValue: 1500,
+                                    ProfitLossOnTrade: 30,
+                                    Currency: 'USD',
+                                },
+                            },
+                        ],
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/ref/v1/instruments/details/111111/CfdOnIndex')) {
+                instrumentDetailFetchCount += 1
+                return new Response(
+                    JSON.stringify({
+                        Uic: 111111,
+                        AssetType: 'CfdOnIndex',
+                        DisplayAndFormat: {
+                            Symbol: 'US500.I',
+                            Description: 'US 500 CFD',
+                            Currency: 'USD',
+                        },
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/ref/v1/instruments/details/222222/Stock')) {
+                instrumentDetailFetchCount += 1
+                return new Response(
+                    JSON.stringify({
+                        Uic: 222222,
+                        AssetType: 'Stock',
+                        Symbol: 'VOO:xarc',
+                        Description: 'Vanguard S&P 500 ETF',
+                        CurrencyCode: 'USD',
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            return new Response('Not Found', { status: 404 })
+        },
+    })
+
+    const snapshot = await client.getPortfolioSnapshot()
+    await client.getPortfolioSnapshot()
+
+    assert.equal(snapshot.schemaVersion, 'portfolio-snapshot.v1')
+    assert.equal(snapshot.baseCurrency, 'JPY')
+    assert.equal(snapshot.accounts[0]?.sourceAccountId, 'account-1')
+    assert.deepEqual(snapshot.cashBalances[0], {
+        sourceAccountId: 'account-1',
+        currency: 'JPY',
+        amount: '100000',
+        valueJpy: '100000',
+        fxRateToJpy: '1',
+        sourceBalanceId: 'account-1:JPY:CashBalance',
+        sourceMetadata: {
+            sourceField: 'CashBalance',
+        },
+    })
+
+    const cfd = snapshot.positions.find((position) => position.sourceInstrumentId === 'CfdOnIndex:111111')
+    assert.equal(cfd?.assetClass, 'cfd')
+    assert.equal(cfd?.symbol, 'US500.I')
+    assert.equal(cfd?.valueJpy, '32000')
+    assert.equal(cfd?.unrealizedPnlJpy, '32000')
+    assert.equal(cfd?.sourceMetadata?.valuationBasis, 'equity_contribution')
+    assert.equal(cfd?.sourceMetadata?.notionalValueJpy, '1760000')
+
+    const stock = snapshot.positions.find((position) => position.sourceInstrumentId === 'Stock:222222')
+    assert.equal(stock?.assetClass, 'stock')
+    assert.equal(stock?.symbol, 'VOO:xarc')
+    assert.equal(stock?.name, 'Vanguard S&P 500 ETF')
+    assert.equal(stock?.valueJpy, '240000')
+
+    assert.equal(instrumentDetailFetchCount, 2)
+    assert.equal(requestedUrls.filter((url) => url.includes('/ref/v1/instruments/details/')).length, 2)
+})
+
 test('SaxoClient.sendMarketOrder returns Saxo metadata for related orders', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

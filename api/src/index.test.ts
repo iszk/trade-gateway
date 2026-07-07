@@ -5,6 +5,7 @@ import { createApp } from './index.js'
 import type { DispatchOrderFn, BrokerName } from './types/order.js'
 import type { OrderV2 } from './types/order-v2.js'
 import type { Position } from './types/position.js'
+import type { SaxoClient } from './brokers/saxo.js'
 import { DuplicateEventError } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
@@ -323,6 +324,52 @@ test('GET /api/positions returns positions when the shared key matches', async (
     assert.equal(res.status, 200)
     assert.deepEqual(body.positions, samplePositions)
     assert.equal(typeof body.updated_at, 'number')
+})
+
+test('GET /api/saxo/portfolio-snapshot returns Saxo portfolio snapshot when authorized', async () => {
+    const snapshot = {
+        schemaVersion: 'portfolio-snapshot.v1',
+        source: {
+            id: 'saxo-bank',
+            provider: 'Saxo Bank',
+            exporter: 'trade-gateway',
+        },
+        generatedAt: '2026-07-06T00:00:00.000Z',
+        dataAsOf: '2026-07-06T00:00:00.000Z',
+        baseCurrency: 'JPY',
+        accounts: [
+            {
+                sourceAccountId: 'account-1',
+                name: 'Main Account',
+                baseCurrency: 'JPY',
+            },
+        ],
+        cashBalances: [
+            {
+                sourceAccountId: 'account-1',
+                currency: 'JPY',
+                amount: '100000',
+                valueJpy: '100000',
+            },
+        ],
+        positions: [],
+    }
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        saxoClient: {
+            getPortfolioSnapshot: async () => snapshot,
+        } as unknown as SaxoClient,
+    })
+
+    const res = await app.request('/api/saxo/portfolio-snapshot', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+        },
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.deepEqual(body, snapshot)
 })
 
 test('GET /api/v2/orders/stats includes pending orders in open_orders', async () => {
