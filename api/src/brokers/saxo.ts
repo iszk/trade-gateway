@@ -189,6 +189,7 @@ const SAXO_AUDIT_CURSOR_MAX_IDLE_MS = 30 * 60 * 1000
 const SAXO_AUDIT_BATCH_CACHE_MS = 60 * 1000
 const SAXO_AUDIT_MAX_PAGES_PER_POLL = 10
 const SAXO_INSTRUMENT_DETAILS_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const SAXO_INSTRUMENT_DETAILS_FETCH_CONCURRENCY = 5
 const FIXED_FX_RATES_TO_JPY: Record<string, number> = {
     JPY: 1,
     USD: 160,
@@ -199,8 +200,6 @@ type CachedSaxoInstrumentDetails = {
     expiresAtMs: number
     details: SaxoInstrumentDetails
 }
-
-const saxoInstrumentDetailsCache = new Map<string, CachedSaxoInstrumentDetails>()
 
 const toDecimalString = (value: number): string => {
     if (!Number.isFinite(value)) {
@@ -291,6 +290,29 @@ const getInstrumentCurrency = (details: SaxoInstrumentDetails | null): string | 
     normalizeCurrencyCode(details?.DisplayAndFormat?.Currency ?? details?.CurrencyCode)
 
 const buildSaxoInstrumentKey = (assetType: string, uic: number): string => `${assetType}:${uic}`
+
+const mapWithConcurrency = async <T, U>(
+    items: T[],
+    concurrency: number,
+    mapper: (item: T, index: number) => Promise<U>,
+): Promise<U[]> => {
+    const results = new Array<U>(items.length)
+    let nextIndex = 0
+    const workerCount = Math.min(Math.max(1, Math.floor(concurrency)), items.length)
+
+    await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+            while (true) {
+                const index = nextIndex
+                nextIndex += 1
+                if (index >= items.length) return
+                results[index] = await mapper(items[index] as T, index)
+            }
+        }),
+    )
+
+    return results
+}
 
 const parseRetryAfterMs = (value: string | null): number | null => {
     if (!value) return null
@@ -488,6 +510,7 @@ export class SaxoClient {
         fetchedAtMs: number
         activities: SaxoOrderActivity[]
     }
+    private readonly instrumentDetailsCache = new Map<string, CachedSaxoInstrumentDetails>()
 
     constructor(options: SaxoClientOptions = {}) {
         this.appKey = options.appKey
@@ -1137,18 +1160,27 @@ export class SaxoClient {
         return data.Data
     }
 
+    private purgeExpiredInstrumentDetailsCache(nowMs = Date.now()): void {
+        for (const [cacheKey, cached] of this.instrumentDetailsCache) {
+            if (cached.expiresAtMs <= nowMs) {
+                this.instrumentDetailsCache.delete(cacheKey)
+            }
+        }
+    }
+
     private async getInstrumentDetails(
         accessToken: string,
         assetType: string,
         uic: number,
     ): Promise<SaxoInstrumentDetails | null> {
         const cacheKey = buildSaxoInstrumentKey(assetType, uic)
-        const cached = saxoInstrumentDetailsCache.get(cacheKey)
-        if (cached && cached.expiresAtMs > Date.now()) {
+        const nowMs = Date.now()
+        const cached = this.instrumentDetailsCache.get(cacheKey)
+        if (cached && cached.expiresAtMs > nowMs) {
             return cached.details
         }
         if (cached) {
-            saxoInstrumentDetailsCache.delete(cacheKey)
+            this.instrumentDetailsCache.delete(cacheKey)
         }
 
         const url = `${this.baseUrl}/ref/v1/instruments/details/${uic}/${encodeURIComponent(assetType)}`
@@ -1179,7 +1211,7 @@ export class SaxoClient {
             return null
         }
 
-        saxoInstrumentDetailsCache.set(cacheKey, {
+        this.instrumentDetailsCache.set(cacheKey, {
             details,
             expiresAtMs: Date.now() + SAXO_INSTRUMENT_DETAILS_CACHE_TTL_MS,
         })
@@ -1195,11 +1227,14 @@ export class SaxoClient {
             uniqueReferences.set(buildSaxoInstrumentKey(reference.assetType, reference.uic), reference)
         }
 
-        const entries = await Promise.all(
-            [...uniqueReferences.entries()].map(async ([key, reference]) => [
+        this.purgeExpiredInstrumentDetailsCache()
+        const entries = await mapWithConcurrency(
+            [...uniqueReferences.entries()],
+            SAXO_INSTRUMENT_DETAILS_FETCH_CONCURRENCY,
+            async ([key, reference]) => [
                 key,
                 await this.getInstrumentDetails(accessToken, reference.assetType, reference.uic),
-            ] as const),
+            ] as const,
         )
         return new Map(entries)
     }
