@@ -1184,11 +1184,25 @@ export class SaxoClient {
         }
 
         const url = `${this.baseUrl}/ref/v1/instruments/details/${uic}/${encodeURIComponent(assetType)}`
-        const response = await this.fetchImpl(url, {
-            headers: {
-                Authorization: `Bearer ${accessToken}`,
-            },
-        })
+        let response: Response
+        try {
+            response = await this.fetchImpl(url, {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                },
+            })
+        } catch (error) {
+            this.logger.warn(
+                {
+                    event: 'saxo:instrument_details_failed',
+                    error,
+                    assetType,
+                    uic,
+                },
+                'failed to fetch Saxo instrument details',
+            )
+            return null
+        }
 
         if (!response.ok) {
             const body = await response.text()
@@ -1205,7 +1219,21 @@ export class SaxoClient {
             return null
         }
 
-        const payload = (await response.json()) as SaxoInstrumentDetailsResponse
+        let payload: SaxoInstrumentDetailsResponse
+        try {
+            payload = (await response.json()) as SaxoInstrumentDetailsResponse
+        } catch (error) {
+            this.logger.warn(
+                {
+                    event: 'saxo:instrument_details_parse_failed',
+                    error,
+                    assetType,
+                    uic,
+                },
+                'failed to parse Saxo instrument details',
+            )
+            return null
+        }
         const details = extractInstrumentDetailsPayload(payload)
         if (!details) {
             return null

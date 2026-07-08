@@ -719,6 +719,108 @@ test('SaxoClient.getPortfolioSnapshot uses each position account currency for ba
     assert.equal(stock?.sourceMetadata?.valuationBasis, 'market_value_in_base_currency')
 })
 
+test('SaxoClient.getPortfolioSnapshot falls back when instrument details fetch or JSON parsing fails', async () => {
+    const { logger, warnLogs } = createCapturingLogger()
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [
+                {
+                    accountKey: 'account-1',
+                    clientKey: 'client-1',
+                    legalAssetTypes: ['Stock'],
+                    currency: 'JPY',
+                    displayName: 'Main Account',
+                },
+            ],
+        },
+    })
+
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        logger,
+        fetchImpl: async (url) => {
+            const urlString = String(url)
+            if (urlString.endsWith('/port/v1/balances/me')) {
+                return new Response(
+                    JSON.stringify({
+                        Currency: 'JPY',
+                        CashBalance: 100000,
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/port/v1/netpositions/me')) {
+                return new Response(
+                    JSON.stringify({
+                        Data: [
+                            {
+                                NetPositionId: 'Stock:888888__account-1',
+                                NetPositionBase: {
+                                    AccountKey: 'account-1',
+                                    AssetType: 'Stock',
+                                    Uic: 888888,
+                                    Amount: 1,
+                                    OpeningDirection: 'Buy',
+                                },
+                                NetPositionView: {
+                                    MarketValue: 1000,
+                                    Currency: 'JPY',
+                                },
+                            },
+                            {
+                                NetPositionId: 'Stock:999999__account-1',
+                                NetPositionBase: {
+                                    AccountKey: 'account-1',
+                                    AssetType: 'Stock',
+                                    Uic: 999999,
+                                    Amount: 2,
+                                    OpeningDirection: 'Buy',
+                                },
+                                NetPositionView: {
+                                    MarketValue: 2000,
+                                    Currency: 'JPY',
+                                },
+                            },
+                        ],
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/ref/v1/instruments/details/888888/Stock')) {
+                throw new Error('network unavailable')
+            }
+            if (urlString.endsWith('/ref/v1/instruments/details/999999/Stock')) {
+                return new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } })
+            }
+            return new Response('Not Found', { status: 404 })
+        },
+    })
+
+    const snapshot = await client.getPortfolioSnapshot()
+
+    const fetchFailedPosition = snapshot.positions.find((position) => position.sourceInstrumentId === 'Stock:888888')
+    assert.equal(fetchFailedPosition?.symbol, 'Stock:888888')
+    assert.equal(fetchFailedPosition?.sourceMetadata?.instrumentLookupStatus, 'fallback')
+
+    const parseFailedPosition = snapshot.positions.find((position) => position.sourceInstrumentId === 'Stock:999999')
+    assert.equal(parseFailedPosition?.symbol, 'Stock:999999')
+    assert.equal(parseFailedPosition?.sourceMetadata?.instrumentLookupStatus, 'fallback')
+
+    assert.equal(
+        warnLogs.some((log) => log.obj.event === 'saxo:instrument_details_failed' && log.obj.uic === 888888),
+        true,
+    )
+    assert.equal(
+        warnLogs.some((log) => log.obj.event === 'saxo:instrument_details_parse_failed' && log.obj.uic === 999999),
+        true,
+    )
+})
+
 test('SaxoClient.getPortfolioSnapshot limits concurrent instrument detail fetches', async () => {
     const positionCount = 8
     const positions = Array.from({ length: positionCount }, (_, index) => {
