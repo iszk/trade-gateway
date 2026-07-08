@@ -196,6 +196,8 @@ type PositionFetcherLike = {
     fetchAllPositions(broker?: BrokerName): Promise<Position[]>
 }
 
+type SaxoPortfolioSnapshotClient = Pick<SaxoClient, 'getPortfolioSnapshot'>
+
 type CreateAppOptions = {
     webhookSecret?: string
     apiSecret?: string
@@ -216,6 +218,7 @@ type CreateAppOptions = {
         apiSecret?: string
         baseUrl?: string
     }
+    saxoPortfolioSnapshotClient?: SaxoPortfolioSnapshotClient
     positionFetcher?: PositionFetcherLike
     slotScheduler?: SlotScheduler
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
@@ -280,6 +283,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         redirectUri: saxoConfig.redirectUri,
         logger,
     })
+    const saxoPortfolioSnapshotClient = options.saxoPortfolioSnapshotClient ?? saxoClient
 
     const cronCtx: CronContext = {
         logger,
@@ -897,6 +901,16 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
     })
 
+    app.get('/api/saxo/portfolio-snapshot', requireApiSecret, async (c) => {
+        try {
+            const snapshot = await saxoPortfolioSnapshotClient.getPortfolioSnapshot()
+            return c.json(snapshot)
+        } catch (err) {
+            logger.warn({ event: 'saxo_portfolio_snapshot:fetch_failed', error: err }, 'failed to fetch Saxo portfolio snapshot')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch Saxo portfolio snapshot'), 500)
+        }
+    })
+
     const parseFilterDates = (
         fromStr: string | undefined,
         toStr: string | undefined,
@@ -1088,6 +1102,7 @@ if (isMainModule) {
 export type AppType = typeof app
 export type { Position } from './types/position.js'
 export type { SaxoInstrument } from './brokers/saxo.js'
+export type { PortfolioSnapshotV1 } from './types/portfolio-snapshot.js'
 export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, TradeRecordsResponse } from './services/trade-records-v2.js'
 export type { OrderV2 } from './types/order-v2.js'
 export type { StatsV2 } from './services/stats-v2.js'

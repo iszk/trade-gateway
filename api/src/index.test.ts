@@ -325,6 +325,52 @@ test('GET /api/positions returns positions when the shared key matches', async (
     assert.equal(typeof body.updated_at, 'number')
 })
 
+test('GET /api/saxo/portfolio-snapshot returns Saxo portfolio snapshot when authorized', async () => {
+    const snapshot = {
+        schemaVersion: 'portfolio-snapshot.v1' as const,
+        source: {
+            id: 'saxo-bank',
+            provider: 'Saxo Bank',
+            exporter: 'trade-gateway',
+        },
+        generatedAt: '2026-07-06T00:00:00.000Z',
+        dataAsOf: '2026-07-06T00:00:00.000Z',
+        baseCurrency: 'JPY',
+        accounts: [
+            {
+                sourceAccountId: 'account-1',
+                name: 'Main Account',
+                baseCurrency: 'JPY',
+            },
+        ],
+        cashBalances: [
+            {
+                sourceAccountId: 'account-1',
+                currency: 'JPY',
+                amount: '100000',
+                valueJpy: '100000',
+            },
+        ],
+        positions: [],
+    }
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        saxoPortfolioSnapshotClient: {
+            getPortfolioSnapshot: async () => snapshot,
+        },
+    })
+
+    const res = await app.request('/api/saxo/portfolio-snapshot', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+        },
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.deepEqual(body, snapshot)
+})
+
 test('GET /api/v2/orders/stats includes pending orders in open_orders', async () => {
     const listedRanges: { from: Date; to: Date }[] = []
     const app = createAppForTests({
