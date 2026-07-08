@@ -291,6 +291,7 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 - 固定 FX rate が未対応で `valueJpy` を算出できない cash balance / position はスキップし、`sourceMetadata.skippedCashBalances` / `sourceMetadata.skippedPositions` に理由を保持する。
 - CFD / FX / Future などのレバレッジ商品は、口座純資産として理解しやすいように `valueJpy` へ未実現損益を入れる。未実現損益が取得できない場合は `valueJpy=0` とし、`sourceMetadata.valuationStatus` に理由を保持する。
 - レバレッジ商品の notional exposure は `sourceMetadata.notionalValueJpy` に保持する。notional の FX rate が未対応の場合でも position は返し、`sourceMetadata.notionalValueStatus` に理由を保持する。
+- レバレッジ商品以外で market value / price が取得できない場合は `valueJpy=0` とし、`sourceMetadata.valuationStatus` に `missing_market_value` を保持する。
 - Saxo instrument details の取得に失敗した場合は snapshot 全体を失敗させず、`AssetType:Uic` を `symbol` の fallback として使う。
 
 #### 成功レスポンス

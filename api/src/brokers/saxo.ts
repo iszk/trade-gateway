@@ -1258,6 +1258,12 @@ export class SaxoClient {
         const generatedAt = new Date().toISOString()
         const balanceCurrency = normalizeCurrencyCode(balance.Currency) ?? normalizeCurrencyCode(primaryAccount.currency) ?? 'JPY'
         const primaryAccountCurrency = normalizeCurrencyCode(primaryAccount.currency) ?? balanceCurrency
+        const accountCurrencyByKey = new Map(
+            accounts.map((account) => [
+                account.accountKey,
+                normalizeCurrencyCode(account.currency),
+            ] as const),
+        )
         const skippedPositions: PortfolioSnapshotV1JsonValue[] = []
         const skippedCashBalances: PortfolioSnapshotV1JsonValue[] = []
         const positions: PortfolioSnapshotV1['positions'] = []
@@ -1293,10 +1299,12 @@ export class SaxoClient {
 
             const sourceInstrumentId = buildSaxoInstrumentKey(assetType, uic)
             const details = instrumentDetailsByKey.get(sourceInstrumentId) ?? null
+            const sourceAccountId = rawPosition.NetPositionBase.AccountKey ?? rawPosition.AccountKey ?? primaryAccount.accountKey
+            const positionAccountCurrency = accountCurrencyByKey.get(sourceAccountId) ?? primaryAccountCurrency
             const priceCurrency =
                 getInstrumentCurrency(details) ??
                 normalizeCurrencyCode(rawPosition.NetPositionView.Currency) ??
-                primaryAccountCurrency
+                positionAccountCurrency
             const amount = Math.abs(rawPosition.NetPositionBase.Amount)
             const price =
                 rawPosition.NetPositionView.CurrentPrice ??
@@ -1305,7 +1313,7 @@ export class SaxoClient {
             const accountCurrencyPnl = rawPosition.NetPositionView.ProfitLossOnTradeInBaseCurrency
             const tradeCurrencyPnl = rawPosition.NetPositionView.ProfitLossOnTrade
             const pnl = accountCurrencyPnl ?? tradeCurrencyPnl
-            const pnlCurrency = accountCurrencyPnl !== undefined ? primaryAccountCurrency : priceCurrency
+            const pnlCurrency = accountCurrencyPnl !== undefined ? positionAccountCurrency : priceCurrency
             const unrealizedPnlJpy = pnl !== undefined ? toJpyDecimalString(pnl, pnlCurrency) : undefined
             const metadata: PortfolioSnapshotV1SourceMetadata = {
                 netPositionId: rawPosition.NetPositionId,
@@ -1330,7 +1338,7 @@ export class SaxoClient {
                 const exposure = rawPosition.NetPositionView.Exposure
                 const notionalValueJpy =
                     exposureInBaseCurrency !== undefined
-                        ? toJpyDecimalString(Math.abs(exposureInBaseCurrency), primaryAccountCurrency)
+                        ? toJpyDecimalString(Math.abs(exposureInBaseCurrency), positionAccountCurrency)
                         : exposure !== undefined
                             ? toJpyDecimalString(Math.abs(exposure), priceCurrency)
                             : price !== undefined
@@ -1352,13 +1360,13 @@ export class SaxoClient {
                 const marketValueInBaseCurrency = rawPosition.NetPositionView.MarketValueInBaseCurrency
                 const marketValue = rawPosition.NetPositionView.MarketValue ?? rawPosition.NetPositionView.PositionValue
                 if (marketValueInBaseCurrency !== undefined) {
-                    const convertedValue = toJpyDecimalString(marketValueInBaseCurrency, primaryAccountCurrency)
+                    const convertedValue = toJpyDecimalString(marketValueInBaseCurrency, positionAccountCurrency)
                     if (convertedValue === null) {
                         skippedPositions.push({
                             sourcePositionId: rawPosition.NetPositionId,
                             sourceInstrumentId,
                             reason: 'unsupported_fx_rate',
-                            currency: primaryAccountCurrency,
+                            currency: positionAccountCurrency,
                         })
                         continue
                     }
@@ -1400,7 +1408,7 @@ export class SaxoClient {
             }
 
             positions.push({
-                sourceAccountId: rawPosition.NetPositionBase.AccountKey ?? rawPosition.AccountKey ?? primaryAccount.accountKey,
+                sourceAccountId,
                 sourcePositionId: rawPosition.NetPositionId,
                 sourceInstrumentId,
                 assetClass,

@@ -601,6 +601,124 @@ test('SaxoClient.getPortfolioSnapshot keeps leveraged positions with metadata wh
     ])
 })
 
+test('SaxoClient.getPortfolioSnapshot uses each position account currency for base-currency fields', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [
+                {
+                    accountKey: 'account-jpy',
+                    clientKey: 'client-jpy',
+                    legalAssetTypes: ['Stock', 'CfdOnIndex'],
+                    currency: 'JPY',
+                    displayName: 'JPY Account',
+                },
+                {
+                    accountKey: 'account-usd',
+                    clientKey: 'client-usd',
+                    legalAssetTypes: ['Stock', 'CfdOnIndex'],
+                    currency: 'USD',
+                    displayName: 'USD Account',
+                },
+            ],
+        },
+    })
+
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const urlString = String(url)
+            if (urlString.endsWith('/port/v1/balances/me')) {
+                return new Response(
+                    JSON.stringify({
+                        Currency: 'JPY',
+                        CashBalance: 100000,
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/port/v1/netpositions/me')) {
+                return new Response(
+                    JSON.stringify({
+                        Data: [
+                            {
+                                NetPositionId: 'CfdOnIndex:666666__account-usd',
+                                NetPositionBase: {
+                                    AccountKey: 'account-usd',
+                                    AssetType: 'CfdOnIndex',
+                                    Uic: 666666,
+                                    Amount: 1,
+                                    OpeningDirection: 'Buy',
+                                },
+                                NetPositionView: {
+                                    ExposureInBaseCurrency: 100,
+                                    ProfitLossOnTradeInBaseCurrency: 10,
+                                    Currency: 'USD',
+                                },
+                            },
+                            {
+                                NetPositionId: 'Stock:777777__account-usd',
+                                NetPositionBase: {
+                                    AccountKey: 'account-usd',
+                                    AssetType: 'Stock',
+                                    Uic: 777777,
+                                    Amount: 1,
+                                    OpeningDirection: 'Buy',
+                                },
+                                NetPositionView: {
+                                    MarketValueInBaseCurrency: 200,
+                                    Currency: 'USD',
+                                },
+                            },
+                        ],
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/ref/v1/instruments/details/666666/CfdOnIndex')) {
+                return new Response(
+                    JSON.stringify({
+                        Uic: 666666,
+                        AssetType: 'CfdOnIndex',
+                        Symbol: 'USDCFD',
+                        CurrencyCode: 'USD',
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            if (urlString.endsWith('/ref/v1/instruments/details/777777/Stock')) {
+                return new Response(
+                    JSON.stringify({
+                        Uic: 777777,
+                        AssetType: 'Stock',
+                        Symbol: 'USDSTK',
+                        CurrencyCode: 'USD',
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+            return new Response('Not Found', { status: 404 })
+        },
+    })
+
+    const snapshot = await client.getPortfolioSnapshot()
+
+    const cfd = snapshot.positions.find((position) => position.sourceInstrumentId === 'CfdOnIndex:666666')
+    assert.equal(cfd?.sourceAccountId, 'account-usd')
+    assert.equal(cfd?.valueJpy, '1600')
+    assert.equal(cfd?.unrealizedPnlJpy, '1600')
+    assert.equal(cfd?.sourceMetadata?.notionalValueJpy, '16000')
+
+    const stock = snapshot.positions.find((position) => position.sourceInstrumentId === 'Stock:777777')
+    assert.equal(stock?.sourceAccountId, 'account-usd')
+    assert.equal(stock?.valueJpy, '32000')
+    assert.equal(stock?.sourceMetadata?.valuationBasis, 'market_value_in_base_currency')
+})
+
 test('SaxoClient.getPortfolioSnapshot limits concurrent instrument detail fetches', async () => {
     const positionCount = 8
     const positions = Array.from({ length: positionCount }, (_, index) => {
