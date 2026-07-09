@@ -351,14 +351,18 @@ test('SaxoClient.getPortfolioSnapshot maps CFD value to equity contribution and 
     assert.equal(snapshot.baseCurrency, 'JPY')
     assert.equal(snapshot.accounts[0]?.sourceAccountId, 'account-1')
     assert.deepEqual(snapshot.cashBalances[0], {
-        sourceAccountId: 'account-1',
+        sourceAccountId: 'client:client-1',
         currency: 'JPY',
         amount: '100000',
         valueJpy: '100000',
         fxRateToJpy: '1',
-        sourceBalanceId: 'account-1:JPY:CashBalance',
+        sourceBalanceId: 'client:client-1:JPY:CashBalance',
         sourceMetadata: {
+            sourceEndpoint: '/port/v1/balances/me',
             sourceField: 'CashBalance',
+            sourceScope: 'client',
+            currencyAssumption: 'client_aggregate_jpy',
+            reportedCurrency: 'JPY',
         },
     })
 
@@ -463,16 +467,24 @@ test('SaxoClient.getPortfolioSnapshot skips unsupported FX currencies without fa
 
     const snapshot = await client.getPortfolioSnapshot()
 
-    assert.deepEqual(snapshot.cashBalances, [])
-    assert.deepEqual(snapshot.positions, [])
-    assert.deepEqual(snapshot.sourceMetadata?.skippedCashBalances, [
+    assert.deepEqual(snapshot.cashBalances, [
         {
-            sourceAccountId: 'account-eur',
-            currency: 'EUR',
-            sourceField: 'CashBalance',
-            reason: 'unsupported_fx_rate',
+            sourceAccountId: 'client:client-eur',
+            currency: 'JPY',
+            amount: '100',
+            valueJpy: '100',
+            fxRateToJpy: '1',
+            sourceBalanceId: 'client:client-eur:JPY:CashBalance',
+            sourceMetadata: {
+                sourceEndpoint: '/port/v1/balances/me',
+                sourceField: 'CashBalance',
+                sourceScope: 'client',
+                currencyAssumption: 'client_aggregate_jpy',
+                reportedCurrency: 'EUR',
+            },
         },
     ])
+    assert.deepEqual(snapshot.positions, [])
     assert.deepEqual(snapshot.sourceMetadata?.skippedPositions, [
         {
             sourcePositionId: 'Stock:333333__account-eur',
