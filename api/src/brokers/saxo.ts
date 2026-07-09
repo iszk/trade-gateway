@@ -1284,8 +1284,10 @@ export class SaxoClient {
             this.fetchNetPositions(accessToken),
         ])
         const generatedAt = new Date().toISOString()
-        const balanceCurrency = normalizeCurrencyCode(balance.Currency) ?? normalizeCurrencyCode(primaryAccount.currency) ?? 'JPY'
+        const reportedBalanceCurrency = normalizeCurrencyCode(balance.Currency)
+        const balanceCurrency = 'JPY'
         const primaryAccountCurrency = normalizeCurrencyCode(primaryAccount.currency) ?? balanceCurrency
+        const clientAggregateSourceId = `client:${primaryAccount.clientKey}`
         const accountCurrencyByKey = new Map(
             accounts.map((account) => [
                 account.accountKey,
@@ -1293,7 +1295,6 @@ export class SaxoClient {
             ] as const),
         )
         const skippedPositions: PortfolioSnapshotV1JsonValue[] = []
-        const skippedCashBalances: PortfolioSnapshotV1JsonValue[] = []
         const positions: PortfolioSnapshotV1['positions'] = []
         const instrumentReferences: Array<{ assetType: string; uic: number }> = []
         for (const rawPosition of rawPositions) {
@@ -1458,27 +1459,22 @@ export class SaxoClient {
 
         const cashBalances: PortfolioSnapshotV1['cashBalances'] = []
         if (typeof balance.CashBalance === 'number') {
-            const fxRateToJpy = getFixedFxRateToJpy(balanceCurrency)
-            if (fxRateToJpy === null) {
-                skippedCashBalances.push({
-                    sourceAccountId: primaryAccount.accountKey,
-                    currency: balanceCurrency,
+            const cashAmount = toDecimalString(balance.CashBalance)
+            cashBalances.push({
+                sourceAccountId: clientAggregateSourceId,
+                currency: balanceCurrency,
+                amount: cashAmount,
+                valueJpy: cashAmount,
+                fxRateToJpy: '1',
+                sourceBalanceId: `${clientAggregateSourceId}:${balanceCurrency}:CashBalance`,
+                sourceMetadata: {
+                    sourceEndpoint: '/port/v1/balances/me',
                     sourceField: 'CashBalance',
-                    reason: 'unsupported_fx_rate',
-                })
-            } else {
-                cashBalances.push({
-                    sourceAccountId: primaryAccount.accountKey,
-                    currency: balanceCurrency,
-                    amount: toDecimalString(balance.CashBalance),
-                    valueJpy: toDecimalString(balance.CashBalance * fxRateToJpy),
-                    fxRateToJpy: toDecimalString(fxRateToJpy),
-                    sourceBalanceId: `${primaryAccount.accountKey}:${balanceCurrency}:CashBalance`,
-                    sourceMetadata: {
-                        sourceField: 'CashBalance',
-                    },
-                })
-            }
+                    sourceScope: 'client',
+                    currencyAssumption: 'client_aggregate_jpy',
+                    ...(reportedBalanceCurrency ? { reportedCurrency: reportedBalanceCurrency } : {}),
+                },
+            })
         }
 
         const balanceMetadata: PortfolioSnapshotV1SourceMetadata = {}
@@ -1496,9 +1492,10 @@ export class SaxoClient {
             contractOwner: 'equinaut',
             fxRatesToJpy: FIXED_FX_RATES_TO_JPY,
             balanceCurrency,
+            balanceCurrencyAssumption: 'client_aggregate_jpy',
+            ...(reportedBalanceCurrency ? { reportedCurrency: reportedBalanceCurrency } : {}),
             ...(Object.keys(balanceMetadata).length > 0 ? { balance: balanceMetadata } : {}),
             ...(skippedPositions.length > 0 ? { skippedPositions } : {}),
-            ...(skippedCashBalances.length > 0 ? { skippedCashBalances } : {}),
         }
 
         return {
