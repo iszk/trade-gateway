@@ -328,7 +328,8 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
         "sourceEndpoint": "/port/v1/balances/me",
         "sourceField": "CashBalance",
         "sourceScope": "client",
-        "currencyAssumption": "client_aggregate_jpy"
+        "currencyAssumption": "client_aggregate_jpy",
+        "reportedCurrency": "JPY"
       }
     }
   ],

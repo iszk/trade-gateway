@@ -1493,7 +1493,7 @@ export class SaxoClient {
             fxRatesToJpy: FIXED_FX_RATES_TO_JPY,
             balanceCurrency,
             balanceCurrencyAssumption: 'client_aggregate_jpy',
-            ...(reportedBalanceCurrency ? { reportedBalanceCurrency } : {}),
+            ...(reportedBalanceCurrency ? { reportedCurrency: reportedBalanceCurrency } : {}),
             ...(Object.keys(balanceMetadata).length > 0 ? { balance: balanceMetadata } : {}),
             ...(skippedPositions.length > 0 ? { skippedPositions } : {}),
         }

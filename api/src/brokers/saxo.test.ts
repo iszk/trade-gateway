@@ -349,6 +349,7 @@ test('SaxoClient.getPortfolioSnapshot maps CFD value to equity contribution and 
 
     assert.equal(snapshot.schemaVersion, 'portfolio-snapshot.v1')
     assert.equal(snapshot.baseCurrency, 'JPY')
+    assert.equal(snapshot.sourceMetadata?.reportedCurrency, 'JPY')
     assert.equal(snapshot.accounts[0]?.sourceAccountId, 'account-1')
     assert.deepEqual(snapshot.cashBalances[0], {
         sourceAccountId: 'client:client-1',
@@ -467,6 +468,7 @@ test('SaxoClient.getPortfolioSnapshot skips unsupported FX currencies without fa
 
     const snapshot = await client.getPortfolioSnapshot()
 
+    assert.equal(snapshot.sourceMetadata?.reportedCurrency, 'EUR')
     assert.deepEqual(snapshot.cashBalances, [
         {
             sourceAccountId: 'client:client-eur',
