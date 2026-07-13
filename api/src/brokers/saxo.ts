@@ -775,8 +775,7 @@ export class SaxoClient {
         })
 
         if (!response.ok) {
-            const body = await response.text()
-            throw new Error(`Failed to refresh Saxo token: ${response.status} ${body}`)
+            throw new Error(`Failed to refresh Saxo token (HTTP ${response.status})`)
         }
 
         const payload = (await response.json()) as SaxoTokenResponse
@@ -814,8 +813,7 @@ export class SaxoClient {
         })
 
         if (!response.ok) {
-            const body = await response.text()
-            throw new Error(`Failed to exchange Saxo code: ${response.status} ${body}`)
+            throw new Error(`Failed to exchange Saxo code (HTTP ${response.status})`)
         }
 
         const payload = (await response.json()) as SaxoTokenResponse

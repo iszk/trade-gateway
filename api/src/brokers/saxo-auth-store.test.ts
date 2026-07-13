@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import test from 'node:test'
 import type { Firestore } from 'firebase-admin/firestore'
 
+import type { Logger } from '../logger.js'
 import { SaxoAuthStore, type SaxoAuthData } from './saxo-auth-store.js'
 
 const TEST_KEY = randomBytes(32).toString('base64')
@@ -11,7 +12,8 @@ const AUTH_PATH = 'saxo_auth_data/saxo_auth'
 const createFirestoreMock = (
     initialData?: Record<string, unknown>,
     options: {
-        failTransactionCommit?: boolean
+        documentSetError?: Error
+        transactionCommitError?: Error
         beforeFirstTransactionCommit?: () => Promise<void>
     } = {},
 ) => {
@@ -25,6 +27,7 @@ const createFirestoreMock = (
             data: () => storedData,
         }),
         set: async (data: Record<string, unknown>) => {
+            if (options.documentSetError) throw options.documentSetError
             storedData = structuredClone(data)
             documentVersion++
             return {}
@@ -64,9 +67,7 @@ const createFirestoreMock = (
                     },
                 }
                 const result = await updateFunction(transaction)
-                if (options.failTransactionCommit) {
-                    throw new Error('transaction commit failed')
-                }
+                if (options.transactionCommitError) throw options.transactionCommitError
                 if (transactionCount === 1) {
                     await options.beforeFirstTransactionCommit?.()
                 }
@@ -86,6 +87,23 @@ const createFirestoreMock = (
         getTransactionCount: () => transactionCount,
     }
 }
+
+const createCapturingLogger = () => {
+    const entries: Array<{ obj: Record<string, unknown>, msg?: string }> = []
+    const logger: Logger = {
+        info: (obj, msg) => entries.push({ obj, msg }),
+        warn: (obj, msg) => entries.push({ obj, msg }),
+        error: (obj, msg) => entries.push({ obj, msg }),
+        child: () => logger,
+    }
+    return { logger, entries }
+}
+
+const stringifyCapturedLogs = (
+    entries: Array<{ obj: Record<string, unknown>, msg?: string }>,
+): string => JSON.stringify(entries, (_key, value) => value instanceof Error
+    ? { name: value.name, message: value.message }
+    : value)
 
 const createAuthData = (overrides: Partial<SaxoAuthData> = {}): SaxoAuthData => ({
     accessToken: 'plain-access-token',
@@ -123,6 +141,37 @@ test('SaxoAuthStore.saveAuth は token pair を encryptedTokens として保存�
     assert.equal(saved.accessTokenExpiresAt, auth.accessTokenExpiresAt)
     assert.equal(saved.refreshTokenExpiresAt, auth.refreshTokenExpiresAt)
     assert.deepEqual(saved.accounts, auth.accounts)
+})
+
+test('SaxoAuthStore.saveAuth の Firestore write failure ログに token と暗号鍵を含めない', async () => {
+    const accessToken = 'sensitive-write-access-token'
+    const refreshToken = 'sensitive-write-refresh-token'
+    const encryptionKey = Buffer.alloc(32, 19).toString('base64')
+    const firestore = createFirestoreMock(undefined, {
+        documentSetError: new Error(
+            `write rejected: ${accessToken} ${refreshToken} ${encryptionKey}`,
+        ),
+    })
+    const { logger, entries } = createCapturingLogger()
+    const store = new SaxoAuthStore({
+        db: firestore.db,
+        tokenEncryptionKey: encryptionKey,
+        logger,
+    })
+
+    await assert.rejects(
+        store.saveAuth(createAuthData({ accessToken, refreshToken })),
+        /Failed to save Saxo auth document/,
+    )
+
+    const captured = stringifyCapturedLogs(entries)
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0]?.obj.event, 'firestore:write_failed')
+    assert.equal('data' in (entries[0]?.obj ?? {}), false)
+    assert.equal('error' in (entries[0]?.obj ?? {}), false)
+    for (const secret of [accessToken, refreshToken, encryptionKey]) {
+        assert.equal(captured.includes(secret), false)
+    }
 })
 
 test('SaxoAuthStore.getAuth は encrypted v1 document を domain model に復元する', async () => {
@@ -188,17 +237,35 @@ test('SaxoAuthStore.getAuth は legacy migration document に undefined field �
     assert.equal('refreshingUntil' in migrated, false)
 })
 
-test('SaxoAuthStore.getAuth は migration commit 失敗時に legacy document を変更しない', async () => {
-    const legacyDocument = { ...createAuthData(), refreshingUntil: 1_700_000_000_000 }
-    const firestore = createFirestoreMock(legacyDocument, { failTransactionCommit: true })
+test('SaxoAuthStore.getAuth は migration failure を安全にログ出力して legacy document を変更しない', async () => {
+    const accessToken = 'sensitive-migration-access-token'
+    const refreshToken = 'sensitive-migration-refresh-token'
+    const encryptionKey = Buffer.alloc(32, 23).toString('base64')
+    const legacyDocument = {
+        ...createAuthData({ accessToken, refreshToken }),
+        refreshingUntil: 1_700_000_000_000,
+    }
+    const firestore = createFirestoreMock(legacyDocument, {
+        transactionCommitError: new Error(
+            `transaction rejected: ${accessToken} ${refreshToken} ${encryptionKey}`,
+        ),
+    })
+    const { logger, entries } = createCapturingLogger()
     const store = new SaxoAuthStore({
         db: firestore.db,
-        tokenEncryptionKey: TEST_KEY,
+        tokenEncryptionKey: encryptionKey,
+        logger,
     })
 
-    await assert.rejects(store.getAuth(), /transaction commit failed/)
+    await assert.rejects(store.getAuth(), /Failed to migrate legacy Saxo auth document/)
 
     assert.deepEqual(firestore.getStoredData(), legacyDocument)
+    const captured = stringifyCapturedLogs(entries)
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0]?.obj.event, 'saxo_auth:migration_failed')
+    for (const secret of [accessToken, refreshToken, encryptionKey]) {
+        assert.equal(captured.includes(secret), false)
+    }
 })
 
 test('SaxoAuthStore は missing または不正な暗号鍵を fail-closed にする', () => {

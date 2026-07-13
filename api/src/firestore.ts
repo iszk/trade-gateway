@@ -17,6 +17,7 @@ type FirestoreWriteContext = {
     docId?: string
     logger?: Logger
     isExpectedError?: (error: unknown) => boolean
+    redactWriteDetails?: boolean
 }
 
 type FirestoreWriteLogContext = FirestoreWriteContext & {
@@ -45,8 +46,7 @@ const logFirestoreWriteError = (
         operation: context.operation,
         collection: context.collection,
         doc_id: context.docId,
-        data,
-        error,
+        ...(context.redactWriteDetails ? {} : { data, error }),
     }, 'failed to write firestore document')
 }
 

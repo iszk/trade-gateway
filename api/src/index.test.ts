@@ -24,6 +24,11 @@ const createLoggerStub = () => {
     return { logger, calls }
 }
 
+const stringifyLogCalls = (calls: Record<string, unknown>[]): string =>
+    JSON.stringify(calls, (_key, value) => value instanceof Error
+        ? { name: value.name, message: value.message }
+        : value)
+
 const createPositionFetcherStub = (positions: Position[] = []) => ({
     fetchAllPositions: async (_broker?: BrokerName) => positions,
 })
@@ -830,6 +835,38 @@ test('GET /api/auth/saxo/callback returns 400 if code is missing', async () => {
     assert.equal(res.status, 400)
     const body = await res.json()
     assert.equal(body.error, 'code is missing')
+})
+
+test('GET /api/auth/saxo/callback の OAuth failure ログに raw response body を含めない', async (t) => {
+    const sensitiveValues = [
+        'callback-body-access-token',
+        'callback-body-refresh-token',
+        Buffer.alloc(32, 41).toString('base64'),
+    ]
+    t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({
+        access_token: sensitiveValues[0],
+        refresh_token: sensitiveValues[1],
+        diagnostic: sensitiveValues[2],
+    }), { status: 401 }))
+    const { logger, calls } = createLoggerStub()
+    const app = createAppForTests({
+        logger,
+        saxoConfig: {
+            appKey: 'test-key',
+            appSecret: 'test-secret',
+            authBaseUrl: 'https://auth.example.com',
+            redirectUri: 'http://localhost/callback',
+        },
+    })
+
+    const response = await app.request('/api/auth/saxo/callback?code=test-code')
+
+    assert.equal(response.status, 500)
+    const captured = stringifyLogCalls(calls)
+    assert.equal(captured.includes('Failed to exchange Saxo code (HTTP 401)'), true)
+    for (const secret of sensitiveValues) {
+        assert.equal(captured.includes(secret), false)
+    }
 })
 
 const sideNormalizationCases: { input: string; expected: 'BUY' | 'SELL' }[] = [

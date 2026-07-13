@@ -10,7 +10,7 @@ webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証�
 - すべての日時は UTC で保存する
 - MVP ではコレクション設計を最小限にし、過剰な正規化は行わない
 - 整合性は Firestore のトランザクションとアプリケーション制御で担保する
-- Saxo 認証トークンは現状 `saxo_auth_data` に保存している。暗号化対応は未実装のため、別 task で追跡する
+- Saxo 認証トークンは `saxo_auth_data/saxo_auth` の `encryptedTokens` v1 として暗号化保存し、平文 token field は保存しない
 
 ## コレクション定義（論理）
 
@@ -150,14 +150,18 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 - TTL は不要（上書きで管理）
 
 ## 6. `saxo_auth_data`
-Saxo の OAuth token と account 情報を保持する。現行実装では `saxo_auth_data/saxo_auth` の固定ドキュメントを使う。
+Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_auth_data/saxo_auth` の固定ドキュメントを使う。
 
 ### ドキュメント ID
 - `saxo_auth`（固定）
 
 ### フィールド
-- `accessToken` (string, required)
-- `refreshToken` (string, required)
+- `encryptedTokens` (map, required) — encrypted document v1 envelope
+  - `version` (number, required) — `1`
+  - `algorithm` (string, required) — `aes-256-gcm`
+  - `iv` (string, required) — 12 byte random IV の canonical base64
+  - `ciphertext` (string, required) — `{ accessToken, refreshToken }` JSON payload の暗号文を canonical base64 で保持
+  - `authTag` (string, required) — 16 byte authentication tag の canonical base64
 - `accessTokenExpiresAt` (number, required) — Unix time milliseconds
 - `refreshTokenExpiresAt` (number, required) — Unix time milliseconds
 - `accounts` (array, optional)
@@ -170,8 +174,13 @@ Saxo の OAuth token と account 情報を保持する。現行実装では `sax
 
 ### 制約
 - 現状は Saxo 1アカウント運用を前提にする
+- `accessToken` / `refreshToken` の平文 field は廃止済みで、新規保存・更新では作成しない
+- 暗号化鍵は Firestore に保存せず、Secret Manager から `SAXO_TOKEN_ENCRYPTION_KEY` として注入する 32 byte canonical base64 key を使う
+- AES-256-GCM の AAD は `saxo_auth_data/saxo_auth:v1` に固定し、token pair だけを暗号化する。期限と account/client metadata は暗号化対象外とする
 - access token の期限が近い場合は Firestore transaction で `refreshingUntil` を更新し、複数プロセスの同時 refresh を抑制する
-- トークン暗号化は未実装。実装タスクで追跡する
+- legacy 平文 document は初回 read 時に検証し、Firestore transaction 内で encrypted document v1 へ全置換する。transaction 競合時は最新 document を再読込し、古い token へ巻き戻さない
+- encrypted/plaintext field の混在、不正 schema、鍵の未設定・不正、wrong key、IV/ciphertext/authTag の不正または改ざんは fail-closed とし、平文 fallback や token なしでの継続を行わない
+- legacy migration の parse・暗号化・transaction commit が失敗した場合は元 document を変更せず、request を失敗させる
 - TTL は使用しない
 
 ## 保持期間（MVP）
@@ -205,8 +214,9 @@ Saxo の OAuth token と account 情報を保持する。現行実装では `sax
 
 ## セキュリティ要件（MVP）
 - API secret、webhook secret、broker API secret は環境変数で管理し、Firestore に保存しない
-- `saxo_auth_data` の OAuth token は現状 Firestore に保存される。暗号化対応が完了するまでは、Firestore へのアクセス権限を最小化する
-- `saxo_auth_data` の token 暗号化は未実装の既知課題として追跡する
+- `saxo_auth_data` の OAuth token は AES-256-GCM で暗号化し、暗号鍵は Secret Manager で管理する
+- Firestore と Secret Manager のアクセス権限を、それぞれ必要な runtime service account に限定する
+- OAuth token endpoint の失敗時は raw response body を Error / logger へ渡さず、HTTP status と安全な固定メッセージだけを記録する
 
 ## 廃止済み・未使用コレクション
 - `open_trades` と `trade_records` は v1 系 read model として廃止した
