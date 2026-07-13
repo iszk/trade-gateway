@@ -11,7 +11,7 @@ export type PortfolioSnapshotV1AssetClass =
     | 'cfd'
     | 'fx'
 
-export type PortfolioSnapshotV1PositionSide = 'long' | 'short' | 'flat'
+type PortfolioSnapshotV1PositionSide = 'long' | 'short' | 'flat'
 
 export type PortfolioSnapshotV1JsonValue =
     | string
