@@ -122,4 +122,5 @@ test('token encryption codec: 不正な envelope contract を拒否する', () =
     assert.throws(() => codec.decrypt({ ...envelope, version: 2 }), /Unsupported token encryption envelope/)
     assert.throws(() => codec.decrypt({ ...envelope, algorithm: 'aes-128-gcm' }), /Unsupported token encryption envelope/)
     assert.throws(() => codec.decrypt({ ...envelope, iv: 'invalid' }), /Invalid token encryption iv/)
+    assert.throws(() => codec.decrypt({ ...envelope, authTag: 'invalid' }), /Invalid token encryption authTag/)
 })

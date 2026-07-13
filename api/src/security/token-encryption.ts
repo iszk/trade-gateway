@@ -71,7 +71,7 @@ const parseEnvelope = (value: unknown): {
 
     const iv = decodeCanonicalBase64(envelope.iv, 'iv')
     const ciphertext = decodeCanonicalBase64(envelope.ciphertext, 'ciphertext')
-    const authTag = decodeCanonicalBase64(envelope.authTag, 'auth tag')
+    const authTag = decodeCanonicalBase64(envelope.authTag, 'authTag')
 
     if (iv.length !== IV_LENGTH || authTag.length !== AUTH_TAG_LENGTH) {
         throw new Error('Invalid token encryption envelope')
