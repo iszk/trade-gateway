@@ -14,7 +14,7 @@ export const config = {
     saxo: {
         appKey: readRequired('SAXO_APP_KEY'),
         appSecret: readRequired('SAXO_APP_SECRET'),
-        tokenEncryptionKey: process.env.SAXO_TOKEN_ENCRYPTION_KEY,
+        tokenEncryptionKey: readRequired('SAXO_TOKEN_ENCRYPTION_KEY'),
         redirectUri: process.env.SAXO_REDIRECT_URI?.trim(),
         baseUrl: process.env.SAXO_API_BASE_URL?.trim() || 'https://gateway.saxobank.com/sim/openapi',
         authBaseUrl: process.env.SAXO_AUTH_BASE_URL?.trim() || 'https://sim.logonvalidation.net',
