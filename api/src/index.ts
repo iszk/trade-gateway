@@ -212,6 +212,7 @@ type CreateAppOptions = {
         authBaseUrl?: string
         baseUrl?: string
         redirectUri?: string
+        tokenEncryptionKey?: string
     }
     bitflyerConfig?: {
         apiKey?: string
@@ -281,6 +282,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         authBaseUrl: saxoConfig.authBaseUrl,
         baseUrl: saxoConfig.baseUrl,
         redirectUri: saxoConfig.redirectUri,
+        tokenEncryptionKey: saxoConfig.tokenEncryptionKey,
         logger,
     })
     const saxoPortfolioSnapshotClient = options.saxoPortfolioSnapshotClient ?? saxoClient

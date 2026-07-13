@@ -2,7 +2,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Firestore } from 'firebase-admin/firestore'
 
-import { SaxoClient } from './saxo.js'
+import { SaxoClient as ProductionSaxoClient } from './saxo.js'
+
+const TEST_TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64')
+
+class SaxoClient extends ProductionSaxoClient {
+    constructor(options: ConstructorParameters<typeof ProductionSaxoClient>[0] = {}) {
+        super({ tokenEncryptionKey: TEST_TOKEN_ENCRYPTION_KEY, ...options })
+    }
+}
 
 const mockFirestore = (data: Record<string, any> = {}) => {
     const store = { ...data }
@@ -31,11 +39,16 @@ const mockFirestore = (data: Record<string, any> = {}) => {
                     ref.update(updates)
                     return transaction
                 },
+                set: (ref: any, newData: any) => {
+                    ref.set(newData)
+                    return transaction
+                },
             }
             return updateFunction(transaction)
         },
+        _getStoredData: () => structuredClone(store),
     }
-    return db as unknown as Firestore
+    return db as unknown as Firestore & { _getStoredData: () => Record<string, unknown> }
 }
 
 const createCapturingLogger = () => {
@@ -82,6 +95,7 @@ test('SaxoClient.exchangeCodeForToken exchanges code and saves to firestore', as
         redirectUri: 'http://localhost/callback',
         authBaseUrl: 'https://auth.example.com',
         baseUrl: 'https://api.example.com',
+        tokenEncryptionKey: TEST_TOKEN_ENCRYPTION_KEY,
         db,
         fetchImpl: async (url) => {
             if (url.toString().endsWith('/token')) {
@@ -124,6 +138,13 @@ test('SaxoClient.exchangeCodeForToken exchanges code and saves to firestore', as
     assert.equal(auth?.accounts?.[0]?.clientKey, 'test-client-key')
     assert.equal(auth?.accounts?.[0]?.currency, 'USD')
     assert.equal(auth?.accounts?.[0]?.displayName, 'Test Account')
+
+    const saved = db._getStoredData()['saxo_auth_data/saxo_auth'] as Record<string, unknown>
+    assert.ok(saved.encryptedTokens)
+    assert.equal('accessToken' in saved, false)
+    assert.equal('refreshToken' in saved, false)
+    assert.equal(JSON.stringify(saved).includes('new-access-token'), false)
+    assert.equal(JSON.stringify(saved).includes('new-refresh-token'), false)
 })
 
 test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
@@ -179,6 +200,90 @@ test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
     const auth = await client.getAuth()
     assert.equal(auth?.accessToken, 'refreshed-token')
     assert.equal(auth?.accounts?.[0]?.accountKey, 'test-account-key')
+    const saved = db._getStoredData()['saxo_auth_data/saxo_auth'] as Record<string, unknown>
+    assert.ok(saved.encryptedTokens)
+    assert.equal('accessToken' in saved, false)
+    assert.equal('refreshToken' in saved, false)
+    assert.equal('refreshingUntil' in saved, false)
+    assert.equal(JSON.stringify(saved).includes('refreshed-token'), false)
+    assert.equal(JSON.stringify(saved).includes('new-refresh-token'), false)
+})
+
+test('SaxoClient.getValidAccessToken は active refresh lease の待機 timeout を維持する', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'expired-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() - 1_000,
+            refreshTokenExpiresAt: Date.now() + 86_400_000,
+            refreshingUntil: Date.now() + 30_000,
+        },
+    })
+    const { logger, warnLogs } = createCapturingLogger()
+    const client = new SaxoClient({
+        db,
+        logger,
+        refreshWaitIntervalMs: 0,
+    })
+
+    assert.equal(await client.getValidAccessToken(), null)
+    assert.equal(
+        warnLogs.some(({ obj }) => obj.event === 'saxo:token_refresh_timeout'),
+        true,
+    )
+})
+
+test('SaxoClient.getValidAccessToken は refresh 失敗後に lease を解放して再取得できる', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'expired-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() - 1_000,
+            refreshTokenExpiresAt: Date.now() + 86_400_000,
+        },
+    })
+    let tokenRequestCount = 0
+    const client = new SaxoClient({
+        appKey: 'test-key',
+        appSecret: 'test-secret',
+        authBaseUrl: 'https://auth.example.com',
+        baseUrl: 'https://api.example.com',
+        db,
+        fetchImpl: async (url) => {
+            if (url.toString().endsWith('/token')) {
+                tokenRequestCount++
+                if (tokenRequestCount === 1) {
+                    return new Response('temporary failure', { status: 500 })
+                }
+                return new Response(JSON.stringify({
+                    access_token: 'recovered-access-token',
+                    refresh_token: 'recovered-refresh-token',
+                    expires_in: 1_200,
+                    refresh_token_expires_in: 86_400,
+                }), { status: 200 })
+            }
+            return new Response(JSON.stringify({
+                Data: [{
+                    AccountKey: 'test-account-key',
+                    ClientKey: 'test-client-key',
+                    LegalAssetTypes: ['FxSpot'],
+                    Currency: 'USD',
+                    DisplayName: 'Primary',
+                }],
+            }), { status: 200 })
+        },
+    })
+
+    assert.equal(await client.getValidAccessToken(), null)
+    const released = db._getStoredData()['saxo_auth_data/saxo_auth'] as Record<string, unknown>
+    assert.ok((released.refreshingUntil as number) < Date.now())
+
+    assert.equal(await client.getValidAccessToken(), 'recovered-access-token')
+    const saved = db._getStoredData()['saxo_auth_data/saxo_auth'] as Record<string, unknown>
+    assert.ok(saved.encryptedTokens)
+    assert.equal('refreshingUntil' in saved, false)
+    assert.equal('accessToken' in saved, false)
+    assert.equal('refreshToken' in saved, false)
 })
 
 test('SaxoClient.getBalances fetches logged-in account balance and filters zero values', async () => {
@@ -1076,7 +1181,13 @@ test('SaxoClient.sendMarketOrder keeps related order ids nullable when response 
             refreshToken: 'refresh-token',
             accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
             refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
-            accounts: [{ accountKey: 'account-1', clientKey: 'client-1', legalAssetTypes: ['FxSpot'] }],
+            accounts: [{
+                accountKey: 'account-1',
+                clientKey: 'client-1',
+                legalAssetTypes: ['FxSpot'],
+                currency: 'USD',
+                displayName: 'Primary',
+            }],
         },
     })
 
@@ -1555,7 +1666,13 @@ test('SaxoClient.getExecutionPriceForOrderV2 ignores stale next poll cursor afte
             refreshToken: 'refresh-token',
             accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
             refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
-            accounts: [{ clientKey: 'test-client' }],
+            accounts: [{
+                accountKey: 'test-account',
+                clientKey: 'test-client',
+                legalAssetTypes: ['FxSpot'],
+                currency: 'USD',
+                displayName: 'Primary',
+            }],
         },
         'cron_metadata/saxo_orderactivities_poll_state': {
             last_poll_at: '2026-01-01T00:00:00Z',

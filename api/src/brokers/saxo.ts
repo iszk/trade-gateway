@@ -1,5 +1,5 @@
 import type { Firestore } from 'firebase-admin/firestore'
-import { getFirestoreClient, setFirestoreDocument, updateFirestoreDocument } from '../firestore.js'
+import { getFirestoreClient, setFirestoreDocument } from '../firestore.js'
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { SaxoOrderMetadata } from '../types/broker-order-metadata.js'
 import type { OrderV2 } from '../types/order-v2.js'
@@ -13,6 +13,11 @@ import type {
 } from '../types/portfolio-snapshot.js'
 import { portfolioSnapshotV1SchemaVersion } from '../types/portfolio-snapshot.js'
 import { defaultLogger, type Logger } from '../logger.js'
+import {
+    SaxoAuthStore,
+    type SaxoAccountInfo,
+    type SaxoAuthData,
+} from './saxo-auth-store.js'
 
 type SaxoClientOptions = {
     appKey?: string
@@ -24,22 +29,9 @@ type SaxoClientOptions = {
     db?: Firestore
     logger?: Logger
     rateLimitCooldownMs?: number
-}
-
-type SaxoAccountInfo = {
-    accountKey: string
-    clientKey: string
-    legalAssetTypes: string[]
-    currency: string
-    displayName: string
-}
-
-type SaxoAuthData = {
-    accessToken: string
-    refreshToken: string
-    accessTokenExpiresAt: number // timestamp in ms
-    refreshTokenExpiresAt: number // timestamp in ms
-    accounts?: SaxoAccountInfo[]
+    tokenEncryptionKey?: string
+    authStore?: SaxoAuthStore
+    refreshWaitIntervalMs?: number
 }
 
 type SaxoTokenResponse = {
@@ -178,8 +170,6 @@ type SaxoInstrumentDetailsResponse =
         Data: SaxoInstrumentDetails[]
     }
 
-const FIRESTORE_COLLECTION = 'saxo_auth_data'
-const FIRESTORE_DOC = 'saxo_auth'
 const CRON_METADATA_COLLECTION = 'cron_metadata'
 const SAXO_ORDER_ACTIVITIES_POLL_DOC = 'saxo_orderactivities_poll_state'
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000
@@ -505,6 +495,9 @@ export class SaxoClient {
     private readonly db?: Firestore
     private readonly logger: Logger
     private readonly rateLimitCooldownMs: number
+    private readonly tokenEncryptionKey?: string
+    private readonly refreshWaitIntervalMs: number
+    private authStore?: SaxoAuthStore
     private rateLimitedUntilMs = 0
     private auditActivitiesCache?: {
         fetchedAtMs: number
@@ -522,10 +515,22 @@ export class SaxoClient {
         this.db = options.db
         this.logger = options.logger ?? defaultLogger
         this.rateLimitCooldownMs = options.rateLimitCooldownMs ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS
+        this.tokenEncryptionKey = options.tokenEncryptionKey
+        this.authStore = options.authStore
+        this.refreshWaitIntervalMs = options.refreshWaitIntervalMs ?? 1_000
     }
 
     private getFirestore(): Firestore {
         return this.db ?? getFirestoreClient()
+    }
+
+    private getAuthStore(): SaxoAuthStore {
+        this.authStore ??= new SaxoAuthStore({
+            db: this.getFirestore(),
+            tokenEncryptionKey: this.tokenEncryptionKey,
+            logger: this.logger,
+        })
+        return this.authStore
     }
 
     private buildSaxoApiUrl(pathOrUrl: string): string {
@@ -744,25 +749,11 @@ export class SaxoClient {
     }
 
     async getAuth(): Promise<SaxoAuthData | null> {
-        const db = this.getFirestore()
-        const doc = await db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC).get()
-        if (!doc.exists) {
-            return null
-        }
-        return doc.data() as SaxoAuthData
+        return this.getAuthStore().getAuth()
     }
 
     async saveAuth(data: SaxoAuthData): Promise<void> {
-        const db = this.getFirestore()
-        await setFirestoreDocument(
-            db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC),
-            data as unknown as Record<string, unknown>,
-            {
-                collection: FIRESTORE_COLLECTION,
-                docId: FIRESTORE_DOC,
-                logger: this.logger,
-            },
-        )
+        await this.getAuthStore().saveAuth(data)
     }
 
     async refreshAccessToken(refreshToken: string): Promise<SaxoAuthData> {
@@ -875,55 +866,26 @@ export class SaxoClient {
             return null // Refresh token also expired
         }
 
-        const db = this.getFirestore()
-        const authRef = db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC)
-        let shouldRefresh = false
-
-        try {
-            await db.runTransaction(async (transaction) => {
-                const doc = await transaction.get(authRef)
-                if (!doc.exists) return
-
-                const data = doc.data() as SaxoAuthData & { refreshingUntil?: number }
-
-                if (data.accessTokenExpiresAt >= Date.now() + 60 * 1000) {
-                    return // Already refreshed
+        const authStore = this.getAuthStore()
+        const lease = await authStore.acquireRefreshLease()
+        if (lease.status === 'missing') return null
+        if (lease.status === 'already-fresh') return lease.auth.accessToken
+        if (lease.status === 'already-refreshing') {
+            // Wait for the other process to finish refreshing
+            for (let i = 0; i < 15; i++) {
+                await new Promise((resolve) => setTimeout(resolve, this.refreshWaitIntervalMs))
+                auth = await this.getAuth()
+                if (auth && auth.accessTokenExpiresAt >= Date.now() + 60 * 1000) {
+                    return auth.accessToken
                 }
-
-                if (data.refreshingUntil && data.refreshingUntil > Date.now()) {
-                    throw new Error('ALREADY_REFRESHING')
-                }
-
-                // Acquire lock for 30 seconds
-                transaction.update(authRef, { refreshingUntil: Date.now() + 30 * 1000 })
-                shouldRefresh = true
-            })
-        } catch (error) {
-            if (error instanceof Error && error.message === 'ALREADY_REFRESHING') {
-                // Wait for the other process to finish refreshing
-                for (let i = 0; i < 15; i++) {
-                    await new Promise((resolve) => setTimeout(resolve, 1000))
-                    auth = await this.getAuth()
-                    if (auth && auth.accessTokenExpiresAt >= Date.now() + 60 * 1000) {
-                        return auth.accessToken
-                    }
-                }
-                this.logger.warn({ event: 'saxo:token_refresh_timeout' }, 'Timed out waiting for Saxo token refresh lock')
-                return null
             }
-            throw error
-        }
-
-        if (!shouldRefresh) {
-            // Already refreshed by another process while we were checking
-            auth = await this.getAuth()
-            return auth?.accessToken ?? null
+            this.logger.warn({ event: 'saxo:token_refresh_timeout' }, 'Timed out waiting for Saxo token refresh lock')
+            return null
         }
 
         try {
-            // Get latest refresh token before calling API
-            auth = await this.getAuth()
-            if (!auth || auth.refreshTokenExpiresAt < Date.now() + 60 * 1000) {
+            auth = lease.auth
+            if (auth.refreshTokenExpiresAt < Date.now() + 60 * 1000) {
                 return null
             }
             const newAuth = await this.refreshAccessToken(auth.refreshToken)
@@ -932,11 +894,7 @@ export class SaxoClient {
         } catch (error) {
             this.logger.warn({ event: 'saxo:token_refresh_failed', error }, 'Failed to auto-refresh Saxo token')
             // Release lock on failure
-            await updateFirestoreDocument(authRef, { refreshingUntil: Date.now() - 1000 }, {
-                collection: FIRESTORE_COLLECTION,
-                docId: FIRESTORE_DOC,
-                logger: this.logger,
-            })
+            await authStore.releaseRefreshLease()
             return null
         }
     }
