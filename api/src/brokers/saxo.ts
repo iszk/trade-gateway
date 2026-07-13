@@ -883,11 +883,13 @@ export class SaxoClient {
             return null
         }
 
+        auth = lease.auth
+        if (auth.refreshTokenExpiresAt < Date.now() + 60 * 1000) {
+            await authStore.releaseRefreshLease()
+            return null
+        }
+
         try {
-            auth = lease.auth
-            if (auth.refreshTokenExpiresAt < Date.now() + 60 * 1000) {
-                return null
-            }
             const newAuth = await this.refreshAccessToken(auth.refreshToken)
             // refreshAccessToken calls saveAuth (using .set) which overwrites the whole document, effectively clearing the lock.
             return newAuth.accessToken

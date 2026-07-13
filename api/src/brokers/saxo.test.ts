@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Firestore } from 'firebase-admin/firestore'
 
+import type { SaxoAuthStore } from './saxo-auth-store.js'
 import { SaxoClient as ProductionSaxoClient } from './saxo.js'
 
 const TEST_TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64')
@@ -284,6 +285,39 @@ test('SaxoClient.getValidAccessToken は refresh 失敗後に lease を解放し
     assert.equal('refreshingUntil' in saved, false)
     assert.equal('accessToken' in saved, false)
     assert.equal('refreshToken' in saved, false)
+})
+
+test('SaxoClient.getValidAccessToken は lease 取得後に refresh token が期限切れなら lease を解放する', async () => {
+    const initialAuth = {
+        accessToken: 'expired-access-token',
+        refreshToken: 'initial-refresh-token',
+        accessTokenExpiresAt: Date.now() - 1_000,
+        refreshTokenExpiresAt: Date.now() + 86_400_000,
+    }
+    let releaseCount = 0
+    const authStore = {
+        getAuth: async () => initialAuth,
+        acquireRefreshLease: async () => ({
+            status: 'acquired' as const,
+            auth: {
+                ...initialAuth,
+                refreshToken: 'expired-refresh-token',
+                refreshTokenExpiresAt: Date.now() - 1_000,
+            },
+        }),
+        releaseRefreshLease: async () => {
+            releaseCount++
+        },
+    } as unknown as SaxoAuthStore
+    const client = new SaxoClient({
+        authStore,
+        fetchImpl: async () => {
+            throw new Error('token endpoint must not be called')
+        },
+    })
+
+    assert.equal(await client.getValidAccessToken(), null)
+    assert.equal(releaseCount, 1)
 })
 
 test('SaxoClient.getBalances fetches logged-in account balance and filters zero values', async () => {
