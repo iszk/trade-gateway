@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
+import { SaxoClient } from './brokers/saxo.js'
+import { config } from './config.js'
 import { createApp } from './index.js'
 import type { DispatchOrderFn, BrokerName } from './types/order.js'
 import type { OrderV2 } from './types/order-v2.js'
@@ -785,6 +787,37 @@ test('GET /api/auth/saxo/login redirects to Saxo login page', async () => {
     const location = res.headers.get('location')
     assert.ok(location?.includes('sim.logonvalidation.net/authorize'))
     assert.ok(location?.includes('response_type=code'))
+})
+
+test('createApp は partial saxoConfig で省略された tokenEncryptionKey を既定設定から補う', async (t) => {
+    const defaultTokenEncryptionKey = Buffer.alloc(32, 9).toString('base64')
+    const originalTokenEncryptionKey = config.saxo.tokenEncryptionKey
+    config.saxo.tokenEncryptionKey = defaultTokenEncryptionKey
+    t.after(() => {
+        config.saxo.tokenEncryptionKey = originalTokenEncryptionKey
+    })
+
+    let capturedTokenEncryptionKey: string | undefined
+    t.mock.method(SaxoClient.prototype, 'exchangeCodeForToken', async function (this: SaxoClient) {
+        capturedTokenEncryptionKey = (this as unknown as { tokenEncryptionKey?: string }).tokenEncryptionKey
+        return {
+            accessToken: 'test-access-token',
+            refreshToken: 'test-refresh-token',
+            accessTokenExpiresAt: Date.now() + 1_200_000,
+            refreshTokenExpiresAt: Date.now() + 86_400_000,
+        }
+    })
+    const app = createAppForTests({
+        saxoConfig: {
+            appKey: 'test-key',
+            appSecret: 'test-secret',
+        },
+    })
+
+    const res = await app.request('/api/auth/saxo/callback?code=test-code')
+
+    assert.equal(res.status, 200)
+    assert.equal(capturedTokenEncryptionKey, defaultTokenEncryptionKey)
 })
 
 test('GET /api/auth/saxo/callback returns 400 if code is missing', async () => {

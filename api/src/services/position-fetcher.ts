@@ -37,6 +37,7 @@ export class PositionFetcher {
                 baseUrl: config.saxo.baseUrl,
                 authBaseUrl: config.saxo.authBaseUrl,
                 redirectUri: config.saxo.redirectUri,
+                tokenEncryptionKey: config.saxo.tokenEncryptionKey,
             })
         this.listTradableSymbols = options.listTradableSymbols ?? createDefaultListTradableSymbolsFn()
     }
