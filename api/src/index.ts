@@ -282,7 +282,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         authBaseUrl: saxoConfig.authBaseUrl,
         baseUrl: saxoConfig.baseUrl,
         redirectUri: saxoConfig.redirectUri,
-        tokenEncryptionKey: saxoConfig.tokenEncryptionKey,
+        tokenEncryptionKey: saxoConfig.tokenEncryptionKey ?? config.saxo.tokenEncryptionKey,
         logger,
     })
     const saxoPortfolioSnapshotClient = options.saxoPortfolioSnapshotClient ?? saxoClient
