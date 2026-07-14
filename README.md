@@ -6,7 +6,7 @@ TradingView からの webhook を受けて、実際にブローカーに対し�
 
 また、それに必要な UI として OpenID の token を得るためのログイン用エンドポイントも提供する。
 
-データベースにはアクセストークン、リフレッシュトークン、webhook の重複受信対策データを保持する。
+データベースには暗号化したアクセストークン・リフレッシュトークンと、webhook の重複受信対策データを保持する。
 
 Node.js workspace 構成を採用しており、`api` と `ui` をルート `package.json` / `package-lock.json` でまとめて管理する。
 
@@ -41,7 +41,8 @@ Node.js workspace 構成を採用しており、`api` と `ui` をルート `pac
 
 - Google Cloud Run
 - Google Firestore（Native mode, MVP 採用）
-- Google Cloud KMS（トークン暗号化用）
+- Google Secret Manager（Saxo token 暗号鍵の保管・Cloud Run への注入）
+- Node.js `crypto` の AES-256-GCM（Saxo token のアプリケーション暗号化）
 
 ### バックエンド
 
@@ -76,6 +77,8 @@ Node.js workspace 構成を採用しており、`api` と `ui` をルート `pac
 - event_id を重複判定キーとし、同一 event_id は 409 で拒否する
 - トークン平文保存は禁止し、暗号化済みデータのみ保存する
 - 保持期間を過ぎたデータは TTL で自動削除する
+
+Saxo token の暗号化方式、Secret Manager の準備、既存平文 document の読み取り時移行、rollback 制約は [Saxo 連携メモ](./docs/saxo.md#saxo-oauth-token-暗号化運用) を参照する。
 
 ## 受け入れ条件（初版）
 

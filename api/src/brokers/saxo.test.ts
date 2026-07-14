@@ -73,6 +73,12 @@ const createCapturingLogger = () => {
     return { logger, infoLogs, warnLogs, errorLogs }
 }
 
+const stringifyCapturedLogs = (
+    logs: Array<{ obj: Record<string, unknown>, msg?: string }>,
+): string => JSON.stringify(logs, (_key, value) => value instanceof Error
+    ? { name: value.name, message: value.message }
+    : value)
+
 test('SaxoClient.getLoginUrl returns correct URL', () => {
     const client = new SaxoClient({
         appKey: 'test-app-key',
@@ -146,6 +152,88 @@ test('SaxoClient.exchangeCodeForToken exchanges code and saves to firestore', as
     assert.equal('refreshToken' in saved, false)
     assert.equal(JSON.stringify(saved).includes('new-access-token'), false)
     assert.equal(JSON.stringify(saved).includes('new-refresh-token'), false)
+})
+
+test('SaxoClient.exchangeCodeForToken は token endpoint の raw response body を Error に含めない', async () => {
+    const sensitiveValues = [
+        'oauth-body-access-token',
+        'oauth-body-refresh-token',
+        Buffer.alloc(32, 29).toString('base64'),
+    ]
+    let bodyCancelled = false
+    const responseBody = new ReadableStream({
+        start: (controller) => {
+            controller.enqueue(Buffer.from(JSON.stringify({
+                access_token: sensitiveValues[0],
+                refresh_token: sensitiveValues[1],
+                diagnostic: sensitiveValues[2],
+            })))
+        },
+        cancel: () => {
+            bodyCancelled = true
+        },
+    })
+    const client = new SaxoClient({
+        appKey: 'test-key',
+        appSecret: 'test-secret',
+        redirectUri: 'http://localhost/callback',
+        authBaseUrl: 'https://auth.example.com',
+        fetchImpl: async () => new Response(responseBody, { status: 401 }),
+    })
+
+    await assert.rejects(
+        client.exchangeCodeForToken('test-code'),
+        (error: unknown) => {
+            assert.ok(error instanceof Error)
+            assert.equal(error.message, 'Failed to exchange Saxo code (HTTP 401)')
+            for (const secret of sensitiveValues) {
+                assert.equal(error.message.includes(secret), false)
+            }
+            return true
+        },
+    )
+    assert.equal(bodyCancelled, true)
+})
+
+test('SaxoClient.refreshAccessToken は token endpoint の raw response body を Error に含めない', async () => {
+    const sensitiveValues = [
+        'refresh-body-access-token',
+        'refresh-body-refresh-token',
+        Buffer.alloc(32, 31).toString('base64'),
+    ]
+    let bodyCancelAttempted = false
+    const responseBody = new ReadableStream({
+        start: (controller) => {
+            controller.enqueue(Buffer.from(JSON.stringify({
+                access_token: sensitiveValues[0],
+                refresh_token: sensitiveValues[1],
+                diagnostic: sensitiveValues[2],
+            })))
+        },
+        cancel: () => {
+            bodyCancelAttempted = true
+            throw new Error(`cancel failed: ${sensitiveValues.join(' ')}`)
+        },
+    })
+    const client = new SaxoClient({
+        appKey: 'test-key',
+        appSecret: 'test-secret',
+        authBaseUrl: 'https://auth.example.com',
+        fetchImpl: async () => new Response(responseBody, { status: 503 }),
+    })
+
+    await assert.rejects(
+        client.refreshAccessToken('request-refresh-token'),
+        (error: unknown) => {
+            assert.ok(error instanceof Error)
+            assert.equal(error.message, 'Failed to refresh Saxo token (HTTP 503)')
+            for (const secret of sensitiveValues) {
+                assert.equal(error.message.includes(secret), false)
+            }
+            return true
+        },
+    )
+    assert.equal(bodyCancelAttempted, true)
 })
 
 test('SaxoClient.getValidAccessToken refreshes if expired', async () => {
@@ -235,6 +323,11 @@ test('SaxoClient.getValidAccessToken は active refresh lease の待機 timeout 
 })
 
 test('SaxoClient.getValidAccessToken は refresh 失敗後に lease を解放して再取得できる', async () => {
+    const failedResponseSecrets = [
+        'failed-refresh-access-token',
+        'failed-refresh-refresh-token',
+        Buffer.alloc(32, 37).toString('base64'),
+    ]
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
             accessToken: 'expired-token',
@@ -244,17 +337,23 @@ test('SaxoClient.getValidAccessToken は refresh 失敗後に lease を解放し
         },
     })
     let tokenRequestCount = 0
+    const { logger, warnLogs } = createCapturingLogger()
     const client = new SaxoClient({
         appKey: 'test-key',
         appSecret: 'test-secret',
         authBaseUrl: 'https://auth.example.com',
         baseUrl: 'https://api.example.com',
         db,
+        logger,
         fetchImpl: async (url) => {
             if (url.toString().endsWith('/token')) {
                 tokenRequestCount++
                 if (tokenRequestCount === 1) {
-                    return new Response('temporary failure', { status: 500 })
+                    return new Response(JSON.stringify({
+                        access_token: failedResponseSecrets[0],
+                        refresh_token: failedResponseSecrets[1],
+                        diagnostic: failedResponseSecrets[2],
+                    }), { status: 500 })
                 }
                 return new Response(JSON.stringify({
                     access_token: 'recovered-access-token',
@@ -276,6 +375,11 @@ test('SaxoClient.getValidAccessToken は refresh 失敗後に lease を解放し
     })
 
     assert.equal(await client.getValidAccessToken(), null)
+    const capturedFailureLog = stringifyCapturedLogs(warnLogs)
+    assert.equal(capturedFailureLog.includes('Failed to refresh Saxo token (HTTP 500)'), true)
+    for (const secret of failedResponseSecrets) {
+        assert.equal(capturedFailureLog.includes(secret), false)
+    }
     const released = db._getStoredData()['saxo_auth_data/saxo_auth'] as Record<string, unknown>
     assert.ok((released.refreshingUntil as number) < Date.now())
 

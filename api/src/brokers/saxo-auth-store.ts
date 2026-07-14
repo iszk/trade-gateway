@@ -169,6 +169,14 @@ export class SaxoAuthStore {
         })
     }
 
+    private logSafeFailure(event: string, message: string): void {
+        this.logger?.error({
+            event,
+            collection: FIRESTORE_COLLECTION,
+            doc_id: FIRESTORE_DOC,
+        }, message)
+    }
+
     async getAuth(): Promise<SaxoAuthData | null> {
         const reference = this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC)
         const snapshot = await reference.get()
@@ -184,25 +192,31 @@ export class SaxoAuthStore {
         }
 
         this.parseLegacyDocument(document)
-        return this.db.runTransaction(async (transaction) => {
-            const latestSnapshot = await transaction.get(reference)
-            if (!latestSnapshot.exists) return null
+        try {
+            return await this.db.runTransaction(async (transaction) => {
+                const latestSnapshot = await transaction.get(reference)
+                if (!latestSnapshot.exists) return null
 
-            const latestDocument = latestSnapshot.data()
-            if (!isRecord(latestDocument)) {
-                throw new Error('Invalid Saxo auth document')
-            }
-            if ('encryptedTokens' in latestDocument) {
-                return this.parseEncryptedDocument(latestDocument).auth
-            }
+                const latestDocument = latestSnapshot.data()
+                if (!isRecord(latestDocument)) {
+                    throw new Error('Invalid Saxo auth document')
+                }
+                if ('encryptedTokens' in latestDocument) {
+                    return this.parseEncryptedDocument(latestDocument).auth
+                }
 
-            const legacy = this.parseLegacyDocument(latestDocument)
-            transaction.set(
-                reference,
-                this.createEncryptedDocument(legacy.auth, legacy.refreshingUntil),
-            )
-            return legacy.auth
-        })
+                const legacy = this.parseLegacyDocument(latestDocument)
+                transaction.set(
+                    reference,
+                    this.createEncryptedDocument(legacy.auth, legacy.refreshingUntil),
+                )
+                return legacy.auth
+            })
+        } catch {
+            const message = 'Failed to migrate legacy Saxo auth document'
+            this.logSafeFailure('saxo_auth:migration_failed', message)
+            throw new Error(message)
+        }
     }
 
     async acquireRefreshLease(): Promise<RefreshLeaseResult> {
@@ -256,26 +270,36 @@ export class SaxoAuthStore {
     }
 
     async releaseRefreshLease(): Promise<void> {
-        await updateFirestoreDocument(
-            this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC),
-            { refreshingUntil: this.now() - 1_000 },
-            {
-                collection: FIRESTORE_COLLECTION,
-                docId: FIRESTORE_DOC,
-                logger: this.logger,
-            },
-        )
+        try {
+            await updateFirestoreDocument(
+                this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC),
+                { refreshingUntil: this.now() - 1_000 },
+                {
+                    collection: FIRESTORE_COLLECTION,
+                    docId: FIRESTORE_DOC,
+                    logger: this.logger,
+                    redactWriteDetails: true,
+                },
+            )
+        } catch {
+            throw new Error('Failed to release Saxo refresh lease')
+        }
     }
 
     async saveAuth(data: SaxoAuthData): Promise<void> {
-        await setFirestoreDocument(
-            this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC),
-            this.createEncryptedDocument(data),
-            {
-                collection: FIRESTORE_COLLECTION,
-                docId: FIRESTORE_DOC,
-                logger: this.logger,
-            },
-        )
+        try {
+            await setFirestoreDocument(
+                this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC),
+                this.createEncryptedDocument(data),
+                {
+                    collection: FIRESTORE_COLLECTION,
+                    docId: FIRESTORE_DOC,
+                    logger: this.logger,
+                    redactWriteDetails: true,
+                },
+            )
+        } catch {
+            throw new Error('Failed to save Saxo auth document')
+        }
     }
 }

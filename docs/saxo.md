@@ -1,5 +1,115 @@
 # Saxo 連携メモ
 
+## Saxo OAuth token 暗号化運用
+
+### 実装方式
+
+Saxo の `accessToken` と `refreshToken` は単一 JSON payload にして、Node.js `crypto` の AES-256-GCM で暗号化する。Firestore の `saxo_auth_data/saxo_auth.encryptedTokens` には version 1 envelope を保存し、平文 token field は保存しない。暗号鍵は Cloud KMS ではなく Secret Manager の `SAXO_TOKEN_ENCRYPTION_KEY` に保管し、Cloud Run へ環境変数として注入する。
+
+鍵は 32 byte の canonical base64、IV は暗号化ごとに生成する 12 byte、authentication tag は 16 byte である。AAD は `saxo_auth_data/saxo_auth:v1` に固定する。document schema の詳細は [DB 仕様](./database-spec.md#6-saxo_auth_data) を参照する。
+
+### 初回導入手順
+
+以下は運用者が対象 project、region、Cloud Run service、runtime service account を確認して実施する。実値や生成した鍵を shell output、チャット、issue、CI log、Git 管理下のファイルへ残さない。
+
+1. 対象を明示する。
+
+   ```bash
+   export PROJECT_ID="<production-project-id>"
+   export REGION="asia-northeast1"
+   export SERVICE="trade-gateway"
+   export SECRET_NAME="SAXO_TOKEN_ENCRYPTION_KEY"
+   export RUNTIME_SERVICE_ACCOUNT="<cloud-run-runtime-service-account>"
+   ```
+
+   `RUNTIME_SERVICE_ACCOUNT` は deploy 実行者ではなく、Cloud Run revision が実行時に使用する service account を指定する。現在値は次で確認できる。
+
+   ```bash
+   gcloud run services describe "$SERVICE" \
+     --project "$PROJECT_ID" \
+     --region "$REGION" \
+     --format='value(spec.template.spec.serviceAccountName)'
+   ```
+
+2. 安全な端末で 32 byte key を一時ファイルへ生成する。既存 secret がある場合は新しい鍵を生成せず、後述の rotation 制約を先に確認する。
+
+   ```bash
+   umask 077
+   openssl rand -base64 32 > /tmp/saxo-token-encryption-key
+   ```
+
+   出力は改行を含み得るが、アプリケーションの設定読込時に前後空白を除去する。base64 decode 後が 32 byte であることを、値を表示せず確認する。
+
+   ```bash
+   test "$(openssl base64 -d -A -in /tmp/saxo-token-encryption-key | wc -c | tr -d ' ')" = 32
+   ```
+
+3. Secret Manager secret を作成し、key を version として登録する。secret が既に存在する場合、単一鍵運用中は安易に version を追加しない。
+
+   ```bash
+   gcloud secrets create "$SECRET_NAME" \
+     --project "$PROJECT_ID" \
+     --replication-policy=automatic
+   gcloud secrets versions add "$SECRET_NAME" \
+     --project "$PROJECT_ID" \
+     --data-file=/tmp/saxo-token-encryption-key
+   ```
+
+4. runtime service account に対象 secret だけの参照権限を付与する。
+
+   ```bash
+   gcloud secrets add-iam-policy-binding "$SECRET_NAME" \
+     --project "$PROJECT_ID" \
+     --member="serviceAccount:$RUNTIME_SERVICE_ACCOUNT" \
+     --role="roles/secretmanager.secretAccessor"
+   ```
+
+5. 一時ファイルを安全に削除し、deploy する。`api/Justfile` は `SAXO_TOKEN_ENCRYPTION_KEY=SAXO_TOKEN_ENCRYPTION_KEY:latest` を Cloud Run に設定する。
+
+   ```bash
+   rm /tmp/saxo-token-encryption-key
+   DEPLOY_GOOGLE_CLOUD_PROJECT="$PROJECT_ID" just api deploy
+   ```
+
+6. 新 revision の起動成功と、Secret Manager access denied、暗号鍵 validation error、`saxo_auth:migration_failed` がないことを Cloud Run log で確認する。鍵がない・不正・既存 envelope を復号できない場合、アプリケーションは fail-closed する。平文保存へ戻して回避してはいけない。
+
+7. 認証済み API secret を安全に環境変数へ設定し、Saxo token を読む API を 1 回呼ぶ。`/api/saxo/portfolio-snapshot` は認証状態を読み、必要なら legacy document を transaction 内で encrypted v1 へ移行する。
+
+   ```bash
+   curl --fail-with-body \
+     --header "Authorization: Bearer $API_SECRET" \
+     "https://<service-url>/api/saxo/portfolio-snapshot"
+   ```
+
+8. Firestore console で `saxo_auth_data/saxo_auth` の field 名だけを確認する。`encryptedTokens.version = 1` と `algorithm = aes-256-gcm` が存在し、top-level の `accessToken` と `refreshToken` が消失していることを確認する。token、ciphertext、鍵を log や作業記録へコピーしない。
+
+9. Saxo API 呼び出しが成功し、refresh が必要な場合も token 更新後に平文 field が再作成されないことを確認する。migration 完了の記録には project/environment、確認日時、encrypted v1、平文 field なしという結果だけを残す。
+
+### 読み取り時移行と fail-closed
+
+legacy document は `accessToken` / `refreshToken` と metadata を検証した後、transaction 内でもう一度最新 document を読み、まだ legacy の場合だけ encrypted v1 へ全置換する。別 instance の refresh が先に commit した場合は transaction を再実行し、最新の encrypted token を返す。
+
+encrypted/plaintext の混在、不正 schema、鍵の未設定・不正、wrong key、envelope 改ざんでは plaintext fallback しない。migration の parse、暗号化、commit が失敗した場合も legacy document を変更せず request を失敗させる。OAuth token endpoint の失敗では raw response body を破棄し、Error / log には HTTP status と固定メッセージだけを残す。
+
+### Rollback と再認証の判断
+
+- 0030-3 の revision だけを戻す場合は、encrypted v1 を読める 0030-2 以降の revision と同じ secret version へ rollback する。
+- 一度 encrypted v1 へ移行した後は、平文 field を前提とする暗号化対応前 revision へ rollback しない。旧 revision は encrypted document を読めない。
+- migration commit が失敗しただけなら legacy document は残る。正しい鍵、IAM、Firestore 状態を復旧して同じ read を再試行し、先に再認証や手動 document 編集を行わない。
+- secret version を誤って変更して復号不能になった場合は、旧鍵を保持する secret version へ Cloud Run の参照を戻す。旧 version を disable/destroy してはいけない。
+- encrypted document の旧鍵を復旧できない、または Saxo token 自体が失効・無効な場合は復号による回復はできない。正しい現行鍵を注入した revision で `/api/auth/saxo/login` から再認証し、新しい encrypted v1 document で全置換する。再認証前に対象環境と鍵を再確認する。
+- rollback や再認証の確認中も production Firestore document を手動で平文へ戻さない。
+
+### 鍵 rotation の制約
+
+現行 envelope は `keyId` を持たず、アプリケーションも単一鍵しか読み込まない。既存 document を旧鍵で復号できる仕組みなしに `SAXO_TOKEN_ENCRYPTION_KEY` の `latest` を新しい鍵へ差し替えると、既存 token は即座に復号不能になる。旧鍵なしで secret を差し替えてはいけない。
+
+rotation を行うには、旧鍵と新鍵を同時に読める keyring、envelope の key ID、旧鍵で復号して新鍵で再暗号化する移行、全環境の移行完了確認、旧鍵廃止の順序を別設計として実装する必要がある。Cloud KMS、automatic key rotation、複数鍵対応は現行スコープ外である。
+
+### Legacy reader の削除候補
+
+legacy reader は遅延移行のための一時的な互換経路であり、恒久化しない。すべての active environment で固定 document が encrypted v1 になり、平文 field が存在せず、一定の運用期間で migration failure がないことを確認した後、`parseLegacyDocument` と読み取り時 migration 分岐、その専用テストを削除して plaintext document を常に拒否する follow-up task を起票する。
+
 ## 前提
 
 現状の実装は Saxo の 1 アカウント運用を前提にする。`saxo_auth_data/saxo_auth.accounts[0]` の `clientKey`（Saxo API レスポンス上は `ClientKey`）を audit 取得に使い、発注時の account 選択も既存実装どおり、対象 `AssetType` を扱える最初の account を使う。

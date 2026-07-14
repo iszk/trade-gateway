@@ -90,6 +90,36 @@ test('updateFirestoreDocument logs write data and rethrows on write failure', as
     assert.equal(errors[0]?.obj.error, firestoreError)
 })
 
+test('setFirestoreDocument は redaction 時に固定 error type だけをログへ残す', async () => {
+    const { logger, errors } = createLoggerStub()
+    const sensitiveValue = 'sensitive-firestore-error-detail'
+    const firestoreError = new Error(sensitiveValue)
+    firestoreError.name = sensitiveValue
+    const docRef = {
+        set: async () => {
+            throw firestoreError
+        },
+    }
+
+    await assert.rejects(
+        setFirestoreDocument(docRef as any, {
+            token: sensitiveValue,
+        }, {
+            collection: 'saxo_auth_data',
+            docId: 'saxo_auth',
+            logger,
+            redactWriteDetails: true,
+        }),
+        firestoreError,
+    )
+
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0]?.obj.error_type, 'error')
+    assert.equal('data' in (errors[0]?.obj ?? {}), false)
+    assert.equal('error' in (errors[0]?.obj ?? {}), false)
+    assert.equal(JSON.stringify(errors).includes(sensitiveValue), false)
+})
+
 test('createFirestoreDocument skips logging expected write errors', async () => {
     const { logger, errors } = createLoggerStub()
     const alreadyExistsError = new Error('already exists') as Error & { code: number }
