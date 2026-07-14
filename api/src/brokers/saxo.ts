@@ -128,6 +128,14 @@ type SaxoOrderActivitiesPollState = {
     next_poll_url?: string
 }
 
+const cancelResponseBody = async (response: Response): Promise<void> => {
+    try {
+        await response.body?.cancel()
+    } catch {
+        // Body disposal is best-effort; keep the caller-facing error fixed and safe.
+    }
+}
+
 const parseSaxoActivityTime = (activity: SaxoOrderActivity): Date | undefined => {
     const rawTime = activity.ActivityTime ?? activity.ExecutionTime ?? activity.UtcTime
     if (!rawTime) return undefined
@@ -775,6 +783,7 @@ export class SaxoClient {
         })
 
         if (!response.ok) {
+            await cancelResponseBody(response)
             throw new Error(`Failed to refresh Saxo token (HTTP ${response.status})`)
         }
 
@@ -813,6 +822,7 @@ export class SaxoClient {
         })
 
         if (!response.ok) {
+            await cancelResponseBody(response)
             throw new Error(`Failed to exchange Saxo code (HTTP ${response.status})`)
         }
 

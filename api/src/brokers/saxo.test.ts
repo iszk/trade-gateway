@@ -160,16 +160,25 @@ test('SaxoClient.exchangeCodeForToken は token endpoint の raw response body �
         'oauth-body-refresh-token',
         Buffer.alloc(32, 29).toString('base64'),
     ]
+    let bodyCancelled = false
+    const responseBody = new ReadableStream({
+        start: (controller) => {
+            controller.enqueue(Buffer.from(JSON.stringify({
+                access_token: sensitiveValues[0],
+                refresh_token: sensitiveValues[1],
+                diagnostic: sensitiveValues[2],
+            })))
+        },
+        cancel: () => {
+            bodyCancelled = true
+        },
+    })
     const client = new SaxoClient({
         appKey: 'test-key',
         appSecret: 'test-secret',
         redirectUri: 'http://localhost/callback',
         authBaseUrl: 'https://auth.example.com',
-        fetchImpl: async () => new Response(JSON.stringify({
-            access_token: sensitiveValues[0],
-            refresh_token: sensitiveValues[1],
-            diagnostic: sensitiveValues[2],
-        }), { status: 401 }),
+        fetchImpl: async () => new Response(responseBody, { status: 401 }),
     })
 
     await assert.rejects(
@@ -183,6 +192,7 @@ test('SaxoClient.exchangeCodeForToken は token endpoint の raw response body �
             return true
         },
     )
+    assert.equal(bodyCancelled, true)
 })
 
 test('SaxoClient.refreshAccessToken は token endpoint の raw response body を Error に含めない', async () => {
@@ -191,15 +201,25 @@ test('SaxoClient.refreshAccessToken は token endpoint の raw response body を
         'refresh-body-refresh-token',
         Buffer.alloc(32, 31).toString('base64'),
     ]
+    let bodyCancelAttempted = false
+    const responseBody = new ReadableStream({
+        start: (controller) => {
+            controller.enqueue(Buffer.from(JSON.stringify({
+                access_token: sensitiveValues[0],
+                refresh_token: sensitiveValues[1],
+                diagnostic: sensitiveValues[2],
+            })))
+        },
+        cancel: () => {
+            bodyCancelAttempted = true
+            throw new Error(`cancel failed: ${sensitiveValues.join(' ')}`)
+        },
+    })
     const client = new SaxoClient({
         appKey: 'test-key',
         appSecret: 'test-secret',
         authBaseUrl: 'https://auth.example.com',
-        fetchImpl: async () => new Response(JSON.stringify({
-            access_token: sensitiveValues[0],
-            refresh_token: sensitiveValues[1],
-            diagnostic: sensitiveValues[2],
-        }), { status: 503 }),
+        fetchImpl: async () => new Response(responseBody, { status: 503 }),
     })
 
     await assert.rejects(
@@ -213,6 +233,7 @@ test('SaxoClient.refreshAccessToken は token endpoint の raw response body を
             return true
         },
     )
+    assert.equal(bodyCancelAttempted, true)
 })
 
 test('SaxoClient.getValidAccessToken refreshes if expired', async () => {

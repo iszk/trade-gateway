@@ -167,6 +167,7 @@ test('SaxoAuthStore.saveAuth の Firestore write failure ログに token と暗�
     const captured = stringifyCapturedLogs(entries)
     assert.equal(entries.length, 1)
     assert.equal(entries[0]?.obj.event, 'firestore:write_failed')
+    assert.equal(entries[0]?.obj.error_type, 'error')
     assert.equal('data' in (entries[0]?.obj ?? {}), false)
     assert.equal('error' in (entries[0]?.obj ?? {}), false)
     for (const secret of [accessToken, refreshToken, encryptionKey]) {
