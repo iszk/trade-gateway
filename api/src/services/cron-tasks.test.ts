@@ -56,6 +56,128 @@ test('executeTenMinutelyTask: orders_v2 の PENDING を EXECUTED に更新する
     assert.deepEqual(updatedOrders[0].executed_at, new Date('2026-01-01T00:00:00Z'))
 })
 
+test('executeTenMinutelyTask: entry の部分約定を PENDING のまま累積同期し、再取得では no-op にする', async () => {
+    const createdAt = new Date('2026-01-01T00:00:00Z')
+    const partialAt = new Date('2026-01-01T00:05:00Z')
+    const fullAt = new Date('2026-01-01T00:10:00Z')
+    const partialOrder: any = {
+        id: 'v2-entry-partial',
+        broker: 'bitflyer',
+        ticker: 'FX_BTC_JPY',
+        status: 'PENDING',
+        provider_order_ids: ['JRF-entry-partial'],
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        created_at: createdAt,
+        updated_at: createdAt,
+    }
+    const partialUpdates: any[] = []
+    const partialCtx = makeBaseCtx({
+        getPendingOrdersV2: async () => [partialOrder],
+        updateOrderV2: async (id, updates) => { partialUpdates.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            bitflyer: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: { price: 9800000, size: 0.004, executed_at: partialAt, commission: 0 },
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(partialCtx)
+
+    assert.deepEqual(partialUpdates, [{
+        id: 'v2-entry-partial',
+        executed_price: 9800000,
+        executed_size: 0.004,
+        executed_at: partialAt,
+        execution_costs: { commission: 0 },
+    }])
+
+    const fullOrder = {
+        ...partialOrder,
+        executed_size: 0.004,
+        executed_price: 9800000,
+        executed_at: partialAt,
+        execution_costs: { commission: 0 },
+    }
+    const fullUpdates: any[] = []
+    const fullCtx = makeBaseCtx({
+        getPendingOrdersV2: async () => [fullOrder],
+        updateOrderV2: async (id, updates) => { fullUpdates.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            bitflyer: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: { price: 9810000, size: 0.01, executed_at: fullAt, commission: -0.0001 },
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(fullCtx)
+
+    assert.deepEqual(fullUpdates, [{
+        id: 'v2-entry-partial',
+        status: 'EXECUTED',
+        executed_price: 9810000,
+        executed_size: 0.01,
+        executed_at: fullAt,
+        execution_costs: { commission: -0.0001 },
+    }])
+
+    const noOpUpdates: any[] = []
+    const noOpCtx = makeBaseCtx({
+        getPendingOrdersV2: async () => [{
+            ...fullOrder,
+            status: 'EXECUTED',
+            executed_size: 0.01,
+            executed_price: 9810000,
+            executed_at: fullAt,
+            execution_costs: { commission: -0.0001 },
+        }],
+        updateOrderV2: async (id, updates) => { noOpUpdates.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            bitflyer: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: { price: 9810000, size: 0.01, executed_at: fullAt, commission: -0.0001 },
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(noOpCtx)
+
+    assert.equal(noOpUpdates.length, 0)
+})
+
+test('executeTenMinutelyTask: entry の overfill は保存しない', async () => {
+    const updatedOrders: any[] = []
+    const ctx = makeBaseCtx({
+        getPendingOrdersV2: async () => [{
+            id: 'v2-entry-overfill',
+            broker: 'bitflyer',
+            ticker: 'FX_BTC_JPY',
+            status: 'PENDING',
+            provider_order_ids: ['JRF-entry-overfill'],
+            requested_size: 0.01,
+            executed_size: 0,
+            executed_price: null,
+            created_at: new Date('2026-01-01T00:00:00Z'),
+        } as any],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            bitflyer: {
+                getExecutionPriceForOrderV2: async () => ({ execution: { price: 9800000, size: 0.01000002, commission: 0 } }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(updatedOrders.length, 0)
+})
+
 test('executeTenMinutelyTask: PENDING の IFDOCO 親注文が EXECUTED になったとき exit_sync_status を MONITORING にする', async () => {
     const pendingOrder: any = {
         id: 'v2-pending-ifd-1',
@@ -259,13 +381,14 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         addOrderV2: async (o) => { addedOrders.push(o) },
         updateOrderV2: async (id, u) => { updatedOrders.push({ id, ...u }) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10500000, size: 0.004 } }) },
+            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10500000, size: 0.004, commission: 0 } }) },
         },
     })
     await executeTenMinutelyTask(ctx1)
     assert.equal(addedOrders.length, 1)
     assert.equal(addedOrders[0].id, 'v2-ifd-partial-exit')
     assert.equal(addedOrders[0].executed_size, 0.004)
+    assert.deepEqual(addedOrders[0].execution_costs, { commission: 0 })
     assert.deepEqual(addedOrders[0].executed_at, new Date('2026-01-01T00:01:00Z'))
     assert.equal('exit_sync_status' in addedOrders[0], false)
 
@@ -279,7 +402,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         addOrderV2: async (o) => { addedOrders2.push(o) },
         updateOrderV2: async (id, u) => { updatedOrders2.push({ id, ...u }) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10600000, size: 0.007 } }) },
+            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10600000, size: 0.007, commission: 0.0002 } }) },
         },
     })
     await executeTenMinutelyTask(ctx2)
@@ -287,7 +410,22 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
     assert.equal(updatedOrders2.length, 1)
     assert.equal(updatedOrders2[0].executed_size, 0.007)
     assert.equal(updatedOrders2[0].executed_price, 10600000)
+    assert.deepEqual(updatedOrders2[0].execution_costs, { commission: 0.0002 })
     assert.deepEqual(updatedOrders2[0].executed_at, new Date('2026-01-01T00:01:00Z'))
+
+    // ケース2.5: 同一 snapshot の再取得は no-op
+    const noOpUpdates: any[] = []
+    const noOpCtx = makeBaseCtx({
+        getActiveIfdOrdersV2: async () => [order],
+        getOrderV2: async (id) => id === 'v2-ifd-partial-exit' ? existingExit : null,
+        addOrderV2: async () => { },
+        updateOrderV2: async (id, u) => { noOpUpdates.push({ id, ...u }) },
+        closingExecutionFetchers: {
+            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10500000, size: 0.004, commission: 0 } }) },
+        },
+    })
+    await executeTenMinutelyTask(noOpCtx)
+    assert.equal(noOpUpdates.length, 0)
 
     // ケース3: full close で親注文の監視状態を COMPLETED にする
     const updatedOrders3: any[] = []
@@ -297,7 +435,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         addOrderV2: async () => { },
         updateOrderV2: async (id, u) => { updatedOrders3.push({ id, ...u }) },
         closingExecutionFetchers: {
-            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10700000, size: 0.01 } }) },
+            bitflyer: { getClosingExecutionForOrderV2: async () => ({ execution: { price: 10700000, size: 0.01, commission: 0.0003 } }) },
         },
     })
     await executeTenMinutelyTask(ctx3)
@@ -307,6 +445,7 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
         executed_size: 0.01,
         executed_price: 10700000,
         executed_at: new Date('2026-01-01T00:01:00Z'),
+        execution_costs: { commission: 0.0003 },
     })
     assert.deepEqual(updatedOrders3[1], {
         id: 'v2-ifd-partial',
@@ -413,6 +552,7 @@ test('executeTenMinutelyTask: IFDOCO の close metadata 解決結果を親 order
     assert.deepEqual(updatedOrders[1], { id: 'v2-ifd-meta', exit_sync_status: 'COMPLETED' })
     assert.equal(addedOrders.length, 1)
     assert.deepEqual(addedOrders[0].executed_at, new Date('2026-01-01T00:30:00Z'))
+    assert.equal('execution_costs' in addedOrders[0], false)
 })
 
 test('executeTenMinutelyTask: Saxo の closingExecutionFetcher で exit レコードを作成する', async () => {

@@ -869,6 +869,132 @@ test('BitflyerClient.getExecutionPriceForOrderV2 rounds split execution size tot
     assert.deepEqual(result.execution, { price: expectedPrice, size: 1, executed_at: new Date('2026-01-01T00:05:00.000Z') })
 })
 
+test('BitflyerClient.getExecutionPriceForOrderV2 preserves known zero commission', async () => {
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response(JSON.stringify([
+            {
+                id: 350,
+                child_order_acceptance_id: 'JRF-child-commission-zero',
+                price: 9700000,
+                size: 0.01,
+                commission: 0,
+                exec_date: '2026-01-01T00:05:00.000Z',
+            },
+        ]), { status: 200, headers: { 'content-type': 'application/json' } }),
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'v2-entry-commission-zero',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'FX_BTC_JPY',
+        side: 'BUY',
+        order_type: 'MARKET',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-child-commission-zero'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.equal(result.execution?.commission, 0)
+})
+
+test('BitflyerClient.getExecutionPriceForOrderV2 sums signed commission across fills', async () => {
+    const executions = [
+        {
+            id: 361,
+            child_order_acceptance_id: 'JRF-child-commission-sum',
+            price: 9700000,
+            size: 0.004,
+            commission: -0.0002,
+            exec_date: '2026-01-01T00:05:00.000Z',
+        },
+        {
+            id: 360,
+            child_order_acceptance_id: 'JRF-child-commission-sum',
+            price: 9710000,
+            size: 0.006,
+            commission: 0.0001,
+            exec_date: '2026-01-01T00:06:00.000Z',
+        },
+    ]
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response(JSON.stringify(executions), { status: 200, headers: { 'content-type': 'application/json' } }),
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'v2-entry-commission-sum',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'FX_BTC_JPY',
+        side: 'BUY',
+        order_type: 'MARKET',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-child-commission-sum'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.equal(result.execution?.commission, -0.0001)
+    assert.equal(result.execution?.size, 0.01)
+})
+
+test('BitflyerClient.getExecutionPriceForOrderV2 leaves commission unknown when a fill commission is missing', async () => {
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response(JSON.stringify([
+            {
+                id: 370,
+                child_order_acceptance_id: 'JRF-child-commission-unknown',
+                price: 9700000,
+                size: 0.004,
+                commission: 0.0001,
+                exec_date: '2026-01-01T00:05:00.000Z',
+            },
+            {
+                id: 369,
+                child_order_acceptance_id: 'JRF-child-commission-unknown',
+                price: 9710000,
+                size: 0.006,
+                exec_date: '2026-01-01T00:06:00.000Z',
+            },
+        ]), { status: 200, headers: { 'content-type': 'application/json' } }),
+    })
+
+    const result = await client.getExecutionPriceForOrderV2({
+        id: 'v2-entry-commission-unknown',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'FX_BTC_JPY',
+        side: 'BUY',
+        order_type: 'MARKET',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-child-commission-unknown'],
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    })
+
+    assert.ok(result.execution)
+    assert.equal('commission' in result.execution, false)
+})
+
 test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when IFDOCO metadata is missing', async () => {
     const { logger, warnLogs } = createCapturingLogger()
     const requestedUrls: string[] = []
@@ -1139,6 +1265,7 @@ test('BitflyerClient.getClosingExecutionForOrderV2 rounds split execution size t
         child_order_acceptance_id: 'JRF-child-stop-split-size',
         price: 9500000 + index,
         size: 0.1,
+        commission: 0,
         exec_date: '2026-01-01T01:00:00.000Z',
     }))
     const expectedPrice = executions.reduce((sum, execution) => sum + execution.price * execution.size, 0)
@@ -1189,7 +1316,12 @@ test('BitflyerClient.getClosingExecutionForOrderV2 rounds split execution size t
 
     const result = await client.getClosingExecutionForOrderV2(order)
 
-    assert.deepEqual(result.execution, { price: expectedPrice, size: 1, executed_at: new Date('2026-01-01T01:00:00.000Z') })
+    assert.deepEqual(result.execution, {
+        price: expectedPrice,
+        size: 1,
+        executed_at: new Date('2026-01-01T01:00:00.000Z'),
+        commission: 0,
+    })
 })
 
 test('BitflyerClient.getClosingExecutionForOrderV2 no-ops when metadata is missing', async () => {

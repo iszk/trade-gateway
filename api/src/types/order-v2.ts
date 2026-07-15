@@ -7,6 +7,11 @@ type OrderTypeV2 = 'MARKET' | 'IFDOCO' | 'LIMIT' | 'STOP'
 
 type ExitSyncStatus = 'MONITORING' | 'COMPLETED'
 
+type OrderV2ExecutionCosts = {
+    /** Broker が報告した execution commission。未設定は unknown を表す */
+    commission?: number
+}
+
 type BaseOrderV2 = {
     /** 注文のユニークID（WebhookのeventIdなど） */
     id: string
@@ -24,6 +29,8 @@ type BaseOrderV2 = {
     requested_size: number
     /** 実約定数量 */
     executed_size: number
+    /** 約定に紐づく broker execution costs */
+    execution_costs?: OrderV2ExecutionCosts
     /** IFDOCO 親注文の exit 監視状態 */
     exit_sync_status?: ExitSyncStatus
     /** Broker側で発行された注文ID。IFD-OCO等の複数IDに対応するため配列 */
