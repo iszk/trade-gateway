@@ -305,7 +305,7 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
             if (!closing) continue
 
             const isExitCompleted = closing.size >= order.requested_size - EPSILON
-            const executedAt = resolveExecutedAt(order, closing)
+            const executedAt = closing.executed_at ?? existingExit?.executed_at ?? resolveExecutedAt(order, closing)
 
             const isSameSnapshot = existingExit !== null &&
                 areSameNumber(existingExit.executed_size, closing.size) &&

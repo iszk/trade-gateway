@@ -415,9 +415,13 @@ test('executeTenMinutelyTask: IFDOCO の決済約定を確認して exit レコ�
 
     // ケース2.5: 同一 snapshot の再取得は no-op
     const noOpUpdates: any[] = []
+    const noOpExistingExit = {
+        ...existingExit,
+        executed_at: new Date('2026-01-01T00:02:00Z'),
+    }
     const noOpCtx = makeBaseCtx({
         getActiveIfdOrdersV2: async () => [order],
-        getOrderV2: async (id) => id === 'v2-ifd-partial-exit' ? existingExit : null,
+        getOrderV2: async (id) => id === 'v2-ifd-partial-exit' ? noOpExistingExit : null,
         addOrderV2: async () => { },
         updateOrderV2: async (id, u) => { noOpUpdates.push({ id, ...u }) },
         closingExecutionFetchers: {
