@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util'
+
 import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
@@ -72,7 +74,7 @@ const hasSameCommission = (order: Pick<OrderV2, 'execution_costs'>, commission: 
 const areSameBrokerOrderMetadata = (
     left: BrokerOrderMetadata | undefined,
     right: BrokerOrderMetadata | undefined,
-): boolean => JSON.stringify(left) === JSON.stringify(right)
+): boolean => isDeepStrictEqual(left, right)
 
 const getOrderAgeMs = (order: Pick<OrderV2, 'created_at'>, nowMs: number): number => (
     nowMs - order.created_at.getTime()

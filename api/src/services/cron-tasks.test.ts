@@ -290,6 +290,61 @@ test('executeTenMinutelyTask: orders_v2 の entry metadata 解決結果を保存
     assert.equal(updatedOrders[0].status, undefined)
 })
 
+test('executeTenMinutelyTask: entry metadata はキー順だけが異なる場合に no-op にする', async () => {
+    const metadata: any = {
+        kind: 'bitflyer_parent_order_v1',
+        parent_order_acceptance_id: 'JRF-v2-pending-meta-order',
+        order_method: 'IFDOCO',
+        entry: {
+            expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+            resolved: { acceptance_id: 'JRF-entry-order' },
+        },
+        exits: [],
+    }
+    const reorderedMetadata: any = {
+        exits: [],
+        entry: {
+            resolved: { acceptance_id: 'JRF-entry-order' },
+            expected: { size: 0.01, condition_type: 'MARKET', side: 'BUY', role: 'ENTRY' },
+        },
+        order_method: 'IFDOCO',
+        parent_order_acceptance_id: 'JRF-v2-pending-meta-order',
+        kind: 'bitflyer_parent_order_v1',
+    }
+    const updatedOrders: any[] = []
+    const ctx = makeBaseCtx({
+        getPendingOrdersV2: async () => [{
+            id: 'v2-pending-meta-order',
+            strategy: 'MA',
+            broker: 'bitflyer',
+            ticker: 'FX_BTC_JPY',
+            side: 'BUY',
+            order_type: 'IFDOCO',
+            requested_size: 0.01,
+            executed_size: 0,
+            executed_price: null,
+            status: 'PENDING',
+            provider_order_ids: ['JRF-v2-pending-meta-order'],
+            broker_order_metadata: metadata,
+            created_at: new Date('2026-01-01T00:00:00Z'),
+            updated_at: new Date('2026-01-01T00:00:00Z'),
+        }],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            bitflyer: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: null,
+                    brokerOrderMetadata: reorderedMetadata,
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(updatedOrders.length, 0)
+})
+
 test('executeTenMinutelyTask: 古い Saxo PENDING 注文は約定同期をスキップする', async () => {
     const oldPendingOrder: any = {
         id: 'v2-saxo-stale-pending',
