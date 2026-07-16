@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util'
+
 import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
@@ -12,11 +14,13 @@ type PositionFetcherLike = {
 }
 
 const SAXO_PENDING_SYNC_MAX_AGE_MS = 24 * 60 * 60 * 1000
+const EPSILON = 0.00000001
 
 type ExecutionInfo = {
     price: number
     size: number
     executed_at?: Date
+    commission?: number
 }
 
 type OrdersV2ExecutionSyncResult = {
@@ -48,6 +52,29 @@ export type CronContext = {
 const resolveExecutedAt = (order: Pick<OrderV2, 'created_at' | 'executed_at'>, execution: ExecutionInfo): Date => (
     execution.executed_at ?? order.executed_at ?? order.created_at
 )
+
+const areSameNumber = (
+    left: number | null | undefined,
+    right: number | null | undefined,
+): boolean => {
+    if (left === null || left === undefined || right === null || right === undefined) return left === right
+    return Math.abs(left - right) < EPSILON
+}
+
+const areSameDate = (left: Date | undefined, right: Date): boolean => (
+    left !== undefined && left.getTime() === right.getTime()
+)
+
+const hasSameCommission = (order: Pick<OrderV2, 'execution_costs'>, commission: number | undefined): boolean => (
+    commission === undefined
+        ? order.execution_costs?.commission === undefined
+        : order.execution_costs?.commission !== undefined && areSameNumber(order.execution_costs.commission, commission)
+)
+
+const areSameBrokerOrderMetadata = (
+    left: BrokerOrderMetadata | undefined,
+    right: BrokerOrderMetadata | undefined,
+): boolean => isDeepStrictEqual(left, right)
 
 const getOrderAgeMs = (order: Pick<OrderV2, 'created_at'>, nowMs: number): number => (
     nowMs - order.created_at.getTime()
@@ -139,17 +166,48 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
             const syncResult = await fetcher.getExecutionPriceForOrderV2(order)
 
             const info = syncResult.execution
+            if (info !== null && info.size > order.requested_size + EPSILON) {
+                ctx.logger.warn(
+                    {
+                        event: 'cron:orders_v2_sync_invalid_size',
+                        orderId: order.id,
+                        requestedSize: order.requested_size,
+                        executionSize: info.size,
+                    },
+                    'execution size exceeded requested_size; skipping orders_v2 sync update',
+                )
+                continue
+            }
+
             if (info !== null || syncResult.brokerOrderMetadata !== undefined) {
                 const updates: Partial<OrderV2> = {}
-                if (syncResult.brokerOrderMetadata !== undefined) {
+                if (
+                    syncResult.brokerOrderMetadata !== undefined &&
+                    !areSameBrokerOrderMetadata(order.broker_order_metadata, syncResult.brokerOrderMetadata)
+                ) {
                     updates.broker_order_metadata = syncResult.brokerOrderMetadata
                 }
                 if (info !== null) {
-                    updates.status = 'EXECUTED'
-                    updates.executed_price = info.price
-                    updates.executed_size = info.size || order.requested_size
-                    updates.executed_at = resolveExecutedAt(order, info)
-                    if (order.order_type === 'IFDOCO' && order.exit_sync_status === undefined) {
+                    const isCompleted = info.size >= order.requested_size - EPSILON
+                    const executedAt = resolveExecutedAt(order, info)
+                    if (order.status !== (isCompleted ? 'EXECUTED' : 'PENDING')) {
+                        updates.status = isCompleted ? 'EXECUTED' : 'PENDING'
+                    }
+                    if (!areSameNumber(order.executed_price, info.price)) {
+                        updates.executed_price = info.price
+                    }
+                    if (!areSameNumber(order.executed_size, info.size)) {
+                        updates.executed_size = info.size
+                    }
+                    if (!areSameDate(order.executed_at, executedAt)) {
+                        updates.executed_at = executedAt
+                    }
+                    if (!hasSameCommission(order, info.commission)) {
+                        updates.execution_costs = info.commission === undefined
+                            ? {}
+                            : { commission: info.commission }
+                    }
+                    if (isCompleted && order.order_type === 'IFDOCO' && order.exit_sync_status === undefined) {
                         updates.exit_sync_status = 'MONITORING'
                     }
                 }
@@ -161,8 +219,16 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
 
             if (info !== null) {
                 ctx.logger.info(
-                    { event: 'cron:orders_v2_synced', broker: order.broker, orderId: order.id, price: info.price, size: info.size },
-                    'orders_v2 status updated to EXECUTED',
+                    {
+                        event: 'cron:orders_v2_synced',
+                        broker: order.broker,
+                        orderId: order.id,
+                        price: info.price,
+                        size: info.size,
+                    },
+                    info.size >= order.requested_size - EPSILON
+                        ? 'orders_v2 status updated to EXECUTED'
+                        : 'orders_v2 partial execution progress synchronized',
                 )
             } else {
                 ctx.logger.info(
@@ -184,7 +250,6 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
 }
 
 /** IFD/IFDOCO の子注文（決済）を同期して新しい orders_v2 レコードを作る */
-const EPSILON = 0.00000001
 
 const syncExecutionsForExecutedIfdOrders = async (ctx: {
     logger: Logger
@@ -215,16 +280,9 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
 
             const syncResult = await fetcher.getClosingExecutionForOrderV2(order)
 
-            if (syncResult.brokerOrderMetadata !== undefined) {
-                await ctx.updateOrderV2(order.id, {
-                    broker_order_metadata: syncResult.brokerOrderMetadata,
-                })
-            }
-
             const closing = syncResult.execution
-            if (!closing) continue
 
-            if (closing.size > order.requested_size + EPSILON) {
+            if (closing && closing.size > order.requested_size + EPSILON) {
                 ctx.logger.warn(
                     {
                         event: 'cron:orders_v2_exit_sync_invalid_size',
@@ -237,14 +295,32 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
                 continue
             }
 
-            // すでに最新の約定数量まで反映されている場合はスキップ
-            // (精度誤差を考慮してわずかな差は無視するか、厳密に不一致なら更新)
-            if (existingExit && Math.abs(existingExit.executed_size - closing.size) < EPSILON) {
-                continue
+            if (
+                syncResult.brokerOrderMetadata !== undefined &&
+                !areSameBrokerOrderMetadata(order.broker_order_metadata, syncResult.brokerOrderMetadata)
+            ) {
+                await ctx.updateOrderV2(order.id, {
+                    broker_order_metadata: syncResult.brokerOrderMetadata,
+                })
             }
 
+            if (!closing) continue
+
             const isExitCompleted = closing.size >= order.requested_size - EPSILON
-            const executedAt = resolveExecutedAt(order, closing)
+            const executedAt = closing.executed_at ?? existingExit?.executed_at ?? resolveExecutedAt(order, closing)
+
+            const isSameSnapshot = existingExit !== null &&
+                areSameNumber(existingExit.executed_size, closing.size) &&
+                areSameNumber(existingExit.executed_price, closing.price) &&
+                areSameDate(existingExit.executed_at, executedAt) &&
+                hasSameCommission(existingExit, closing.commission)
+
+            if (isSameSnapshot) {
+                if (isExitCompleted && order.exit_sync_status !== 'COMPLETED') {
+                    await ctx.updateOrderV2(order.id, { exit_sync_status: 'COMPLETED' })
+                }
+                continue
+            }
 
             if (!existingExit) {
                 // 新規作成
@@ -263,6 +339,9 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
                     provider_order_ids: [providerOrderId + ':closing'],
                     created_at: new Date(),
                     updated_at: new Date(),
+                    ...(closing.commission !== undefined
+                        ? { execution_costs: { commission: closing.commission } }
+                        : {}),
                 })
                 if (isExitCompleted) {
                     await ctx.updateOrderV2(order.id, { exit_sync_status: 'COMPLETED' })
@@ -273,14 +352,19 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
                 )
             } else {
                 // 更新（部分約定の進展）
-                await ctx.updateOrderV2(
-                    exitId,
-                    {
-                        executed_size: closing.size,
-                        executed_price: closing.price,
-                        executed_at: existingExit.executed_at ?? executedAt,
-                    },
-                )
+                const updates: Partial<OrderV2> = {
+                    executed_size: closing.size,
+                    executed_price: closing.price,
+                    executed_at: executedAt,
+                }
+                if (!hasSameCommission(existingExit, closing.commission)) {
+                    updates.execution_costs = closing.commission === undefined
+                        ? {}
+                        : { commission: closing.commission }
+                }
+                if (Object.keys(updates).length > 0) {
+                    await ctx.updateOrderV2(exitId, updates)
+                }
                 if (isExitCompleted) {
                     await ctx.updateOrderV2(order.id, { exit_sync_status: 'COMPLETED' })
                 }

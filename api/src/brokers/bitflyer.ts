@@ -63,6 +63,7 @@ type BitflyerExecutionEntry = {
     child_order_acceptance_id: string
     price: number
     size: number
+    commission?: number
     exec_date?: string
 }
 
@@ -123,6 +124,16 @@ const resolveProductCode = (ticker: string): string => ticker
 
 const roundExecutionSize = (size: number): number => Math.round(size * EXECUTION_SIZE_SCALE) / EXECUTION_SIZE_SCALE
 const sumExecutionSize = (execs: BitflyerExecutionEntry[]): number => execs.reduce((sum, e) => sum + e.size, 0)
+const sumExecutionCommission = (execs: BitflyerExecutionEntry[]): number | undefined => {
+    let total = 0
+    for (const execution of execs) {
+        const commission = execution.commission
+        if (commission === undefined || !Number.isFinite(commission)) return undefined
+        total += commission
+        if (!Number.isFinite(total)) return undefined
+    }
+    return total
+}
 
 const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): number | null => {
     if (execs.length === 0) return null
@@ -131,6 +142,24 @@ const weightedAvgExecs = (execs: BitflyerExecutionEntry[]): number | null => {
     return totalValue / totalSize
 }
 const totalSizeExecs = (execs: BitflyerExecutionEntry[]): number => roundExecutionSize(sumExecutionSize(execs))
+
+const aggregateExecutionInfo = (execs: BitflyerExecutionEntry[]): {
+    price: number
+    size: number
+    executed_at?: Date
+    commission?: number
+} | null => {
+    const price = weightedAvgExecs(execs)
+    if (price === null) return null
+
+    const commission = sumExecutionCommission(execs)
+    return {
+        price,
+        size: totalSizeExecs(execs),
+        executed_at: extractLatestExecutionAt(execs),
+        ...(commission !== undefined ? { commission } : {}),
+    }
+}
 
 const areSameNumber = (left: number | undefined, right: number | undefined): boolean => {
     if (left === undefined || right === undefined) return left === right
@@ -201,7 +230,7 @@ const buildParentOrderMetadata = (
 })
 
 type OrdersV2ExecutionSyncResult = {
-    execution: { price: number, size: number, executed_at?: Date } | null
+    execution: { price: number, size: number, executed_at?: Date, commission?: number } | null
     brokerOrderMetadata?: BitflyerParentOrderMetadata
 }
 
@@ -681,7 +710,7 @@ export class BitflyerClient {
     private async fetchExecutionInfoByChildAcceptanceIdDirect(
         childAcceptanceId: string,
         ticker: string,
-    ): Promise<{ price: number, size: number, executed_at?: Date } | null> {
+    ): Promise<{ price: number, size: number, executed_at?: Date, commission?: number } | null> {
         const productCode = resolveProductCode(ticker)
         const childExecs = await this.callApi<BitflyerExecutionEntry[]>(
             'GET',
@@ -689,15 +718,13 @@ export class BitflyerClient {
         )
         if (childExecs.length === 0) return null
 
-        const price = weightedAvgExecs(childExecs)
-        const size = totalSizeExecs(childExecs)
-        return price === null ? null : { price, size, executed_at: extractLatestExecutionAt(childExecs) }
+        return aggregateExecutionInfo(childExecs)
     }
 
     private async fetchExecutionInfoByChildAcceptanceId(
         childAcceptanceId: string,
         ticker: string,
-    ): Promise<{ price: number, size: number, executed_at?: Date } | null> {
+    ): Promise<{ price: number, size: number, executed_at?: Date, commission?: number } | null> {
         const productCode = resolveProductCode(ticker)
         const batch = await this.fetchExecutionsByProductCode(productCode)
         const childExecs = batch.executionsByAcceptanceId.get(childAcceptanceId) ?? []
@@ -718,9 +745,7 @@ export class BitflyerClient {
 
         if (childExecs.length === 0) return null
 
-        const price = weightedAvgExecs(childExecs)
-        const size = totalSizeExecs(childExecs)
-        return price === null ? null : { price, size, executed_at: extractLatestExecutionAt(childExecs) }
+        return aggregateExecutionInfo(childExecs)
     }
 
     async getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {
@@ -817,6 +842,8 @@ export class BitflyerClient {
             let totalSize = 0
             let totalValue = 0
             let latestExecutedAt: Date | undefined
+            let totalCommission = 0
+            let commissionKnown = true
 
             for (const exit of resolvedMetadata.exits) {
                 const acceptanceId = exit.resolved.acceptance_id
@@ -827,6 +854,11 @@ export class BitflyerClient {
 
                 totalSize += execution.size
                 totalValue += execution.price * execution.size
+                if (execution.commission === undefined) {
+                    commissionKnown = false
+                } else {
+                    totalCommission += execution.commission
+                }
                 if (execution.executed_at && (!latestExecutedAt || execution.executed_at.getTime() > latestExecutedAt.getTime())) {
                     latestExecutedAt = execution.executed_at
                 }
@@ -835,7 +867,14 @@ export class BitflyerClient {
             const size = roundExecutionSize(totalSize)
 
             return {
-                execution: totalSize > 0 ? { price: totalValue / totalSize, size, executed_at: latestExecutedAt } : null,
+                execution: totalSize > 0
+                    ? {
+                        price: totalValue / totalSize,
+                        size,
+                        executed_at: latestExecutedAt,
+                        ...(commissionKnown ? { commission: totalCommission } : {}),
+                    }
+                    : null,
                 brokerOrderMetadata: resolvedMetadata,
             }
         } catch (error) {
