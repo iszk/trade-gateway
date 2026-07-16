@@ -53,7 +53,7 @@ const getOrderFillStatus = (order: OrderV2): OrderFillStatus => {
     return 'PARTIALLY_FILLED'
 }
 
-export const toOrderUpdate = (order: OrderV2): OrderUpdate => ({
+const toOrderUpdate = (order: OrderV2): OrderUpdate => ({
     id: order.id,
     strategy: order.strategy,
     broker: order.broker,
