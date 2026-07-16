@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { executeTenMinutelyTask } from './cron-tasks.js'
+import { applyOrderExecutionSyncResult, executeTenMinutelyTask } from './cron-tasks.js'
 import type { CronContext } from './cron-tasks.js'
 
 const makeLogger = () => {
@@ -176,6 +176,106 @@ test('executeTenMinutelyTask: entry の overfill は保存しない', async () =
     await executeTenMinutelyTask(ctx)
 
     assert.equal(updatedOrders.length, 0)
+})
+
+const makeApplyOrder = (overrides: Record<string, unknown> = {}): any => ({
+    id: 'v2-apply-order',
+    strategy: 'test',
+    broker: 'saxo',
+    ticker: 'FxSpot:21',
+    side: 'BUY',
+    order_type: 'MARKET',
+    requested_size: 1,
+    executed_size: 0,
+    executed_price: null,
+    status: 'PENDING',
+    provider_order_ids: ['ORD-apply-order'],
+    created_at: new Date('2026-01-01T00:00:00Z'),
+    updated_at: new Date('2026-01-01T00:00:00Z'),
+    ...overrides,
+})
+
+test('applyOrderExecutionSyncResult: terminal status と execution snapshot を優先順位どおり適用する', async () => {
+    const cases = [
+        {
+            name: '全量約定',
+            result: { execution: { price: 101, size: 1, executed_at: new Date('2026-01-01T00:01:00Z') } },
+            expected: { status: 'EXECUTED', executed_price: 101, executed_size: 1, executed_at: new Date('2026-01-01T00:01:00Z') },
+        },
+        {
+            name: '部分約定',
+            result: { execution: { price: 100, size: 0.4, commission: 0 } },
+            expected: { executed_price: 100, executed_size: 0.4, executed_at: new Date('2026-01-01T00:00:00Z'), execution_costs: { commission: 0 } },
+        },
+        {
+            name: '部分約定後の取消',
+            result: { execution: { price: 100, size: 0.4 }, terminalStatus: 'CANCELED' as const },
+            expected: { status: 'CANCELED', executed_price: 100, executed_size: 0.4, executed_at: new Date('2026-01-01T00:00:00Z') },
+        },
+        {
+            name: '未約定取消',
+            result: { execution: null, terminalStatus: 'CANCELED' as const },
+            expected: { status: 'CANCELED' },
+        },
+        {
+            name: '失効',
+            result: { execution: null, terminalStatus: 'CANCELED' as const },
+            expected: { status: 'CANCELED' },
+        },
+        {
+            name: '発注拒否',
+            result: { execution: null, terminalStatus: 'FAILED' as const },
+            expected: { status: 'FAILED' },
+        },
+        {
+            name: 'cancel rejected は継続',
+            result: { execution: null },
+            expected: {},
+        },
+        {
+            name: 'DoneForDay は継続',
+            result: { execution: null },
+            expected: {},
+        },
+    ]
+
+    for (const testCase of cases) {
+        const updates: any[] = []
+        const changed = await applyOrderExecutionSyncResult(
+            makeApplyOrder(),
+            testCase.result,
+            async (id, update) => { updates.push({ id, ...update }) },
+        )
+        assert.equal(changed, Object.keys(testCase.expected).length > 0, testCase.name)
+        assert.deepEqual(updates[0], Object.keys(testCase.expected).length > 0
+            ? { id: 'v2-apply-order', ...testCase.expected }
+            : undefined, testCase.name)
+    }
+})
+
+test('applyOrderExecutionSyncResult: 同一 snapshot と overfill は no-op にする', async () => {
+    const order = makeApplyOrder({
+        status: 'EXECUTED',
+        executed_size: 1,
+        executed_price: 101,
+        executed_at: new Date('2026-01-01T00:01:00Z'),
+    })
+    const updates: any[] = []
+
+    const unchanged = await applyOrderExecutionSyncResult(
+        order,
+        { execution: { price: 101, size: 1, executed_at: new Date('2026-01-01T00:01:00Z') } },
+        async (id, update) => { updates.push({ id, ...update }) },
+    )
+    const overfilled = await applyOrderExecutionSyncResult(
+        makeApplyOrder(),
+        { execution: { price: 101, size: 1.00000002 } },
+        async (id, update) => { updates.push({ id, ...update }) },
+    )
+
+    assert.equal(unchanged, false)
+    assert.equal(overfilled, false)
+    assert.equal(updates.length, 0)
 })
 
 test('executeTenMinutelyTask: PENDING の IFDOCO 親注文が EXECUTED になったとき exit_sync_status を MONITORING にする', async () => {

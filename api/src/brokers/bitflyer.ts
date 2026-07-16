@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto'
 
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { BitflyerParentOrderMetadata } from '../types/broker-order-metadata.js'
+import type { OrderExecutionSyncResult } from '../types/execution-sync.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { Position } from '../types/position.js'
 import { defaultLogger, type Logger } from '../logger.js'
@@ -229,10 +230,7 @@ const buildParentOrderMetadata = (
     exits,
 })
 
-type OrdersV2ExecutionSyncResult = {
-    execution: { price: number, size: number, executed_at?: Date, commission?: number } | null
-    brokerOrderMetadata?: BitflyerParentOrderMetadata
-}
+type OrdersV2ExecutionSyncResult = OrderExecutionSyncResult
 
 type BitflyerExecutionsBatch = {
     fetchedAtMs: number

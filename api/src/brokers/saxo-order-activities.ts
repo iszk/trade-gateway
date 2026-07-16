@@ -233,49 +233,57 @@ export const aggregateSaxoExecution = (
     return { price: latestPrice, size: cumulativeSize, executed_at: latestExecutedAt }
 }
 
-const SAXO_BROKER_STATE_PRIORITY: Record<SaxoOrderActivityResolution['brokerState'], number> = {
-    UNRESOLVED: 0,
-    NON_TERMINAL: 1,
-    PARTIALLY_FILLED: 2,
-    CANCELED: 3,
-    EXPIRED: 3,
-    PLACEMENT_REJECTED: 3,
-    FILLED: 4,
-}
-
 const resolveSaxoBrokerState = (
     activities: SaxoOrderActivity[],
 ): SaxoOrderActivityResolution['brokerState'] => {
-    let state: SaxoOrderActivityResolution['brokerState'] = 'UNRESOLVED'
-    const updateState = (nextState: SaxoOrderActivityResolution['brokerState']): void => {
-        if (SAXO_BROKER_STATE_PRIORITY[nextState] >= SAXO_BROKER_STATE_PRIORITY[state]) {
-            state = nextState
-        }
-    }
-
+    let hasConfirmedFinalFill = false
+    let hasConfirmedFill = false
+    let hasConfirmedCancel = false
+    let hasConfirmedExpire = false
+    let hasConfirmedPlacement = false
+    let hasPlacementRejected = false
+    let hasNonTerminal = false
     for (const activity of normalizeSaxoOrderActivities(activities)) {
         const { Status: status, SubStatus: subStatus } = activity
-        if (subStatus === 'Rejected') {
-            if (status === 'Placed') updateState('PLACEMENT_REJECTED')
-            continue
-        }
-        if (status === 'FinalFill' && (subStatus === undefined || subStatus === 'Confirmed')) {
-            updateState('FILLED')
-        } else if (status === 'Fill' && (subStatus === undefined || subStatus === 'Confirmed')) {
-            updateState('PARTIALLY_FILLED')
+        const isConfirmed = subStatus === undefined || subStatus === 'Confirmed'
+        if (status === 'FinalFill' && isConfirmed) {
+            hasConfirmedFinalFill = true
+        } else if (status === 'Fill' && isConfirmed) {
+            hasConfirmedFill = true
         } else if (status === 'Cancelled' && subStatus === 'Confirmed') {
-            updateState('CANCELED')
+            hasConfirmedCancel = true
         } else if (status === 'Expired' && subStatus === 'Confirmed') {
-            updateState('EXPIRED')
+            hasConfirmedExpire = true
+        } else if (status === 'Placed' && subStatus === 'Rejected') {
+            hasPlacementRejected = true
+        } else if (status === 'Placed' && subStatus === 'Confirmed') {
+            hasConfirmedPlacement = true
         } else if (
             (status === 'Placed' || status === 'Changed' || status === 'Working' || status === 'DoneForDay') &&
             (subStatus === 'Confirmed' || subStatus === 'Requested' || subStatus === 'WaitCondition')
         ) {
-            updateState('NON_TERMINAL')
+            hasNonTerminal = true
         }
     }
 
-    return state
+    if (hasConfirmedFinalFill) {
+        if (hasConfirmedCancel && !hasConfirmedExpire) return 'CANCELED'
+        if (hasConfirmedExpire && !hasConfirmedCancel) return 'EXPIRED'
+        if (hasConfirmedCancel && hasConfirmedExpire) return 'UNRESOLVED'
+        return 'FILLED'
+    }
+    if (hasConfirmedFill) {
+        if (hasConfirmedCancel && !hasConfirmedExpire) return 'CANCELED'
+        if (hasConfirmedExpire && !hasConfirmedCancel) return 'EXPIRED'
+        if (!hasConfirmedCancel && !hasConfirmedExpire) return 'PARTIALLY_FILLED'
+        return 'UNRESOLVED'
+    }
+    if (hasConfirmedCancel && !hasConfirmedExpire && !hasPlacementRejected) return 'CANCELED'
+    if (hasConfirmedExpire && !hasConfirmedCancel && !hasPlacementRejected) return 'EXPIRED'
+    if ((hasConfirmedCancel || hasConfirmedExpire) && hasPlacementRejected) return 'UNRESOLVED'
+    if (hasPlacementRejected && !hasConfirmedPlacement) return 'PLACEMENT_REJECTED'
+    if (hasNonTerminal || hasConfirmedPlacement) return 'NON_TERMINAL'
+    return 'UNRESOLVED'
 }
 
 export const resolveSaxoOrderActivities = (
