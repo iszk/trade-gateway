@@ -110,6 +110,29 @@ test('resolveSaxoOrderActivities は final fill 後の rejected cancel を無視
     assert.equal(resolution.brokerState, 'FILLED')
 })
 
+test('resolveSaxoOrderActivities は時刻欠落 activity で FILLED を downgrade しない', () => {
+    const resolution = resolveSaxoOrderActivities([
+        fill({ LogId: '1', Status: 'FinalFill' }),
+        fill({
+            LogId: '2',
+            Status: 'Placed',
+            ActivityTime: undefined,
+            ExecutionPrice: undefined,
+            FillAmount: undefined,
+        }),
+        fill({
+            LogId: '3',
+            Status: 'Placed',
+            SubStatus: 'Rejected',
+            ActivityTime: undefined,
+            ExecutionPrice: undefined,
+            FillAmount: undefined,
+        }),
+    ])
+
+    assert.equal(resolution.brokerState, 'FILLED')
+})
+
 test('resolveSaxoOrderActivities は confirmed でない fill を約定へ集約しない', () => {
     assert.equal(resolveSaxoOrderActivities([fill({ SubStatus: 'Requested' })]).execution, null)
     assert.equal(resolveSaxoOrderActivities([fill({ SubStatus: 'Rejected' })]).execution, null)

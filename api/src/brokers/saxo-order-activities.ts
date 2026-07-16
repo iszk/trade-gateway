@@ -233,30 +233,45 @@ export const aggregateSaxoExecution = (
     return { price: latestPrice, size: cumulativeSize, executed_at: latestExecutedAt }
 }
 
+const SAXO_BROKER_STATE_PRIORITY: Record<SaxoOrderActivityResolution['brokerState'], number> = {
+    UNRESOLVED: 0,
+    NON_TERMINAL: 1,
+    PARTIALLY_FILLED: 2,
+    CANCELED: 3,
+    EXPIRED: 3,
+    PLACEMENT_REJECTED: 3,
+    FILLED: 4,
+}
+
 const resolveSaxoBrokerState = (
     activities: SaxoOrderActivity[],
 ): SaxoOrderActivityResolution['brokerState'] => {
     let state: SaxoOrderActivityResolution['brokerState'] = 'UNRESOLVED'
+    const updateState = (nextState: SaxoOrderActivityResolution['brokerState']): void => {
+        if (SAXO_BROKER_STATE_PRIORITY[nextState] >= SAXO_BROKER_STATE_PRIORITY[state]) {
+            state = nextState
+        }
+    }
 
     for (const activity of normalizeSaxoOrderActivities(activities)) {
         const { Status: status, SubStatus: subStatus } = activity
         if (subStatus === 'Rejected') {
-            if (status === 'Placed') state = 'PLACEMENT_REJECTED'
+            if (status === 'Placed') updateState('PLACEMENT_REJECTED')
             continue
         }
         if (status === 'FinalFill' && (subStatus === undefined || subStatus === 'Confirmed')) {
-            state = 'FILLED'
+            updateState('FILLED')
         } else if (status === 'Fill' && (subStatus === undefined || subStatus === 'Confirmed')) {
-            state = 'PARTIALLY_FILLED'
+            updateState('PARTIALLY_FILLED')
         } else if (status === 'Cancelled' && subStatus === 'Confirmed') {
-            state = 'CANCELED'
+            updateState('CANCELED')
         } else if (status === 'Expired' && subStatus === 'Confirmed') {
-            state = 'EXPIRED'
+            updateState('EXPIRED')
         } else if (
             (status === 'Placed' || status === 'Changed' || status === 'Working' || status === 'DoneForDay') &&
             (subStatus === 'Confirmed' || subStatus === 'Requested' || subStatus === 'WaitCondition')
         ) {
-            state = 'NON_TERMINAL'
+            updateState('NON_TERMINAL')
         }
     }
 
