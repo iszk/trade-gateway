@@ -3,6 +3,7 @@ import test from 'node:test'
 import type { Firestore } from 'firebase-admin/firestore'
 
 import type { SaxoAuthStore } from './saxo-auth-store.js'
+import type { OrderV2 } from '../types/order-v2.js'
 import { SaxoClient as ProductionSaxoClient } from './saxo.js'
 
 const TEST_TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64')
@@ -78,6 +79,31 @@ const stringifyCapturedLogs = (
 ): string => JSON.stringify(logs, (_key, value) => value instanceof Error
     ? { name: value.name, message: value.message }
     : value)
+
+const makePendingSaxoOrder = (orderId: string): OrderV2 => ({
+    id: `evt-${orderId}`,
+    strategy: 'test',
+    broker: 'saxo',
+    ticker: 'FxSpot:21',
+    side: 'BUY',
+    order_type: 'MARKET',
+    requested_size: 1,
+    executed_size: 0,
+    executed_price: null,
+    status: 'PENDING',
+    provider_order_ids: [orderId],
+    created_at: new Date('2026-01-01T00:00:00Z'),
+    updated_at: new Date('2026-01-01T00:00:00Z'),
+    broker_order_metadata: {
+        kind: 'saxo_order_v1',
+        order_id: orderId,
+        entry: {
+            expected: { side: 'BUY', order_type: 'Market', size: 1 },
+            resolved: { order_id: orderId },
+        },
+        exits: [],
+    },
+})
 
 test('SaxoClient.getLoginUrl returns correct URL', () => {
     const client = new SaxoClient({
@@ -1795,6 +1821,128 @@ test('SaxoClient.getClosingExecutionForOrderV2 returns null when exit fill size 
     })
 
     assert.equal(result.execution, null)
+})
+
+test('SaxoClient.getExecutionPriceForOrderV2 saves the final cursor only after all pages complete', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{
+                accountKey: 'test-account',
+                clientKey: 'test-client',
+                legalAssetTypes: ['FxSpot'],
+                currency: 'USD',
+                displayName: 'Primary',
+            }],
+        },
+    })
+
+    const requestedUrls: string[] = []
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            requestedUrls.push(String(url))
+            if (requestedUrls.length === 1) {
+                return Response.json({
+                    Data: [{ LogId: '1', OrderId: 'ORD-paged', Status: 'Fill', ExecutionPrice: 100, FillAmount: 1 }],
+                    __next: '/page-2',
+                    __nextPoll: '/poll-1',
+                })
+            }
+            return Response.json({
+                Data: [{ LogId: '2', OrderId: 'ORD-paged', Status: 'FinalFill', ExecutionPrice: 110, FillAmount: 1 }],
+                __nextPoll: '/poll-2',
+            })
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(makePendingSaxoOrder('ORD-paged'))
+
+    assert.equal(new URL(requestedUrls[0] as string).searchParams.get('$top'), '500')
+    assert.equal(requestedUrls[1], 'https://example.com/page-2')
+    assert.deepEqual(result.execution, { price: 105, size: 2, executed_at: undefined })
+    const state = db._getStoredData()['cron_metadata/saxo_orderactivities_poll_state'] as Record<string, unknown>
+    assert.equal(state.next_poll_url, '/poll-2')
+    assert.equal(typeof state.last_poll_at, 'string')
+})
+
+test('SaxoClient.getExecutionPriceForOrderV2 discards partial fills and preserves cursor on intermediate failure', async () => {
+    const initialState = {
+        last_poll_at: new Date().toISOString(),
+        next_poll_url: '/existing-poll',
+    }
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+        'cron_metadata/saxo_orderactivities_poll_state': initialState,
+    })
+
+    let fetchCount = 0
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            fetchCount += 1
+            if (fetchCount === 1) {
+                return Response.json({
+                    Data: [{ LogId: '1', OrderId: 'ORD-http-failure', Status: 'FinalFill', ExecutionPrice: 100, FillAmount: 1 }],
+                    __next: '/page-2',
+                    __nextPoll: '/new-poll',
+                })
+            }
+            return new Response('failed', { status: 503 })
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(makePendingSaxoOrder('ORD-http-failure'))
+
+    assert.equal(fetchCount, 2)
+    assert.equal(result.execution, null)
+    assert.deepEqual(db._getStoredData()['cron_metadata/saxo_orderactivities_poll_state'], initialState)
+})
+
+test('SaxoClient.getExecutionPriceForOrderV2 discards partial fills and preserves cursor at page cap', async () => {
+    const initialState = {
+        last_poll_at: new Date().toISOString(),
+        next_poll_url: '/existing-poll',
+    }
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+        'cron_metadata/saxo_orderactivities_poll_state': initialState,
+    })
+
+    let fetchCount = 0
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            fetchCount += 1
+            return Response.json({
+                Data: [{ LogId: String(fetchCount), OrderId: 'ORD-page-cap', Status: 'FinalFill', ExecutionPrice: 100, FillAmount: 1 }],
+                __next: `/page-${fetchCount + 1}`,
+                __nextPoll: '/new-poll',
+            })
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(makePendingSaxoOrder('ORD-page-cap'))
+
+    assert.equal(fetchCount, 20)
+    assert.equal(result.execution, null)
+    assert.deepEqual(db._getStoredData()['cron_metadata/saxo_orderactivities_poll_state'], initialState)
 })
 
 test('SaxoClient.getExecutionPriceForOrderV2 ignores stale next poll cursor after 30 minutes', async () => {

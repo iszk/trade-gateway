@@ -18,6 +18,15 @@ import {
     type SaxoAccountInfo,
     type SaxoAuthData,
 } from './saxo-auth-store.js'
+import {
+    aggregateSaxoExecution,
+    fetchSaxoOrderActivitiesPages,
+    SAXO_ORDER_ACTIVITIES_MAX_PAGES,
+    SAXO_ORDER_ACTIVITIES_PAGE_SIZE,
+    summarizeSaxoActivities,
+    type SaxoOrderActivity,
+    type SaxoOrderActivitiesPageResult,
+} from './saxo-order-activities.js'
 
 type SaxoClientOptions = {
     appKey?: string
@@ -102,27 +111,6 @@ type SaxoOrderResponse = {
     RelatedOrders?: Array<{ OrderId?: string }>
 }
 
-type SaxoOrderActivity = {
-    LogId: string
-    OrderId: string
-    Status: string
-    ExternalReference?: string
-    Amount?: number
-    FillAmount?: number
-    FilledAmount?: number
-    ExecutionPrice?: number
-    AveragePrice?: number
-    ActivityTime?: string
-    ExecutionTime?: string
-    UtcTime?: string
-}
-
-type SaxoOrderActivitiesResponse = {
-    Data: SaxoOrderActivity[]
-    __next?: string
-    __nextPoll?: string
-}
-
 type SaxoOrderActivitiesPollState = {
     last_poll_at?: string
     next_poll_url?: string
@@ -134,16 +122,6 @@ const cancelResponseBody = async (response: Response): Promise<void> => {
     } catch {
         // Body disposal is best-effort; keep the caller-facing error fixed and safe.
     }
-}
-
-const parseSaxoActivityTime = (activity: SaxoOrderActivity): Date | undefined => {
-    const rawTime = activity.ActivityTime ?? activity.ExecutionTime ?? activity.UtcTime
-    if (!rawTime) return undefined
-
-    const parsedMs = Date.parse(rawTime)
-    if (Number.isNaN(parsedMs)) return undefined
-
-    return new Date(parsedMs)
 }
 
 export type SaxoInstrument = {
@@ -185,7 +163,6 @@ const SAXO_AUDIT_INITIAL_LOOKBACK_MS = 48 * 60 * 60 * 1000
 const SAXO_AUDIT_OVERLAP_MS = 30 * 60 * 1000
 const SAXO_AUDIT_CURSOR_MAX_IDLE_MS = 30 * 60 * 1000
 const SAXO_AUDIT_BATCH_CACHE_MS = 60 * 1000
-const SAXO_AUDIT_MAX_PAGES_PER_POLL = 10
 const SAXO_INSTRUMENT_DETAILS_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const SAXO_INSTRUMENT_DETAILS_FETCH_CONCURRENCY = 5
 const FIXED_FX_RATES_TO_JPY: Record<string, number> = {
@@ -326,93 +303,6 @@ const parseRetryAfterMs = (value: string | null): number | null => {
     return Math.max(0, retryAt - Date.now())
 }
 
-const isSaxoFillActivity = (activity: SaxoOrderActivity): boolean => (
-    (activity.Status === 'FinalFill' || activity.Status === 'Fill') &&
-    (typeof activity.ExecutionPrice === 'number' || typeof activity.AveragePrice === 'number')
-)
-
-const getSaxoActivityPrice = (activity: SaxoOrderActivity): number | null => (
-    typeof activity.ExecutionPrice === 'number'
-        ? activity.ExecutionPrice
-        : typeof activity.AveragePrice === 'number'
-            ? activity.AveragePrice
-            : null
-)
-
-const getSaxoActivityFillAmount = (activity: SaxoOrderActivity): number | null => {
-    if (typeof activity.FillAmount !== 'number') return null
-    const amount = Math.abs(activity.FillAmount)
-    return amount > 0 ? amount : null
-}
-
-const getSaxoActivityCumulativeAmount = (activity: SaxoOrderActivity): number | null => {
-    const rawAmount = typeof activity.FilledAmount === 'number'
-        ? activity.FilledAmount
-        : typeof activity.Amount === 'number'
-            ? activity.Amount
-            : undefined
-    if (typeof rawAmount !== 'number') return null
-    const amount = Math.abs(rawAmount)
-    return amount > 0 ? amount : null
-}
-
-const aggregateSaxoExecution = (
-    activities: SaxoOrderActivity[],
-): { price: number, size: number, executed_at?: Date } | null => {
-    const fills = activities
-        .filter(isSaxoFillActivity)
-        .sort((a, b) => (parseSaxoActivityTime(a)?.getTime() ?? 0) - (parseSaxoActivityTime(b)?.getTime() ?? 0))
-    if (fills.length === 0) return null
-
-    let latestExecutedAt: Date | undefined
-    for (const fill of fills) {
-        const executedAt = parseSaxoActivityTime(fill)
-        if (executedAt && (!latestExecutedAt || executedAt.getTime() > latestExecutedAt.getTime())) {
-            latestExecutedAt = executedAt
-        }
-    }
-
-    const perFillAmounts = fills.map((fill) => ({
-        amount: getSaxoActivityFillAmount(fill),
-        price: getSaxoActivityPrice(fill),
-    }))
-    if (perFillAmounts.some((item) => item.amount !== null)) {
-        let totalSize = 0
-        let totalValue = 0
-        for (const item of perFillAmounts) {
-            if (item.amount === null || item.price === null) continue
-            totalSize += item.amount
-            totalValue += item.price * item.amount
-        }
-        if (totalSize > 0) {
-            return { price: totalValue / totalSize, size: totalSize, executed_at: latestExecutedAt }
-        }
-    }
-
-    const latestFill = fills[fills.length - 1]
-    if (!latestFill) return null
-    const latestPrice = getSaxoActivityPrice(latestFill)
-    if (latestPrice === null) return null
-
-    const cumulativeSize = Math.max(
-        ...fills
-            .map(getSaxoActivityCumulativeAmount)
-            .filter((amount): amount is number => amount !== null),
-        0,
-    )
-    if (cumulativeSize <= 0) return null
-
-    return { price: latestPrice, size: cumulativeSize, executed_at: latestExecutedAt }
-}
-
-const summarizeSaxoActivities = (activities: SaxoOrderActivity[]): Record<string, number> => {
-    const summary: Record<string, number> = {}
-    for (const activity of activities) {
-        summary[activity.Status] = (summary[activity.Status] ?? 0) + 1
-    }
-    return summary
-}
-
 function parsePercentage(value: string): number | null {
     const match = value.trim().match(/^(\d+(?:\.\d+)?)%$/)
     if (!match || !match[1]) return null
@@ -509,7 +399,7 @@ export class SaxoClient {
     private rateLimitedUntilMs = 0
     private auditActivitiesCache?: {
         fetchedAtMs: number
-        activities: SaxoOrderActivity[]
+        result: SaxoOrderActivitiesPageResult
     }
     private readonly instrumentDetailsCache = new Map<string, CachedSaxoInstrumentDetails>()
 
@@ -612,7 +502,7 @@ export class SaxoClient {
         if (clientKey) {
             params.append('ClientKey', clientKey)
         }
-        params.append('$top', '1000')
+        params.append('$top', String(SAXO_ORDER_ACTIVITIES_PAGE_SIZE))
 
         const lastPollMs = state.last_poll_at ? Date.parse(state.last_poll_at) : NaN
         const hasRecentCursor = Number.isFinite(lastPollMs) &&
@@ -632,17 +522,17 @@ export class SaxoClient {
         return `${this.baseUrl}/cs/v1/audit/orderactivities/?${params.toString()}`
     }
 
-    private async fetchOrderActivitiesBatch(): Promise<SaxoOrderActivity[]> {
+    private async fetchOrderActivitiesBatch(): Promise<SaxoOrderActivitiesPageResult> {
         if (this.auditActivitiesCache && Date.now() - this.auditActivitiesCache.fetchedAtMs <= SAXO_AUDIT_BATCH_CACHE_MS) {
-            return this.auditActivitiesCache.activities
+            return this.auditActivitiesCache.result
         }
 
-        const cacheActivities = (activities: SaxoOrderActivity[]): SaxoOrderActivity[] => {
+        const cacheResult = (result: SaxoOrderActivitiesPageResult): SaxoOrderActivitiesPageResult => {
             this.auditActivitiesCache = {
                 fetchedAtMs: Date.now(),
-                activities,
+                result,
             }
-            return activities
+            return result
         }
 
         if (this.isRateLimited()) {
@@ -653,27 +543,25 @@ export class SaxoClient {
                 },
                 'skipping Saxo audit batch request while rate limited',
             )
-            return cacheActivities([])
+            return cacheResult({ complete: false, reason: 'HTTP_ERROR' })
         }
 
         const accessToken = await this.getValidAccessToken()
-        if (!accessToken) return cacheActivities([])
+        if (!accessToken) return cacheResult({ complete: false, reason: 'HTTP_ERROR' })
 
         const auth = await this.getAuth()
-        if (!auth) return cacheActivities([])
+        if (!auth) return cacheResult({ complete: false, reason: 'HTTP_ERROR' })
 
         const now = new Date()
         const state = await this.getOrderActivitiesPollState()
-        let url: string | undefined = this.buildOrderActivitiesInitialUrl(auth, state, now)
-        const activities: SaxoOrderActivity[] = []
-        let nextPollUrl: string | undefined
-
-        for (let page = 0; url && page < SAXO_AUDIT_MAX_PAGES_PER_POLL; page += 1) {
-            const response = await this.fetchImpl(url, {
+        const result = await fetchSaxoOrderActivitiesPages({
+            initialUrl: this.buildOrderActivitiesInitialUrl(auth, state, now),
+            maxPages: SAXO_ORDER_ACTIVITIES_MAX_PAGES,
+            resolveNextUrl: (url) => this.buildSaxoApiUrl(url),
+            fetchPage: (url) => this.fetchImpl(url, {
                 headers: { Authorization: `Bearer ${accessToken}` },
-            })
-
-            if (!response.ok) {
+            }),
+            onHttpError: async (response) => {
                 if (response.status === 429) {
                     this.markRateLimited(response)
                 }
@@ -685,35 +573,34 @@ export class SaxoClient {
                     },
                     'failed to fetch Saxo audit orderactivities batch',
                 )
-                return cacheActivities([])
-            }
+            },
+        })
 
-            const data = (await response.json()) as SaxoOrderActivitiesResponse
-            activities.push(...(data.Data ?? []))
-            nextPollUrl = data.__nextPoll ?? nextPollUrl
-            url = data.__next ? this.buildSaxoApiUrl(data.__next) : undefined
-        }
-
-        if (url) {
+        if (!result.complete) {
             this.logger.warn(
                 {
-                    event: 'saxo:orderactivities_batch_page_limit_reached',
-                    maxPages: SAXO_AUDIT_MAX_PAGES_PER_POLL,
+                    event: result.reason === 'PAGE_LIMIT'
+                        ? 'saxo:orderactivities_batch_page_limit_reached'
+                        : 'saxo:orderactivities_batch_incomplete',
+                    reason: result.reason,
+                    maxPages: SAXO_ORDER_ACTIVITIES_MAX_PAGES,
                 },
-                'Saxo audit orderactivities page limit reached; poll state was not advanced',
+                'Saxo audit orderactivities batch was incomplete; partial activities were discarded',
             )
         } else {
             await this.saveOrderActivitiesPollState({
                 last_poll_at: now.toISOString(),
-                next_poll_url: nextPollUrl ?? '',
+                next_poll_url: result.nextPollUrl ?? '',
             })
         }
 
-        return cacheActivities(activities)
+        return cacheResult(result)
     }
 
     private async getExecutionFromRecentActivities(orderId: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
-        const activities = await this.fetchOrderActivitiesBatch()
+        const result = await this.fetchOrderActivitiesBatch()
+        if (!result.complete) return null
+        const activities = result.activities
         const matchingActivities = activities.filter((activity) => activity.OrderId === orderId)
         const execution = aggregateSaxoExecution(matchingActivities)
 
