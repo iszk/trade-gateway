@@ -148,24 +148,26 @@ components:
       in: query
       required: false
       description: |
-        範囲の開始時刻。timezone offset を含む ISO 8601 date-time。省略時は updated_to
-        または取得時刻から 30 日前。reader の条件は updated_at >= updated_from。
+        範囲の開始時刻。timezone offset を含む ISO 8601 date-time。実装は分精度、または
+        秒・小数秒を含む形式を受理します。省略時は updated_to または取得時刻から 30 日前。
+        reader の条件は updated_at >= updated_from。
       schema:
         type: string
         format: date-time
-        pattern: '(Z|[+-][0-9]{2}:[0-9]{2})$'
+        pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?(Z|[+-][0-9]{2}:[0-9]{2})$'
       example: '2026-07-15T09:00:00+09:00'
     UpdatedTo:
       name: updated_to
       in: query
       required: false
       description: |
-        範囲の終了時刻。timezone offset を含む ISO 8601 date-time。省略時は取得時刻。
-        reader の条件は updated_at < updated_to です。
+        範囲の終了時刻。timezone offset を含む ISO 8601 date-time。実装は分精度、または
+        秒・小数秒を含む形式を受理します。省略時は取得時刻。reader の条件は
+        updated_at < updated_to です。
       schema:
         type: string
         format: date-time
-        pattern: '(Z|[+-][0-9]{2}:[0-9]{2})$'
+        pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?(Z|[+-][0-9]{2}:[0-9]{2})$'
       example: '2026-07-16T09:00:00+09:00'
     Limit:
       name: limit

@@ -235,8 +235,8 @@ OpenAPI は全 endpoint を一括で定義していない。機械可読な契�
 このセクションとリンク先の OpenAPI は注文更新 API だけを対象とし、trade-gateway 全 API の OpenAPI ではない。query、response schema、status code、enum、required / nullable は OpenAPI を正とし、以下では bot が誤同期しないための運用上の意味だけを説明する。
 
 #### Query Parameters
-- `updated_from` (optional, ISO 8601 date-time with timezone): 範囲の開始。`updated_at >= updated_from` の inclusive 条件で、未指定時は `updated_to` または取得時刻から 30 日前
-- `updated_to` (optional, ISO 8601 date-time with timezone): 範囲の終了。`updated_at < updated_to` の exclusive 条件で、未指定時は取得時刻
+- `updated_from` (optional, ISO 8601 date-time with timezone): 範囲の開始。実装は分精度（例: `2026-07-15T09:00+09:00`）、または秒・小数秒を含む形式を受理する。`updated_at >= updated_from` の inclusive 条件で、未指定時は `updated_to` または取得時刻から 30 日前
+- `updated_to` (optional, ISO 8601 date-time with timezone): 範囲の終了。実装は分精度、または秒・小数秒を含む形式を受理する。`updated_at < updated_to` の exclusive 条件で、未指定時は取得時刻
 - `limit` (optional, integer, 1–200): 1 ページあたり件数（デフォルト: 50）
 - `page` (optional, integer, 1 以上): 1 始まりのページ番号（デフォルト: 1）
 - `updated_from` と `updated_to` は同じ request で解釈した時刻範囲が空にならないよう、開始が終了より前でなければならない
