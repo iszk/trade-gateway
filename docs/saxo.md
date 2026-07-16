@@ -133,9 +133,15 @@ cron の orders_v2 同期では、Saxo の `cs/v1/audit/orderactivities` を注�
 
 polling 状態は `cron_metadata/saxo_orderactivities_poll_state` に保存する。
 
-- `last_poll_at`: 最後に batch polling を試行した時刻
+- `last_poll_at`: 全ページの取得に成功した最後の batch polling 時刻
 - `next_poll_url`: Saxo の `__nextPoll` URL。空文字の場合は未保持として扱う
 
 前回 polling から 30 分以内で `next_poll_url` がある場合は cursor を使う。30 分を超えている場合は cursor を捨て、`last_poll_at` から 30 分巻き戻した `FromDateTime` と現在時刻の `ToDateTime` で再取得する。初回は 48 時間 lookback で取得する。
 
-約定数量は `FillAmount` を優先して合算し、価格は約定数量による加重平均にする。`FillAmount` がない場合は `FilledAmount` / `Amount` を累積数量として扱う。数量フィールドがないレスポンスは、誤同期を避けるため約定未確定として扱う。
+取得 page size は Saxo の推奨範囲上限である `$top=500`、1 poll の上限は20ページとする。`__next` がある限り全ページを取得し、途中の HTTP failure、payload parse failure、または20ページ到達時は batch 全体を incomplete として破棄する。incomplete batch の partial activity は約定同期に使わず、`last_poll_at` と `next_poll_url` も更新しない。`__nextPoll` は全ページ取得に成功した場合だけ保存する。
+
+activity は `LogId` で重複排除し、`ActivityTime` と時系列性が保証された `LogId` で正規化してから注文単位で解決する。同じ `LogId` が複数ページや overlap 範囲に含まれても約定数量へ二重加算しない。
+
+約定数量は `FillAmount` を優先して fill ごとに合算し、価格は約定数量による加重平均にする。`FillAmount` がない場合は `FilledAmount` / `Amount` の最大累積数量と最新の約定価格を使う。数量フィールドがないレスポンスは、誤同期を避けるため約定未確定として扱う。有効な時刻を持つ fill のうち最新の時刻を約定時刻にする。
+
+broker state は `Status` と `SubStatus` を組み合わせて解決する。confirmed の `FinalFill` / `Fill` / `Cancelled` / `Expired`、`Placed + Rejected`、進行中の placement/change/working と、未知または曖昧な activity を区別する。既存 payload 互換のため `SubStatus` 欠落時の fill は認識するが、requested/rejected fill は約定へ集約しない。たとえば rejected cancel は cancel 成立として扱わず、それ以前の confirmed fill があれば fill 状態を維持する。現行 PR ではこの state を `orders_v2` の `CANCELED` / `FAILED` 更新にはまだ使用しない。
