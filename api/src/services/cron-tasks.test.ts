@@ -278,6 +278,50 @@ test('applyOrderExecutionSyncResult: 同一 snapshot と overfill は no-op に�
     assert.equal(updates.length, 0)
 })
 
+test('executeTenMinutelyTask: 部分約定後の confirmed cancel は terminal 同期ログを出す', async () => {
+    const { logger, logs } = makeLogger()
+    const updatedOrders: any[] = []
+    const ctx = makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => [{
+            id: 'v2-partial-cancel-log',
+            broker: 'saxo',
+            ticker: 'FxSpot:21',
+            status: 'PENDING',
+            provider_order_ids: ['ORD-partial-cancel-log'],
+            requested_size: 1,
+            executed_size: 0,
+            executed_price: null,
+            created_at: new Date('2026-01-01T00:00:00Z'),
+        } as any],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: { price: 100, size: 0.4 },
+                    terminalStatus: 'CANCELED' as const,
+                    terminalReason: 'saxo_confirmed_cancel',
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.deepEqual(updatedOrders[0], {
+        id: 'v2-partial-cancel-log',
+        status: 'CANCELED',
+        executed_price: 100,
+        executed_size: 0.4,
+        executed_at: new Date('2026-01-01T00:00:00Z'),
+    })
+    assert.ok(logs.some((log) => (
+        log.event === 'cron:orders_v2_terminal_status_synced' &&
+        log.status === 'CANCELED'
+    )))
+    assert.equal(logs.some((log) => log.event === 'cron:orders_v2_synced'), false)
+})
+
 test('executeTenMinutelyTask: PENDING の IFDOCO 親注文が EXECUTED になったとき exit_sync_status を MONITORING にする', async () => {
     const pendingOrder: any = {
         id: 'v2-pending-ifd-1',

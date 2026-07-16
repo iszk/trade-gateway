@@ -222,7 +222,8 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
 
             await applyOrderExecutionSyncResult(order, syncResult, ctx.updateOrderV2)
 
-            if (info !== null) {
+            const isCompleted = info !== null && info.size >= order.requested_size - EPSILON
+            if (info !== null && (isCompleted || syncResult.terminalStatus !== 'CANCELED')) {
                 ctx.logger.info(
                     {
                         event: 'cron:orders_v2_synced',
@@ -231,7 +232,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                         price: info.price,
                         size: info.size,
                     },
-                    info.size >= order.requested_size - EPSILON
+                    isCompleted
                         ? 'orders_v2 status updated to EXECUTED'
                         : 'orders_v2 partial execution progress synchronized',
                 )
