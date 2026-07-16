@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
     createAddOrderV2Fn,
+    createListOrderUpdatesFn,
     createListOrdersV2ByDateRangeFn,
     createUpdateOrderV2Fn,
 } from './orders-v2.js'
@@ -40,10 +41,10 @@ const toFirestoreOrder = (order: OrderV2) => ({
 const createDbStub = (orders: OrderV2[]) => {
     const state: {
         whereCalls: { field: string; op: string; value: unknown }[]
-        orderByFields: string[]
+        orderByCalls: { field: string; direction?: string }[]
     } = {
         whereCalls: [],
-        orderByFields: [],
+        orderByCalls: [],
     }
 
     const query = {
@@ -51,8 +52,8 @@ const createDbStub = (orders: OrderV2[]) => {
             state.whereCalls.push({ field, op, value })
             return query
         },
-        orderBy: (field: string) => {
-            state.orderByFields.push(field)
+        orderBy: (field: string, direction?: string) => {
+            state.orderByCalls.push({ field, direction })
             return {
                 get: async () => ({
                     docs: orders.map((order) => ({
@@ -163,9 +164,134 @@ test('createListOrdersV2ByDateRangeFn: executed_at のみで期間抽出し降�
         { field: 'executed_at', op: '>=', value: rangeFrom },
         { field: 'executed_at', op: '<', value: rangeTo },
     ])
-    assert.deepEqual(state.orderByFields, ['executed_at'])
+    assert.deepEqual(state.orderByCalls, [{ field: 'executed_at', direction: 'desc' }])
     assert.deepEqual(
         orders.map((order) => order.id),
         ['executed-later', 'executed-earlier'],
     )
+})
+
+test('createListOrderUpdatesFn: updated_at の半開区間を全 status で取得し安定順序にする', async () => {
+    const rangeFrom = new Date('2026-02-01T00:00:00Z')
+    const rangeTo = new Date('2026-03-01T00:00:00Z')
+    const sameTime = new Date('2026-02-10T00:00:00Z')
+
+    const { db, state } = createDbStub([
+        makeOrder({ id: 'z-canceled', status: 'CANCELED', updated_at: sameTime }),
+        makeOrder({ id: 'executed-first', status: 'EXECUTED', updated_at: new Date('2026-02-02T00:00:00Z') }),
+        makeOrder({ id: 'a-failed', status: 'FAILED', updated_at: sameTime }),
+        makeOrder({ id: 'pending-last', status: 'PENDING', updated_at: new Date('2026-02-20T00:00:00Z') }),
+    ])
+
+    const listOrderUpdates = createListOrderUpdatesFn(db as any)
+    const orders = await listOrderUpdates(rangeFrom, rangeTo)
+
+    assert.deepEqual(state.whereCalls, [
+        { field: 'updated_at', op: '>=', value: rangeFrom },
+        { field: 'updated_at', op: '<', value: rangeTo },
+    ])
+    assert.deepEqual(state.orderByCalls, [{ field: 'updated_at', direction: 'asc' }])
+    assert.deepEqual(
+        orders.map((order) => [order.id, order.status]),
+        [
+            ['executed-first', 'EXECUTED'],
+            ['a-failed', 'FAILED'],
+            ['z-canceled', 'CANCELED'],
+            ['pending-last', 'PENDING'],
+        ],
+    )
+})
+
+test('createListOrderUpdatesFn: 外部 DTO の null、fill、commission を正規化して内部情報を除外する', async () => {
+    const common = {
+        strategy: 'external-strategy',
+        broker: 'bitflyer' as const,
+        ticker: 'FX_BTC_JPY',
+        side: 'SELL' as const,
+        order_type: 'IFDOCO' as const,
+        requested_size: 0.01,
+        provider_order_ids: ['provider-1', 'provider-2'],
+        created_at: new Date('2026-02-01T01:02:03.456Z'),
+        updated_at: new Date('2026-02-02T02:03:04.567Z'),
+    }
+    const orders = [
+        makeOrder({
+            ...common,
+            id: 'unfilled',
+            status: 'PENDING',
+            executed_size: 0,
+            executed_price: null,
+            executed_at: undefined,
+            execution_costs: undefined,
+            exit_sync_status: undefined,
+            broker_order_metadata: { broker: 'bitflyer', kind: 'MARKET', product_code: 'FX_BTC_JPY', entry: { acceptance_id: 'secret' } },
+        } as any),
+        makeOrder({
+            ...common,
+            id: 'partial',
+            status: 'FAILED',
+            executed_size: 0.004,
+            executed_price: 100,
+            executed_at: new Date('2026-02-01T03:00:00Z'),
+            execution_costs: { commission: 0 },
+            exit_sync_status: 'MONITORING',
+        }),
+        makeOrder({
+            ...common,
+            id: 'epsilon-filled',
+            status: 'CANCELED',
+            executed_size: 0.01 - 5e-9,
+            executed_price: 101,
+            execution_costs: { commission: -0.0001 },
+            exit_sync_status: 'COMPLETED',
+        }),
+        makeOrder({
+            ...common,
+            id: 'overfilled',
+            executed_size: 0.011,
+            executed_price: 102,
+        }),
+    ]
+    const { db } = createDbStub(orders)
+
+    const result = await createListOrderUpdatesFn(db as any)(
+        new Date('2026-02-01T00:00:00Z'),
+        new Date('2026-03-01T00:00:00Z'),
+    )
+
+    assert.deepEqual(result[0], {
+        id: 'epsilon-filled',
+        strategy: 'external-strategy',
+        broker: 'bitflyer',
+        ticker: 'FX_BTC_JPY',
+        side: 'SELL',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0.009999995,
+        executed_price: 101,
+        fill_status: 'FILLED',
+        status: 'CANCELED',
+        provider_order_ids: ['provider-1', 'provider-2'],
+        execution_costs: { commission: -0.0001 },
+        exit_sync_status: 'COMPLETED',
+        created_at: '2026-02-01T01:02:03.456Z',
+        updated_at: '2026-02-02T02:03:04.567Z',
+        executed_at: '2026-01-01T00:00:00.000Z',
+    })
+    assert.deepEqual(
+        Object.fromEntries(result.map((order) => [order.id, {
+            fill_status: order.fill_status,
+            commission: order.execution_costs.commission,
+            executed_at: order.executed_at,
+            exit_sync_status: order.exit_sync_status,
+        }])),
+        {
+            'epsilon-filled': { fill_status: 'FILLED', commission: -0.0001, executed_at: '2026-01-01T00:00:00.000Z', exit_sync_status: 'COMPLETED' },
+            overfilled: { fill_status: 'FILLED', commission: null, executed_at: '2026-01-01T00:00:00.000Z', exit_sync_status: null },
+            partial: { fill_status: 'PARTIALLY_FILLED', commission: 0, executed_at: '2026-02-01T03:00:00.000Z', exit_sync_status: 'MONITORING' },
+            unfilled: { fill_status: 'UNFILLED', commission: null, executed_at: null, exit_sync_status: null },
+        },
+    )
+    assert.equal(JSON.stringify(result).includes('broker_order_metadata'), false)
+    assert.equal(JSON.stringify(result).includes('acceptance_id'), false)
 })
