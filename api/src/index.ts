@@ -18,8 +18,8 @@ import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, 
 import type { EnsureTradableSymbolFn, GetTradableSymbolFn, ListTradableSymbolsFn, UpdateTradeControlFn, UpsertTradableSymbolFn } from './services/tradable-symbols.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
 import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
-import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
-import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn, ListOrdersV2ByDateRangeFn } from './services/orders-v2.js'
+import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn, createDefaultListOrderUpdatesFn } from './services/orders-v2.js'
+import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn, ListOrdersV2ByDateRangeFn, ListOrderUpdatesFn, OrderUpdate } from './services/orders-v2.js'
 import { computeStatsV2 } from './services/stats-v2.js'
 import type { StatsV2 } from './services/stats-v2.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
@@ -76,6 +76,21 @@ const tradingViewWebhookSchema = baseWebhookSchema.extend({
 })
 
 const fooWebhookSchema = baseWebhookSchema
+
+const orderUpdatesQuerySchema = z.object({
+    updated_from: z.string().datetime({ offset: true }).optional(),
+    updated_to: z.string().datetime({ offset: true }).optional(),
+    limit: z.string()
+        .regex(/^[1-9]\d*$/)
+        .transform(Number)
+        .pipe(z.number().int().max(200))
+        .optional(),
+    page: z.string()
+        .regex(/^[1-9]\d*$/)
+        .transform(Number)
+        .pipe(z.number().int())
+        .optional(),
+})
 
 const parseIpAllowlist = (): Set<string> => {
     const fromEnv = process.env.TRADINGVIEW_IP_ALLOWLIST
@@ -233,6 +248,7 @@ type CreateAppOptions = {
     getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
     listOrdersV2ByDateRange?: ListOrdersV2ByDateRangeFn
+    listOrderUpdates?: ListOrderUpdatesFn
     getTradableSymbol?: GetTradableSymbolFn
     listTradableSymbols?: ListTradableSymbolsFn
     upsertTradableSymbol?: UpsertTradableSymbolFn
@@ -263,6 +279,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const getOrderV2 = options.getOrderV2 ?? createDefaultGetOrderV2Fn()
     const getActiveIfdOrdersV2 = options.getActiveIfdOrdersV2 ?? createDefaultGetActiveIfdOrdersV2Fn()
     const listOrdersV2ByDateRange = options.listOrdersV2ByDateRange ?? createDefaultListOrdersV2ByDateRangeFn()
+    const listOrderUpdates = options.listOrderUpdates ?? createDefaultListOrderUpdatesFn()
     const getTradableSymbol = options.getTradableSymbol ?? createDefaultGetTradableSymbolFn()
     const listTradableSymbols = options.listTradableSymbols ?? createDefaultListTradableSymbolsFn()
     const upsertTradableSymbol = options.upsertTradableSymbol ?? createDefaultUpsertTradableSymbolFn()
@@ -1030,6 +1047,51 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
     })
 
+    app.get('/api/order-updates', requireApiSecret, async (c) => {
+        const parsed = orderUpdatesQuerySchema.safeParse({
+            updated_from: c.req.query('updated_from'),
+            updated_to: c.req.query('updated_to'),
+            limit: c.req.query('limit'),
+            page: c.req.query('page'),
+        })
+        if (!parsed.success) {
+            return c.json(errorBody('INVALID_REQUEST', 'invalid order updates query'), 400)
+        }
+
+        const updatedTo = parsed.data.updated_to
+            ? new Date(parsed.data.updated_to)
+            : new Date()
+        const updatedFrom = parsed.data.updated_from
+            ? new Date(parsed.data.updated_from)
+            : new Date(updatedTo.getTime() - 30 * 24 * 60 * 60 * 1000)
+        if (updatedFrom >= updatedTo) {
+            return c.json(errorBody('INVALID_REQUEST', 'updated_from must be before updated_to'), 400)
+        }
+
+        const limit = parsed.data.limit ?? 50
+        const page = parsed.data.page ?? 1
+
+        try {
+            const allOrders = await listOrderUpdates(updatedFrom, updatedTo)
+            const total = allOrders.length
+            const total_pages = Math.max(1, Math.ceil(total / limit))
+            const offset = (page - 1) * limit
+
+            return c.json({
+                orders: allOrders.slice(offset, offset + limit),
+                total,
+                page,
+                limit,
+                total_pages,
+                updated_from: updatedFrom.toISOString(),
+                updated_to: updatedTo.toISOString(),
+            })
+        } catch (err) {
+            logger.warn({ event: 'order_updates:fetch_failed', error: err }, 'failed to fetch order updates')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch order updates'), 500)
+        }
+    })
+
     app.get('/api/trade-records', requireApiSecret, async (c) => {
         const dates = parseFilterDates(c.req.query('from'), c.req.query('to'))
         if ('error' in dates) {
@@ -1125,6 +1187,18 @@ export type OrdersV2Response = {
     from: string
     to: string
 }
+
+export type OrderUpdatesResponse = {
+    orders: OrderUpdate[]
+    total: number
+    page: number
+    limit: number
+    total_pages: number
+    updated_from: string
+    updated_to: string
+}
+
+export type { OrderUpdate } from './services/orders-v2.js'
 
 export type SymbolsResponse = {
     symbols: TradableSymbol[]
