@@ -10,6 +10,7 @@ import type { Position } from './types/position.js'
 import { DuplicateEventError } from './services/webhook-events.js'
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
+import type { OrderUpdate } from './services/orders-v2.js'
 import type { SlotScheduler, RunIfNewSlotParams } from './services/slot-scheduler.js'
 import type { TradableSymbol } from './types/tradable-symbol.js'
 
@@ -72,6 +73,7 @@ const createAppForTests = (options: Parameters<typeof createApp>[0] = {}) =>
             }
         },
         ensureTradableSymbol: async () => {},
+        listOrderUpdates: async () => [],
         ...options,
     })
 
@@ -172,6 +174,175 @@ const makeOrderV2 = (overrides: Partial<OrderV2> = {}): OrderV2 => ({
     updated_at: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
 } as OrderV2)
+
+const makeOrderUpdate = (overrides: Partial<OrderUpdate> = {}): OrderUpdate => ({
+    id: `ord-${Math.random()}`,
+    strategy: 'alpha',
+    broker: 'bitflyer',
+    ticker: 'FX_BTC_JPY',
+    side: 'BUY',
+    order_type: 'MARKET',
+    requested_size: 0.01,
+    executed_size: 0,
+    executed_price: null,
+    fill_status: 'UNFILLED',
+    status: 'PENDING',
+    provider_order_ids: ['provider-1'],
+    execution_costs: { commission: null },
+    exit_sync_status: null,
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-02T00:00:00.000Z',
+    executed_at: null,
+    ...overrides,
+})
+
+test('GET /api/order-updates requires the shared Bearer token', async () => {
+    const app = createAppForTests({ apiSecret: 'test-secret' })
+
+    for (const headers of [undefined, { Authorization: 'Bearer wrong-secret' }]) {
+        const res = await app.request('/api/order-updates', { headers })
+        assert.equal(res.status, 401)
+        assert.deepEqual(await res.json(), {
+            error: {
+                code: 'UNAUTHORIZED',
+                message: 'invalid or missing token',
+            },
+        })
+    }
+})
+
+test('GET /api/order-updates passes the half-open period and paginates all lifecycle statuses', async () => {
+    const calls: { updatedFrom: Date; updatedTo: Date }[] = []
+    const allOrders = [
+        makeOrderUpdate({ id: 'pending', status: 'PENDING' }),
+        makeOrderUpdate({ id: 'executed', status: 'EXECUTED', fill_status: 'FILLED', executed_size: 0.01, executed_price: 100, executed_at: '2026-01-02T00:00:00.000Z', execution_costs: { commission: 0 } }),
+        makeOrderUpdate({ id: 'failed', status: 'FAILED' }),
+        makeOrderUpdate({ id: 'canceled', status: 'CANCELED' }),
+    ]
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        listOrderUpdates: async (updatedFrom, updatedTo) => {
+            calls.push({ updatedFrom, updatedTo })
+            return allOrders
+        },
+    })
+
+    const res = await app.request(
+        '/api/order-updates?updated_from=2026-01-01T09%3A00%3A00%2B09%3A00&updated_to=2026-02-01T09%3A00%3A00%2B09%3A00&limit=2&page=2',
+        { headers: { Authorization: 'Bearer test-secret' } },
+    )
+
+    assert.equal(res.status, 200)
+    assert.deepEqual(calls, [{
+        updatedFrom: new Date('2026-01-01T00:00:00.000Z'),
+        updatedTo: new Date('2026-02-01T00:00:00.000Z'),
+    }])
+    assert.deepEqual(await res.json(), {
+        orders: [allOrders[2], allOrders[3]],
+        total: 4,
+        page: 2,
+        limit: 2,
+        total_pages: 2,
+        updated_from: '2026-01-01T00:00:00.000Z',
+        updated_to: '2026-02-01T00:00:00.000Z',
+    })
+})
+
+test('GET /api/order-updates uses one current time for the default 30-day period and returns an empty page', async () => {
+    const calls: { updatedFrom: Date; updatedTo: Date }[] = []
+    const before = Date.now()
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        listOrderUpdates: async (updatedFrom, updatedTo) => {
+            calls.push({ updatedFrom, updatedTo })
+            return []
+        },
+    })
+
+    const res = await app.request('/api/order-updates?page=99', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+    const after = Date.now()
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.equal(calls.length, 1)
+    assert.ok(calls[0]!.updatedTo.getTime() >= before)
+    assert.ok(calls[0]!.updatedTo.getTime() <= after)
+    assert.equal(
+        calls[0]!.updatedTo.getTime() - calls[0]!.updatedFrom.getTime(),
+        30 * 24 * 60 * 60 * 1000,
+    )
+    assert.deepEqual(body, {
+        orders: [],
+        total: 0,
+        page: 99,
+        limit: 50,
+        total_pages: 1,
+        updated_from: calls[0]!.updatedFrom.toISOString(),
+        updated_to: calls[0]!.updatedTo.toISOString(),
+    })
+})
+
+test('GET /api/order-updates rejects invalid periods and pagination without calling the reader', async () => {
+    let callCount = 0
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        listOrderUpdates: async () => {
+            callCount += 1
+            return []
+        },
+    })
+    const invalidQueries = [
+        'updated_from=2026-01-01',
+        'updated_from=2026-01-01T00%3A00%3A00',
+        'updated_from=2026-02-30T00%3A00%3A00Z',
+        'updated_from=invalid',
+        'updated_from=2026-02-01T00%3A00%3A00Z&updated_to=2026-01-01T00%3A00%3A00Z',
+        'updated_from=2026-01-01T00%3A00%3A00Z&updated_to=2026-01-01T00%3A00%3A00Z',
+        'limit=0',
+        'limit=201',
+        'limit=1.5',
+        'limit=abc',
+        'page=0',
+        'page=1.5',
+        'page=abc',
+    ]
+
+    for (const query of invalidQueries) {
+        const res = await app.request(`/api/order-updates?${query}`, {
+            headers: { Authorization: 'Bearer test-secret' },
+        })
+        const body = await res.json()
+        assert.equal(res.status, 400, query)
+        assert.equal(body.error.code, 'INVALID_REQUEST', query)
+    }
+    assert.equal(callCount, 0)
+})
+
+test('GET /api/order-updates returns a fixed 500 body and warning when the reader fails', async () => {
+    const { logger, calls } = createLoggerStub()
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        logger,
+        listOrderUpdates: async () => {
+            throw new Error('firestore details')
+        },
+    })
+
+    const res = await app.request('/api/order-updates', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+
+    assert.equal(res.status, 500)
+    assert.deepEqual(await res.json(), {
+        error: {
+            code: 'INTERNAL_ERROR',
+            message: 'failed to fetch order updates',
+        },
+    })
+    assert.equal(calls.some((call) => call.event === 'order_updates:fetch_failed'), true)
+})
 
 test('GET /api/health returns 200', async () => {
     const app = createAppForTests({
