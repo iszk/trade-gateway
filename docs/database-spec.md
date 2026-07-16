@@ -79,6 +79,8 @@ webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証�
 - `requested_size` (number, required)
 - `executed_size` (number, required)
 - `executed_price` (number | null, required)
+- `execution_costs` (map, optional)
+  - `commission` (number, optional) — broker execution が返した明示 commission の累積値。`0` は known zero、フィールド不在は unknown
 - `executed_at` (timestamp, optional) — `status=EXECUTED` では required
 - `status` (string, required) — `PENDING` | `EXECUTED` | `FAILED` | `CANCELED`
 - `exit_sync_status` (string, optional) — `MONITORING` | `COMPLETED`
@@ -94,6 +96,8 @@ webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証�
 - クローズ済みトレードの read model は別コレクションに保存せず、`orders_v2` から再計算する
 - 一覧・統計・トレード再構成の日時基準は `executed_at` とする。`status=EXECUTED` で `executed_at` が欠落している既存データは集計対象外とし、`created_at` へはフォールバックしない
 - cron による `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。metadata が未設定、または broker が期待する `kind` ではない注文は warn ログを出して同期を no-op とし、旧 order id ベースの探索へフォールバックしない
+- `execution_costs` と `execution_costs.commission` は optional とする。Firestore 上で `execution_costs` またはその `commission` field が未設定の場合は、legacy order、broker 未対応、約定情報の欠落などで値が unknown であることを表し、`0` とは区別する。注文更新 API の DTO では DB 上の未設定を `execution_costs: { commission: null }` に正規化して公開する（[注文更新 API OpenAPI](./openapi/order-updates.openapi.yaml)、[API 利用仕様](./api-spec.md#order-updates-api)）。
+- commission は broker execution の明示手数料だけを保存する。spread、funding、slippage、売買価格差などの実質コストはこの field に含めず、現行 schema では保存しない。
 - TTL は現時点で使用しない
 
 ## 4. `tradable_symbols`

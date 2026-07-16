@@ -1,7 +1,9 @@
 # API 仕様（MVP）
 
 ## 目的
-Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定義する。
+Webhook 受信、認証開始、ヘルスチェックを含む現行 API の概要を定義する。
+
+OpenAPI は全 endpoint を一括で定義していない。機械可読な契約は、対象限定の [注文更新 API OpenAPI](./openapi/order-updates.openapi.yaml) のみを提供する。
 
 ## 共通方針
 - Base Path: `/api`
@@ -221,6 +223,46 @@ Webhook 受信、認証開始、ヘルスチェックの最小 API 契約を定�
 
 #### 補足
 - 期間指定は `executed_at` を基準にする。`executed_at` が欠落している注文は一覧対象外とし、`created_at` へはフォールバックしない。
+
+<a id="order-updates-api"></a>
+
+### 注文更新 API（対象限定）
+- Method/Path: `GET /api/order-updates`
+- 認証: 必要（`API_SECRET` の Bearer トークン）
+- 役割: `orders_v2.updated_at` の期間内に更新された、全 lifecycle status の現在注文 snapshot を bot の差分同期に利用する
+- 機械可読な HTTP 契約: [docs/openapi/order-updates.openapi.yaml](./openapi/order-updates.openapi.yaml)
+
+このセクションとリンク先の OpenAPI は注文更新 API だけを対象とし、trade-gateway 全 API の OpenAPI ではない。query、response schema、status code、enum、required / nullable は OpenAPI を正とし、以下では bot が誤同期しないための運用上の意味だけを説明する。
+
+#### Query Parameters
+- `updated_from` (optional, ISO 8601 date-time with timezone): 範囲の開始。実装は分精度（例: `2026-07-15T09:00+09:00`）、または秒・小数秒を含む形式を受理する。`updated_at >= updated_from` の inclusive 条件で、未指定時は `updated_to` または取得時刻から 30 日前
+- `updated_to` (optional, ISO 8601 date-time with timezone): 範囲の終了。実装は分精度、または秒・小数秒を含む形式を受理する。`updated_at < updated_to` の exclusive 条件で、未指定時は取得時刻
+- `limit` (optional, integer, 1–200): 1 ページあたり件数（デフォルト: 50）
+- `page` (optional, integer, 1 以上): 1 始まりのページ番号（デフォルト: 1）
+- `updated_from` と `updated_to` は同じ request で解釈した時刻範囲が空にならないよう、開始が終了より前でなければならない
+
+#### Bot の差分同期
+1. bot は webhook 送信前に、自身が生成した `event_id` と送信時刻をローカルに保存する。gateway の注文 `id` は通常この `event_id` だが、照合時は `id` と `event_id` を明示的に比較し、暗黙の時刻・銘柄一致で代用しない。
+2. 前回成功同期の watermark を `updated_to` にせず、次回は安全な overlap（例: 数分）を含む `updated_from` から取得する。range は半開区間なので、境界時刻の更新を取りこぼさないよう overlap 分だけ重複取得する。
+3. `total_pages` と `page` を使って全ページを取得する。各 response は現在の mutable snapshot であり、request 間に新しい更新や既存注文の更新が入るため、ページをまたいだ一貫した snapshot や repeatable read は保証されない。
+4. 取得した各注文を `id` を主キーとして local store に idempotent upsert し、同じ `id` の重複を deduplicate する。overlap と mutable pagination により同じ注文が複数回返ることは正常である。
+5. 全ページを処理し、照合・upsert が成功してから次回の watermark を進める。失敗時は watermark を進めず、同じ overlap を再取得する。`page` の値だけを永続化して再開位置にする設計は、mutable pagination のため避ける。
+
+#### 注文・約定状態の扱い
+- `status` は注文の現在 lifecycle であり、`PENDING`、`EXECUTED`、`FAILED`、`CANCELED` を返す。`fill_status` は約定数量から導出した `UNFILLED`、`PARTIALLY_FILLED`、`FILLED` で、`status` とは別の軸である。
+- 未約定は `executed_size=0`、`executed_price=null`、`executed_at=null` になり得る。一部約定は `status=PENDING` のまま `executed_size`、平均 `executed_price`、`executed_at` が更新される。要求数量に到達した注文だけが `fill_status=FILLED` となる。
+- `updated_at` は現在 snapshot の更新時刻であり、状態遷移履歴や個別 fill の履歴ではない。履歴が必要な bot は自分の upsert 前 snapshot を保存する。
+
+#### Commission semantics
+- `execution_costs.commission` は broker execution が返した明示 commission の累積値だけを表す。`0` は broker が返した known zero で、`null` は legacy order、broker 未対応、取得不能などの unknown である。
+- `null` を `0` に補完してはならない。entry と exit の各注文値を個別に保持し、両方が必要な集計では unknown を明示的に伝播させる。
+- spread、funding、slippage、売買価格差、その他の推定コストは commission に含まれない。これらを commission として逆算してはならない。
+
+#### エラーレスポンス
+- `400 Bad Request`: query の形式・範囲・pagination が不正
+- `401 Unauthorized`: Bearer トークン不足・不正
+- `500 Internal Server Error`: reader / Firestore 取得失敗
+- body は既存の `{ "error": { "code": "...", "message": "..." } }` envelope。bot は `message` の文言ではなく `code` と HTTP status を判定に使う。
 
 ### 10. Symbol 一覧・更新
 - Method/Path: `GET /api/symbols`
