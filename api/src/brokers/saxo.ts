@@ -2,7 +2,7 @@ import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient, setFirestoreDocument } from '../firestore.js'
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { SaxoOrderMetadata } from '../types/broker-order-metadata.js'
-import type { OrderExecutionSyncResult } from '../types/execution-sync.js'
+import type { ExecutionSyncTerminal, OrderExecutionSyncResult } from '../types/execution-sync.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { Position } from '../types/position.js'
 import type { Balance } from '../types/balance.js'
@@ -333,7 +333,7 @@ type OrdersV2ExecutionSyncResult = OrderExecutionSyncResult
 
 const toSaxoTerminalStatus = (
     brokerState: SaxoOrderActivityResolution['brokerState'],
-): Pick<OrderExecutionSyncResult, 'terminalStatus' | 'terminalReason'> => {
+): ExecutionSyncTerminal => {
     if (brokerState === 'CANCELED') {
         return { terminalStatus: 'CANCELED', terminalReason: 'saxo_confirmed_cancel' }
     }

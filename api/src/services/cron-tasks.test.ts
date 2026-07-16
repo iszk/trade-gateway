@@ -209,22 +209,22 @@ test('applyOrderExecutionSyncResult: terminal status と execution snapshot を�
         },
         {
             name: '部分約定後の取消',
-            result: { execution: { price: 100, size: 0.4 }, terminalStatus: 'CANCELED' as const },
+            result: { execution: { price: 100, size: 0.4 }, terminalStatus: 'CANCELED' as const, terminalReason: 'test_confirmed_cancel' },
             expected: { status: 'CANCELED', executed_price: 100, executed_size: 0.4, executed_at: new Date('2026-01-01T00:00:00Z') },
         },
         {
             name: '未約定取消',
-            result: { execution: null, terminalStatus: 'CANCELED' as const },
+            result: { execution: null, terminalStatus: 'CANCELED' as const, terminalReason: 'test_confirmed_cancel' },
             expected: { status: 'CANCELED' },
         },
         {
             name: '失効',
-            result: { execution: null, terminalStatus: 'CANCELED' as const },
+            result: { execution: null, terminalStatus: 'CANCELED' as const, terminalReason: 'test_confirmed_expire' },
             expected: { status: 'CANCELED' },
         },
         {
             name: '発注拒否',
-            result: { execution: null, terminalStatus: 'FAILED' as const },
+            result: { execution: null, terminalStatus: 'FAILED' as const, terminalReason: 'test_placement_rejected' },
             expected: { status: 'FAILED' },
         },
         {
