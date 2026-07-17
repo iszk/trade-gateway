@@ -146,4 +146,14 @@ activity は `LogId` で重複排除し、`ActivityTime` と時系列性が保�
 
 broker state は `Status` と `SubStatus` を組み合わせて解決する。confirmed の `FinalFill` / `Fill` / `Cancelled` / `Expired`、`Placed + Rejected`、進行中の placement/change/working と、未知または曖昧な activity を区別する。既存 payload 互換のため `SubStatus` 欠落時の fill は認識するが、requested/rejected fill は約定へ集約しない。confirmed fill は placement rejection より優先し、confirmed cancel/expire と部分約定が共存する場合は約定 snapshot を保持したまま `orders_v2` を `CANCELED` にする。`Placed + Rejected` は confirmed fill または confirmed placement がない場合だけ `FAILED` にし、rejected cancel/change と `DoneForDay` は非終端として `PENDING` を継続する。未知または cancel と expire が矛盾する activity は安全側で `PENDING` とする。
 
-Saxo の execution sync result は、約定 snapshot、終端 status（`CANCELED` / `FAILED`）、固定された terminal reason、broker metadata で構成する。cron は execution が要求数量へ到達した場合を常に `EXECUTED` とし、同一 snapshot の再取得では Firestore を更新しない。execution が要求数量未満で confirmed cancel/expire の場合は `executed_price`、`executed_size`、`executed_at`、既知の commission を保持して `CANCELED` にする。overfill は status と execution のいずれも保存しない。24時間超の Saxo MARKET stale skip はこの段階では維持する。
+Saxo の execution sync result は、約定 snapshot、終端 status（`CANCELED` / `FAILED`）、固定された terminal reason、broker metadata で構成する。cron は execution が要求数量へ到達した場合を常に `EXECUTED` とし、同一 snapshot の再取得では Firestore を更新しない。execution が要求数量未満で confirmed cancel/expire の場合は `executed_price`、`executed_size`、`executed_at`、既知の commission を保持して `CANCELED` にする。overfill は status と execution のいずれも保存しない。
+
+### Batch miss recovery
+
+10分 cron は PENDING orders_v2 を broker 単位で渡し、Saxo の bulk contract は account-wide cursor batch を1回だけ取得する。batch に entry の `OrderId` がない注文だけを direct candidate とし、`ClientKey`、`OrderId`、`EntryType=All`、`$top=500` を付けた orderactivities endpoint を最大5ページまで取得する。batch hit では direct call を発生させない。
+
+direct recovery は1 sessionあたり最大10注文、HTTP request最大20回（paging/retry込み）、audit request共有同時数2で実行する。network error/5xx は budget 内で1回だけ指数 backoff + jitter retry し、429 は `Retry-After` または既存 cooldown を設定して同一 session 内で再試行しない。page limit、途中HTTP failure、parse failureの場合はその注文のpartial activityを適用しない。
+
+direct candidate は entry の有効な `saxo_order_v1` metadata を持つ注文に限る。provider order ID がない、`DRY_RUN`、metadata 欠落の注文では外部APIを呼ばない。candidate は OrderId の安定順で並べ、`cron_metadata/saxo_orderactivities_reconciliation_state` の位置から round-robin する。direct callを1件以上開始した場合だけ最後に開始した OrderId と時刻を保存し、state write failure は注文同期を失敗扱いにしない。
+
+session結果は `saxo:orderactivities_reconciliation_summary` へ1件に集約し、pending、valid metadata、batch matched、direct candidates、attempted、deferred、recovered、no-match、failed、rate-limited、terminal counts、最大5件の sample OrderId を出力する。24時間を超えた MARKET PENDING も stale skip せず、以後の session で最大10件ずつ救済する。

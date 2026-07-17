@@ -1437,6 +1437,302 @@ test('SaxoClient.getExecutionPriceForOrderV2 uses batched audit activities and f
     assert.deepEqual(result.execution, { price: 101.6, size: 1000, executed_at: new Date('2026-01-01T00:06:00Z') })
 })
 
+test('SaxoClient.getExecutionPricesForOrdersV2 は batch miss だけ direct lookup して約定を救済する', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    const requestedUrls: string[] = []
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({
+        db,
+        logger: logger as any,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            requestedUrls.push(parsedUrl.toString())
+            if (parsedUrl.searchParams.has('OrderId')) {
+                return Response.json({
+                    Data: [{ LogId: 'direct-fill', OrderId: 'ORD-direct', Status: 'FinalFill', ExecutionPrice: 101, FillAmount: 1 }],
+                })
+            }
+            return Response.json({ Data: [{ LogId: 'other', OrderId: 'ORD-other', Status: 'Working', SubStatus: 'Confirmed' }] })
+        },
+        sleepImpl: async () => { },
+    })
+
+    const result = await client.getExecutionPricesForOrdersV2(
+        [makePendingSaxoOrder('ORD-direct')],
+        { now: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.deepEqual(result.get('evt-ORD-direct')?.execution, { price: 101, size: 1, executed_at: undefined })
+    assert.equal(requestedUrls.length, 2)
+    const directUrl = new URL(requestedUrls[1] as string)
+    assert.equal(directUrl.searchParams.get('ClientKey'), 'client-key')
+    assert.equal(directUrl.searchParams.get('OrderId'), 'ORD-direct')
+    assert.equal(directUrl.searchParams.get('EntryType'), 'All')
+    assert.equal(directUrl.searchParams.get('$top'), '500')
+    const summary = infoLogs.find((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    assert.equal(summary?.obj.directCandidates, 1)
+    assert.equal(summary?.obj.attempted, 1)
+    assert.equal(summary?.obj.recovered, 1)
+    const state = db._getStoredData()['cron_metadata/saxo_orderactivities_reconciliation_state'] as Record<string, unknown>
+    assert.equal(state.direct_lookup_after_order_id, 'ORD-direct')
+    assert.equal(state.last_direct_lookup_at, '2026-07-17T00:00:00.000Z')
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は batch hit で direct call を発生させない', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    let directRequestCount = 0
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            if (parsedUrl.searchParams.has('OrderId')) directRequestCount += 1
+            return Response.json({
+                Data: [{ LogId: 'batch-fill', OrderId: 'ORD-batch-hit', Status: 'FinalFill', ExecutionPrice: 99, FillAmount: 1 }],
+            })
+        },
+    })
+
+    const result = await client.getExecutionPricesForOrdersV2(
+        [makePendingSaxoOrder('ORD-batch-hit')],
+        { now: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(directRequestCount, 0)
+    assert.equal(result.get('evt-ORD-batch-hit')?.execution?.price, 99)
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は direct の cancel を terminal statusへ変換する', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => new URL(String(url)).searchParams.has('OrderId')
+            ? Response.json({ Data: [{ LogId: 'direct-cancel', OrderId: 'ORD-direct-cancel', Status: 'Cancelled', SubStatus: 'Confirmed' }] })
+            : Response.json({ Data: [] }),
+    })
+
+    const result = await client.getExecutionPricesForOrdersV2(
+        [makePendingSaxoOrder('ORD-direct-cancel')],
+        { now: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(result.get('evt-ORD-direct-cancel')?.terminalStatus, 'CANCELED')
+    assert.equal(result.get('evt-ORD-direct-cancel')?.terminalReason, 'saxo_confirmed_cancel')
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は metadata欠落注文だけなら外部APIを呼ばない', async () => {
+    let requestCount = 0
+    const client = new SaxoClient({
+        db: mockFirestore(),
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            requestCount += 1
+            return Response.json({ Data: [] })
+        },
+    })
+
+    const result = await client.getExecutionPricesForOrdersV2([{
+        ...makePendingSaxoOrder('ORD-metadata-missing'),
+        broker_order_metadata: undefined,
+    }], { now: new Date('2026-07-17T00:00:00Z') })
+
+    assert.equal(requestCount, 0)
+    assert.equal(result.size, 0)
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は direct candidate を10件に制限し次回へ round-robin する', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    const directOrderIds: string[] = []
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({
+        db,
+        logger: logger as any,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            const orderId = parsedUrl.searchParams.get('OrderId')
+            if (orderId) directOrderIds.push(orderId)
+            return Response.json({ Data: [] })
+        },
+    })
+    const orders = Array.from({ length: 12 }, (_, index) => makePendingSaxoOrder(`ORD-${String(index).padStart(2, '0')}`))
+
+    await client.getExecutionPricesForOrdersV2(orders, { now: new Date('2026-07-17T00:00:00Z') })
+    assert.equal(directOrderIds.length, 10)
+    assert.deepEqual(directOrderIds.slice().sort(), orders.slice(0, 10).map((order) => order.provider_order_ids[0]).sort())
+
+    directOrderIds.length = 0
+    await client.getExecutionPricesForOrdersV2(orders, { now: new Date('2026-07-17T00:10:00Z') })
+    assert.equal(directOrderIds.length, 10)
+    assert.deepEqual(directOrderIds.slice(0, 2).sort(), ['ORD-10', 'ORD-11'])
+    const summaries = infoLogs.filter((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    const secondSummary = summaries[1]?.obj as { sampleOrderIds?: { deferred?: string[] } } | undefined
+    assert.deepEqual(secondSummary?.sampleOrderIds?.deferred, ['ORD-08', 'ORD-09'])
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は request budget 到達候補を deferred にする', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({
+        db,
+        logger: logger as any,
+        baseUrl: 'https://example.com',
+        sleepImpl: async () => { },
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            if (!parsedUrl.searchParams.has('OrderId')) return Response.json({ Data: [] })
+            if (parsedUrl.pathname.endsWith('/orderactivities/')) {
+                const orderId = parsedUrl.searchParams.get('OrderId')
+                return Response.json({
+                    Data: [{ LogId: `${orderId}-page-1`, OrderId: orderId, Status: 'Working', SubStatus: 'Confirmed' }],
+                    __next: `/direct-page-2?OrderId=${orderId}`,
+                })
+            }
+            if (parsedUrl.pathname === '/direct-page-2') {
+                const orderId = parsedUrl.searchParams.get('OrderId')
+                return Response.json({
+                    Data: [{ LogId: `${orderId}-page-2`, OrderId: orderId, Status: 'Working', SubStatus: 'Confirmed' }],
+                    __next: `/direct-page-3?OrderId=${orderId}`,
+                })
+            }
+            const orderId = parsedUrl.searchParams.get('OrderId')
+            return Response.json({
+                Data: [{ LogId: `${orderId}-page-3`, OrderId: orderId, Status: 'Working', SubStatus: 'Confirmed' }],
+            })
+        },
+    })
+
+    const orders = Array.from({ length: 10 }, (_, index) => makePendingSaxoOrder(`ORD-budget-${String(index).padStart(2, '0')}`))
+    await client.getExecutionPricesForOrdersV2(orders, { now: new Date('2026-07-17T00:00:00Z') })
+
+    const summary = infoLogs.find((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    assert.equal(summary?.obj.directRequests, 20)
+    assert.equal(summary?.obj.rateLimited, 0)
+    assert.equal(summary?.obj.failed, 0)
+    assert.equal((summary?.obj.attempted as number) + (summary?.obj.deferred as number), 10)
+    assert.ok((summary?.obj.deferred as number) > 0)
+    const sampleOrderIds = summary?.obj.sampleOrderIds as { deferred?: string[] }
+    assert.ok((sampleOrderIds.deferred?.length ?? 0) > 0)
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は direct の5xxを1回retryし、途中failureのpartial activityを破棄する', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    let directRequests = 0
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        sleepImpl: async () => { },
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            const isDirect = parsedUrl.searchParams.has('OrderId') || parsedUrl.pathname === '/direct-page-2'
+            if (!isDirect) return Response.json({ Data: [] })
+            directRequests += 1
+            if (directRequests === 1) return new Response('temporary', { status: 503 })
+            if (directRequests === 2) {
+                return Response.json({
+                    Data: [{ LogId: 'partial', OrderId: 'ORD-partial-direct', Status: 'Fill', ExecutionPrice: 100, FillAmount: 0.4 }],
+                    __next: '/direct-page-2',
+                })
+            }
+            return new Response('failed', { status: 503 })
+        },
+    })
+
+    const result = await client.getExecutionPricesForOrdersV2(
+        [makePendingSaxoOrder('ORD-partial-direct')],
+        { now: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(directRequests, 3)
+    assert.equal(result.get('evt-ORD-partial-direct')?.execution, null)
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は direct 429を同一sessionでretryしない', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    let directRequests = 0
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({
+        db,
+        logger: logger as any,
+        baseUrl: 'https://example.com',
+        rateLimitCooldownMs: 60_000,
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            if (parsedUrl.searchParams.has('OrderId')) directRequests += 1
+            return parsedUrl.searchParams.has('OrderId')
+                ? new Response('slow down', { status: 429, headers: { 'Retry-After': '60' } })
+                : Response.json({ Data: [] })
+        },
+    })
+
+    await client.getExecutionPricesForOrdersV2(
+        [makePendingSaxoOrder('ORD-rate-limited')],
+        { now: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(directRequests, 1)
+    const summary = infoLogs.find((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    assert.equal(summary?.obj.rateLimited, 1)
+})
+
 test('SaxoClient.getExecutionPriceForOrderV2 maps confirmed audit terminal states to shared result', async () => {
     const cases = [
         { name: 'confirmed cancel', status: 'Cancelled', subStatus: 'Confirmed', expectedStatus: 'CANCELED', expectedReason: 'saxo_confirmed_cancel' },

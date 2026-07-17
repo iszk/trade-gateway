@@ -138,6 +138,7 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 ### ドキュメント ID
 - `task_status`（固定）
 - `saxo_orderactivities_poll_state` — Saxo audit orderactivities の batch polling 状態
+- `saxo_orderactivities_reconciliation_state` — Saxo direct recovery の round-robin 状態
 
 ### フィールド
 `task_status`:
@@ -154,7 +155,14 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 ### 制約
 - `task_status` は Firestoreトランザクションを使用して読み書きを行い、重複実行を防止する
 - `saxo_orderactivities_poll_state` は Saxo audit polling の cursor/lookback 管理専用で、30分超の実行間隔では `last_poll_at` から30分巻き戻して再取得する
-- TTL は不要（上書きで管理）
+- `saxo_orderactivities_reconciliation_state` は batch polling と分離した direct recovery の位置管理専用で、TTL は不要（上書きで管理）
+
+`saxo_orderactivities_reconciliation_state`:
+
+- `direct_lookup_after_order_id` (string, optional) — 次の10分 sessionで round-robin を開始する直前の Saxo entry OrderId。direct callを1件以上開始した session の最後の開始位置だけを保存する
+- `last_direct_lookup_at` (timestamp string, optional) — direct recovery stateを最後に保存した session時刻
+
+Saxo direct recovery は1 sessionあたり最大10注文、HTTP request最大20回（paging/retry込み）、1注文あたり最大5ページ、audit request共有同時数2で制限する。state write failureでは注文データを巻き戻さず、次回同じ候補を再照会し得る。batch hitの注文はdirect stateの候補にも含めない。
 
 ## 6. `saxo_auth_data`
 Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_auth_data/saxo_auth` の固定ドキュメントを使う。

@@ -56,6 +56,62 @@ test('executeTenMinutelyTask: orders_v2 の PENDING を EXECUTED に更新する
     assert.deepEqual(updatedOrders[0].executed_at, new Date('2026-01-01T00:00:00Z'))
 })
 
+test('executeTenMinutelyTask: broker単位でbulk fetcherを1回呼び、missing resultは単件fallbackする', async () => {
+    const orders: any[] = [
+        {
+            id: 'bulk-saxo-1', broker: 'saxo', ticker: 'FxSpot:21', side: 'BUY', order_type: 'MARKET',
+            status: 'PENDING', provider_order_ids: ['ORD-bulk-1'], requested_size: 1, executed_size: 0,
+            executed_price: null, created_at: new Date('2026-01-01T00:00:00Z'),
+        },
+        {
+            id: 'bulk-saxo-2', broker: 'saxo', ticker: 'FxSpot:21', side: 'BUY', order_type: 'MARKET',
+            status: 'PENDING', provider_order_ids: ['ORD-bulk-2'], requested_size: 1, executed_size: 0,
+            executed_price: null, created_at: new Date('2026-01-01T00:00:00Z'),
+        },
+    ]
+    const updatedOrders: any[] = []
+    let bulkCalls = 0
+    let singleCalls = 0
+    let receivedNow: Date | undefined
+    const { logger, logs } = makeLogger()
+    const ctx = makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => orders,
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPriceForOrderV2: async () => {
+                    singleCalls += 1
+                    return { execution: { price: 102, size: 1 } }
+                },
+                getExecutionPricesForOrdersV2: async (bulkOrders, options) => {
+                    bulkCalls += 1
+                    receivedNow = options.now
+                    return new Map([[bulkOrders[0]?.id as string, {
+                        execution: { price: 101, size: 1 },
+                    }]])
+                },
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(bulkCalls, 1)
+    assert.equal(singleCalls, 1)
+    assert.ok(receivedNow instanceof Date)
+    assert.equal(updatedOrders.length, 2)
+    assert.deepEqual(updatedOrders.map((order) => order.status), ['EXECUTED', 'EXECUTED'])
+    assert.deepEqual(updatedOrders.map((order) => order.executed_price), [101, 102])
+    assert.deepEqual(logs.find((log) => log.event === 'cron:orders_v2_bulk_result_missing'), {
+        event: 'cron:orders_v2_bulk_result_missing',
+        broker: 'saxo',
+        count: 1,
+        orderIds: ['bulk-saxo-2'],
+        message: 'bulk execution sync returned no result; falling back to single-order sync',
+    })
+})
+
 test('executeTenMinutelyTask: entry の部分約定を PENDING のまま累積同期し、再取得では no-op にする', async () => {
     const createdAt = new Date('2026-01-01T00:00:00Z')
     const partialAt = new Date('2026-01-01T00:05:00Z')
@@ -526,7 +582,7 @@ test('executeTenMinutelyTask: entry metadata はキー順だけが異なる場�
     assert.equal(updatedOrders.length, 0)
 })
 
-test('executeTenMinutelyTask: 古い Saxo PENDING 注文は約定同期をスキップする', async () => {
+test('executeTenMinutelyTask: 24時間超の Saxo PENDING 注文も同期対象にする', async () => {
     const oldPendingOrder: any = {
         id: 'v2-saxo-stale-pending',
         broker: 'saxo',
@@ -555,8 +611,8 @@ test('executeTenMinutelyTask: 古い Saxo PENDING 注文は約定同期をスキ
 
     await executeTenMinutelyTask(ctx)
 
-    assert.equal(fetchCount, 0)
-    assert.equal(updatedOrders.length, 0)
+    assert.equal(fetchCount, 1)
+    assert.equal(updatedOrders[0]?.status, 'EXECUTED')
 })
 
 test('executeTenMinutelyTask: Saxo PENDING 注文の約定同期は10件を超えてもスキップしない', async () => {
