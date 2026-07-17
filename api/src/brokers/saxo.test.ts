@@ -1577,8 +1577,10 @@ test('SaxoClient.getExecutionPricesForOrdersV2 は direct candidate を10件に�
         },
     })
     const directOrderIds: string[] = []
+    const { logger, infoLogs } = createCapturingLogger()
     const client = new SaxoClient({
         db,
+        logger: logger as any,
         baseUrl: 'https://example.com',
         fetchImpl: async (url) => {
             const parsedUrl = new URL(String(url))
@@ -1597,6 +1599,9 @@ test('SaxoClient.getExecutionPricesForOrdersV2 は direct candidate を10件に�
     await client.getExecutionPricesForOrdersV2(orders, { now: new Date('2026-07-17T00:10:00Z') })
     assert.equal(directOrderIds.length, 10)
     assert.deepEqual(directOrderIds.slice(0, 2).sort(), ['ORD-10', 'ORD-11'])
+    const summaries = infoLogs.filter((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    const secondSummary = summaries[1]?.obj as { sampleOrderIds?: { deferred?: string[] } } | undefined
+    assert.deepEqual(secondSummary?.sampleOrderIds?.deferred, ['ORD-08', 'ORD-09'])
 })
 
 test('SaxoClient.getExecutionPricesForOrdersV2 は direct の5xxを1回retryし、途中failureのpartial activityを破棄する', async () => {

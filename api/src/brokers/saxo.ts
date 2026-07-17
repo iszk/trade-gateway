@@ -969,7 +969,7 @@ export class SaxoClient {
                 }
 
                 deferred += sortedCandidates.length - selectedCandidates.length
-                for (const candidate of sortedCandidates.slice(selectedCandidates.length)) {
+                for (const candidate of roundRobinCandidates.slice(selectedCandidates.length)) {
                     addSample(sampleOrderIds.deferred, candidate.entryOrderId)
                 }
 
