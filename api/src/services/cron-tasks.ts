@@ -233,7 +233,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                         size: info.size,
                     },
                     isCompleted
-                        ? 'orders_v2 status updated to EXECUTED'
+                        ? 'orders_v2 execution synchronized as EXECUTED'
                         : 'orders_v2 partial execution progress synchronized',
                 )
             } else if (syncResult.terminalStatus !== undefined) {
@@ -245,7 +245,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                         status: syncResult.terminalStatus,
                         reason: syncResult.terminalReason,
                     },
-                    `orders_v2 status updated to ${syncResult.terminalStatus}`,
+                    `orders_v2 terminal status synchronized as ${syncResult.terminalStatus}`,
                 )
             } else {
                 ctx.logger.info(

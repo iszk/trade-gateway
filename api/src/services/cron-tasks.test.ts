@@ -8,8 +8,8 @@ const makeLogger = () => {
     const logs: Record<string, unknown>[] = []
     return {
         logger: {
-            info: (obj: Record<string, unknown>) => logs.push(obj),
-            warn: (obj: Record<string, unknown>) => logs.push(obj),
+            info: (obj: Record<string, unknown>, msg?: string) => logs.push({ ...obj, message: msg }),
+            warn: (obj: Record<string, unknown>, msg?: string) => logs.push({ ...obj, message: msg }),
         },
         logs,
     }
@@ -320,6 +320,43 @@ test('executeTenMinutelyTask: 部分約定後の confirmed cancel は terminal �
         log.status === 'CANCELED'
     )))
     assert.equal(logs.some((log) => log.event === 'cron:orders_v2_synced'), false)
+})
+
+test('executeTenMinutelyTask: terminal 同期ログは no-op でも更新を断定しない', async () => {
+    const { logger, logs } = makeLogger()
+    const updatedOrders: any[] = []
+    const ctx = makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => [{
+            id: 'v2-terminal-no-op-log',
+            broker: 'saxo',
+            ticker: 'FxSpot:21',
+            status: 'CANCELED',
+            provider_order_ids: ['ORD-terminal-no-op-log'],
+            requested_size: 1,
+            executed_size: 0,
+            executed_price: null,
+            created_at: new Date('2026-01-01T00:00:00Z'),
+        } as any],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: null,
+                    terminalStatus: 'CANCELED' as const,
+                    terminalReason: 'saxo_confirmed_cancel',
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.deepEqual(updatedOrders, [])
+    assert.equal(
+        logs.find((log) => log.event === 'cron:orders_v2_terminal_status_synced')?.message,
+        'orders_v2 terminal status synchronized as CANCELED',
+    )
 })
 
 test('executeTenMinutelyTask: PENDING の IFDOCO 親注文が EXECUTED になったとき exit_sync_status を MONITORING にする', async () => {
