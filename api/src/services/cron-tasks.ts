@@ -3,7 +3,12 @@ import { isDeepStrictEqual } from 'node:util'
 import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
-import type { ExecutionSyncInfo, ExecutionTerminalStatus, OrderExecutionSyncResult } from '../types/execution-sync.js'
+import type {
+    BulkExecutionPriceFetcherLike,
+    ExecutionSyncInfo,
+    ExecutionTerminalStatus,
+    OrderExecutionSyncResult,
+} from '../types/execution-sync.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -14,10 +19,9 @@ type PositionFetcherLike = {
     fetchAllPositions(broker?: string): Promise<unknown[]>
 }
 
-const SAXO_PENDING_SYNC_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const EPSILON = 0.00000001
 
-export type ExecutionPriceFetcherLike = {
+export type ExecutionPriceFetcherLike = BulkExecutionPriceFetcherLike & {
     getExecutionPriceForOrderV2(order: OrderV2): Promise<OrderExecutionSyncResult>
 }
 
@@ -64,14 +68,6 @@ const areSameBrokerOrderMetadata = (
     left: BrokerOrderMetadata | undefined,
     right: BrokerOrderMetadata | undefined,
 ): boolean => isDeepStrictEqual(left, right)
-
-const getOrderAgeMs = (order: Pick<OrderV2, 'created_at'>, nowMs: number): number => (
-    nowMs - order.created_at.getTime()
-)
-
-const shouldSkipStaleSaxoPendingOrder = (order: OrderV2, nowMs: number): boolean => (
-    order.broker === 'saxo' && order.order_type === 'MARKET' && getOrderAgeMs(order, nowMs) > SAXO_PENDING_SYNC_MAX_AGE_MS
-)
 
 const resolveOrderStatus = (
     execution: ExecutionSyncInfo | null,
@@ -162,6 +158,70 @@ export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:hourly_task' }, 'hourly task executed')
 }
 
+const applyPendingOrderSyncResult = async (
+    ctx: {
+        logger: Logger
+        updateOrderV2: UpdateOrderV2Fn
+    },
+    order: OrderV2,
+    syncResult: OrderExecutionSyncResult,
+    logNotFound: boolean,
+): Promise<void> => {
+    const providerOrderId = order.provider_order_ids[0]
+    const info = syncResult.execution
+    if (info !== null && info.size > order.requested_size + EPSILON) {
+        ctx.logger.warn(
+            {
+                event: 'cron:orders_v2_sync_invalid_size',
+                orderId: order.id,
+                requestedSize: order.requested_size,
+                executionSize: info.size,
+            },
+            'execution size exceeded requested_size; skipping orders_v2 sync update',
+        )
+        return
+    }
+
+    await applyOrderExecutionSyncResult(order, syncResult, ctx.updateOrderV2)
+
+    const isCompleted = info !== null && info.size >= order.requested_size - EPSILON
+    if (info !== null && (isCompleted || syncResult.terminalStatus !== 'CANCELED')) {
+        ctx.logger.info(
+            {
+                event: 'cron:orders_v2_synced',
+                broker: order.broker,
+                orderId: order.id,
+                price: info.price,
+                size: info.size,
+            },
+            isCompleted
+                ? 'orders_v2 execution synchronized as EXECUTED'
+                : 'orders_v2 partial execution progress synchronized',
+        )
+    } else if (syncResult.terminalStatus !== undefined) {
+        ctx.logger.info(
+            {
+                event: 'cron:orders_v2_terminal_status_synced',
+                broker: order.broker,
+                orderId: order.id,
+                status: syncResult.terminalStatus,
+                reason: syncResult.terminalReason,
+            },
+            `orders_v2 terminal status synchronized as ${syncResult.terminalStatus}`,
+        )
+    } else if (logNotFound) {
+        ctx.logger.info(
+            {
+                event: 'cron:orders_v2_execution_not_found',
+                broker: order.broker,
+                orderId: order.id,
+                provider_order_id: providerOrderId,
+            },
+            'orders_v2 execution not yet confirmed',
+        )
+    }
+}
+
 /** Phase 3: orders_v2 の PENDING を確定させる */
 const fetchAndUpdatePendingOrdersV2 = async (ctx: {
     logger: Logger
@@ -176,92 +236,51 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
         'syncing pending orders_v2',
     )
 
+    const ordersByBroker = new Map<string, OrderV2[]>()
     for (const order of pendingOrders) {
-        if (shouldSkipStaleSaxoPendingOrder(order, ctx.nowMs)) {
-            ctx.logger.info(
-                {
-                    event: 'cron:saxo_pending_order_sync_skipped_stale',
-                    orderId: order.id,
-                    created_at: order.created_at.toISOString(),
-                    maxAgeMs: SAXO_PENDING_SYNC_MAX_AGE_MS,
-                },
-                'skipping stale Saxo pending order execution sync',
-            )
-            continue
-        }
+        const orders = ordersByBroker.get(order.broker) ?? []
+        orders.push(order)
+        ordersByBroker.set(order.broker, orders)
+    }
 
-        const fetcher = ctx.executionPriceFetchers[order.broker]
+    for (const [broker, orders] of ordersByBroker) {
+        const fetcher = ctx.executionPriceFetchers[broker]
         if (!fetcher) {
             ctx.logger.info(
-                { event: 'cron:execution_price_fetcher_missing', broker: order.broker },
+                { event: 'cron:execution_price_fetcher_missing', broker },
                 'no execution price fetcher for broker (orders_v2)',
             )
             continue
         }
 
-        try {
-            // 親注文（1つ目）のステータスを確認
-            const providerOrderId = order.provider_order_ids[0]
-            if (!providerOrderId) continue
-
-            const syncResult = await fetcher.getExecutionPriceForOrderV2(order)
-
-            const info = syncResult.execution
-            if (info !== null && info.size > order.requested_size + EPSILON) {
-                ctx.logger.warn(
-                    {
-                        event: 'cron:orders_v2_sync_invalid_size',
-                        orderId: order.id,
-                        requestedSize: order.requested_size,
-                        executionSize: info.size,
-                    },
-                    'execution size exceeded requested_size; skipping orders_v2 sync update',
-                )
-                continue
-            }
-
-            await applyOrderExecutionSyncResult(order, syncResult, ctx.updateOrderV2)
-
-            const isCompleted = info !== null && info.size >= order.requested_size - EPSILON
-            if (info !== null && (isCompleted || syncResult.terminalStatus !== 'CANCELED')) {
+        if (fetcher.getExecutionPricesForOrdersV2) {
+            try {
+                const results = await fetcher.getExecutionPricesForOrdersV2(orders, { now: new Date(ctx.nowMs) })
+                for (const order of orders) {
+                    const result = results.get(order.id)
+                    if (result) await applyPendingOrderSyncResult(ctx, order, result, false)
+                }
+            } catch (error) {
                 ctx.logger.info(
-                    {
-                        event: 'cron:orders_v2_synced',
-                        broker: order.broker,
-                        orderId: order.id,
-                        price: info.price,
-                        size: info.size,
-                    },
-                    isCompleted
-                        ? 'orders_v2 execution synchronized as EXECUTED'
-                        : 'orders_v2 partial execution progress synchronized',
-                )
-            } else if (syncResult.terminalStatus !== undefined) {
-                ctx.logger.info(
-                    {
-                        event: 'cron:orders_v2_terminal_status_synced',
-                        broker: order.broker,
-                        orderId: order.id,
-                        status: syncResult.terminalStatus,
-                        reason: syncResult.terminalReason,
-                    },
-                    `orders_v2 terminal status synchronized as ${syncResult.terminalStatus}`,
-                )
-            } else {
-                ctx.logger.info(
-                    {
-                        event: 'cron:orders_v2_execution_not_found',
-                        broker: order.broker, orderId: order.id,
-                        provider_order_id: providerOrderId,
-                    },
-                    'orders_v2 execution not yet confirmed',
+                    { event: 'cron:orders_v2_bulk_sync_failed', broker, count: orders.length, error },
+                    'failed to bulk sync orders_v2',
                 )
             }
-        } catch (error) {
-            ctx.logger.info(
-                { event: 'cron:orders_v2_sync_failed', broker: order.broker, orderId: order.id, error },
-                'failed to sync orders_v2',
-            )
+            continue
+        }
+
+        for (const order of orders) {
+            try {
+                const providerOrderId = order.provider_order_ids[0]
+                if (!providerOrderId) continue
+                const syncResult = await fetcher.getExecutionPriceForOrderV2(order)
+                await applyPendingOrderSyncResult(ctx, order, syncResult, true)
+            } catch (error) {
+                ctx.logger.info(
+                    { event: 'cron:orders_v2_sync_failed', broker, orderId: order.id, error },
+                    'failed to sync orders_v2',
+                )
+            }
         }
     }
 }

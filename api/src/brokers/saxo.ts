@@ -2,7 +2,11 @@ import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient, setFirestoreDocument } from '../firestore.js'
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { SaxoOrderMetadata } from '../types/broker-order-metadata.js'
-import type { ExecutionSyncTerminal, OrderExecutionSyncResult } from '../types/execution-sync.js'
+import type {
+    ExecutionSyncOptions,
+    ExecutionSyncTerminal,
+    OrderExecutionSyncResult,
+} from '../types/execution-sync.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { Position } from '../types/position.js'
 import type { Balance } from '../types/balance.js'
@@ -43,6 +47,7 @@ type SaxoClientOptions = {
     tokenEncryptionKey?: string
     authStore?: SaxoAuthStore
     refreshWaitIntervalMs?: number
+    sleepImpl?: (ms: number) => Promise<void>
 }
 
 type SaxoTokenResponse = {
@@ -118,6 +123,11 @@ type SaxoOrderActivitiesPollState = {
     next_poll_url?: string
 }
 
+type SaxoOrderActivitiesReconciliationState = {
+    direct_lookup_after_order_id?: string
+    last_direct_lookup_at?: string
+}
+
 const cancelResponseBody = async (response: Response): Promise<void> => {
     try {
         await response.body?.cancel()
@@ -160,6 +170,7 @@ type SaxoInstrumentDetailsResponse =
 
 const CRON_METADATA_COLLECTION = 'cron_metadata'
 const SAXO_ORDER_ACTIVITIES_POLL_DOC = 'saxo_orderactivities_poll_state'
+const SAXO_ORDER_ACTIVITIES_RECONCILIATION_DOC = 'saxo_orderactivities_reconciliation_state'
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000
 const SAXO_AUDIT_INITIAL_LOOKBACK_MS = 48 * 60 * 60 * 1000
 const SAXO_AUDIT_OVERLAP_MS = 30 * 60 * 1000
@@ -167,6 +178,14 @@ const SAXO_AUDIT_CURSOR_MAX_IDLE_MS = 30 * 60 * 1000
 const SAXO_AUDIT_BATCH_CACHE_MS = 60 * 1000
 const SAXO_INSTRUMENT_DETAILS_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const SAXO_INSTRUMENT_DETAILS_FETCH_CONCURRENCY = 5
+const SAXO_RECONCILIATION_MAX_DIRECT_CANDIDATES = 10
+const SAXO_RECONCILIATION_MAX_DIRECT_REQUESTS = 20
+const SAXO_RECONCILIATION_MAX_DIRECT_PAGES_PER_ORDER = 5
+const SAXO_RECONCILIATION_REQUEST_CONCURRENCY = 2
+const SAXO_RECONCILIATION_PAGE_SIZE = 500
+const SAXO_RECONCILIATION_MAX_RETRIES = 1
+const SAXO_RECONCILIATION_RETRY_BASE_MS = 100
+const SAXO_RECONCILIATION_RETRY_JITTER_MS = 100
 const FIXED_FX_RATES_TO_JPY: Record<string, number> = {
     JPY: 1,
     USD: 160,
@@ -291,6 +310,48 @@ const mapWithConcurrency = async <T, U>(
     return results
 }
 
+class AsyncConcurrencyLimiter {
+    private active = 0
+    private readonly queue: Array<{
+        task: () => Promise<unknown>
+        resolve: (value: unknown) => void
+        reject: (error: unknown) => void
+    }> = []
+
+    constructor(private readonly limit: number) { }
+
+    async run<T>(task: () => Promise<T>): Promise<T> {
+        if (this.active >= this.limit) {
+            return new Promise<T>((resolve, reject) => {
+                this.queue.push({ task, resolve: resolve as (value: unknown) => void, reject })
+            })
+        }
+
+        return this.execute(task)
+    }
+
+    private async execute<T>(task: () => Promise<T>): Promise<T> {
+        this.active += 1
+        try {
+            return await task()
+        } finally {
+            this.active -= 1
+            const next = this.queue.shift()
+            if (next) {
+                void this.execute(next.task).then(next.resolve, next.reject)
+            }
+        }
+    }
+}
+
+const saxoAuditRequestLimiter = new AsyncConcurrencyLimiter(SAXO_RECONCILIATION_REQUEST_CONCURRENCY)
+
+class SaxoDirectLookupError extends Error {
+    constructor(readonly reason: 'budget' | 'rate_limited' | 'failed') {
+        super(`Saxo direct audit lookup ${reason}`)
+    }
+}
+
 const parseRetryAfterMs = (value: string | null): number | null => {
     if (!value) return null
 
@@ -409,6 +470,7 @@ export class SaxoClient {
     private readonly rateLimitCooldownMs: number
     private readonly tokenEncryptionKey?: string
     private readonly refreshWaitIntervalMs: number
+    private readonly sleepImpl: (ms: number) => Promise<void>
     private authStore?: SaxoAuthStore
     private rateLimitedUntilMs = 0
     private auditActivitiesCache?: {
@@ -430,6 +492,7 @@ export class SaxoClient {
         this.tokenEncryptionKey = options.tokenEncryptionKey
         this.authStore = options.authStore
         this.refreshWaitIntervalMs = options.refreshWaitIntervalMs ?? 1_000
+        this.sleepImpl = options.sleepImpl ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
     }
 
     private getFirestore(): Firestore {
@@ -510,6 +573,32 @@ export class SaxoClient {
         )
     }
 
+    private async getOrderActivitiesReconciliationState(): Promise<SaxoOrderActivitiesReconciliationState> {
+        const doc = await this.getFirestore()
+            .collection(CRON_METADATA_COLLECTION)
+            .doc(SAXO_ORDER_ACTIVITIES_RECONCILIATION_DOC)
+            .get()
+        return doc.exists ? doc.data() as SaxoOrderActivitiesReconciliationState : {}
+    }
+
+    private async saveOrderActivitiesReconciliationState(
+        state: SaxoOrderActivitiesReconciliationState,
+    ): Promise<void> {
+        const docRef = this.getFirestore()
+            .collection(CRON_METADATA_COLLECTION)
+            .doc(SAXO_ORDER_ACTIVITIES_RECONCILIATION_DOC)
+        await setFirestoreDocument(
+            docRef,
+            state as Record<string, unknown>,
+            {
+                collection: CRON_METADATA_COLLECTION,
+                docId: SAXO_ORDER_ACTIVITIES_RECONCILIATION_DOC,
+                logger: this.logger,
+            },
+            { merge: true },
+        )
+    }
+
     private buildOrderActivitiesInitialUrl(auth: SaxoAuthData, state: SaxoOrderActivitiesPollState, now: Date): string {
         const params = new URLSearchParams()
         const clientKey = auth.accounts?.[0]?.clientKey
@@ -536,7 +625,7 @@ export class SaxoClient {
         return `${this.baseUrl}/cs/v1/audit/orderactivities/?${params.toString()}`
     }
 
-    private async fetchOrderActivitiesBatch(): Promise<SaxoOrderActivitiesPageResult> {
+    private async fetchOrderActivitiesBatch(now = new Date()): Promise<SaxoOrderActivitiesPageResult> {
         if (this.auditActivitiesCache && Date.now() - this.auditActivitiesCache.fetchedAtMs <= SAXO_AUDIT_BATCH_CACHE_MS) {
             return this.auditActivitiesCache.result
         }
@@ -566,15 +655,14 @@ export class SaxoClient {
         const auth = await this.getAuth()
         if (!auth) return cacheResult({ complete: false, reason: 'HTTP_ERROR' })
 
-        const now = new Date()
         const state = await this.getOrderActivitiesPollState()
         const result = await fetchSaxoOrderActivitiesPages({
             initialUrl: this.buildOrderActivitiesInitialUrl(auth, state, now),
             maxPages: SAXO_ORDER_ACTIVITIES_MAX_PAGES,
             resolveNextUrl: (url) => this.buildSaxoApiUrl(url),
-            fetchPage: (url) => this.fetchImpl(url, {
+            fetchPage: (url) => saxoAuditRequestLimiter.run(() => this.fetchImpl(url, {
                 headers: { Authorization: `Bearer ${accessToken}` },
-            }),
+            })),
             onHttpError: async (response) => {
                 if (response.status === 429) {
                     this.markRateLimited(response)
@@ -609,6 +697,313 @@ export class SaxoClient {
         }
 
         return cacheResult(result)
+    }
+
+    private buildOrderActivitiesDirectUrl(clientKey: string, orderId: string): string {
+        const params = new URLSearchParams({
+            ClientKey: clientKey,
+            OrderId: orderId,
+            EntryType: 'All',
+            '$top': String(SAXO_RECONCILIATION_PAGE_SIZE),
+        })
+        return `${this.baseUrl}/cs/v1/audit/orderactivities/?${params.toString()}`
+    }
+
+    private async fetchOrderActivitiesDirect(
+        orderId: string,
+        accessToken: string,
+        clientKey: string,
+        requestBudget: { used: number },
+    ): Promise<
+        | { status: 'complete', resolution: SaxoOrderActivityResolution }
+        | { status: 'failed' | 'rate_limited' | 'budget' }
+    > {
+        let failureReason: 'failed' | 'rate_limited' | 'budget' = 'failed'
+        let retryCount = 0
+        const fetchPage = async (url: string): Promise<Response> => {
+            if (this.isRateLimited()) {
+                failureReason = 'rate_limited'
+                throw new SaxoDirectLookupError('rate_limited')
+            }
+            if (requestBudget.used >= SAXO_RECONCILIATION_MAX_DIRECT_REQUESTS) {
+                failureReason = 'budget'
+                throw new SaxoDirectLookupError('budget')
+            }
+
+            requestBudget.used += 1
+            try {
+                const response = await saxoAuditRequestLimiter.run(() => this.fetchImpl(url, {
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                }))
+                if (response.status >= 500 && response.status <= 599 && retryCount < SAXO_RECONCILIATION_MAX_RETRIES) {
+                    retryCount += 1
+                    await cancelResponseBody(response)
+                    const backoffMs = SAXO_RECONCILIATION_RETRY_BASE_MS * (2 ** (retryCount - 1))
+                    const jitterMs = Math.floor(Math.random() * SAXO_RECONCILIATION_RETRY_JITTER_MS)
+                    await this.sleepImpl(backoffMs + jitterMs)
+                    return fetchPage(url)
+                }
+                return response
+            } catch (error) {
+                if (error instanceof SaxoDirectLookupError) throw error
+                if (retryCount < SAXO_RECONCILIATION_MAX_RETRIES) {
+                    retryCount += 1
+                    const backoffMs = SAXO_RECONCILIATION_RETRY_BASE_MS * (2 ** (retryCount - 1))
+                    const jitterMs = Math.floor(Math.random() * SAXO_RECONCILIATION_RETRY_JITTER_MS)
+                    await this.sleepImpl(backoffMs + jitterMs)
+                    return fetchPage(url)
+                }
+                failureReason = 'failed'
+                throw new SaxoDirectLookupError('failed')
+            }
+        }
+
+        let result: SaxoOrderActivitiesPageResult
+        try {
+            result = await fetchSaxoOrderActivitiesPages({
+                initialUrl: this.buildOrderActivitiesDirectUrl(clientKey, orderId),
+                maxPages: SAXO_RECONCILIATION_MAX_DIRECT_PAGES_PER_ORDER,
+                resolveNextUrl: (url) => this.buildSaxoApiUrl(url),
+                fetchPage,
+                onHttpError: (response) => {
+                    if (response.status === 429) {
+                        failureReason = 'rate_limited'
+                        this.markRateLimited(response)
+                    } else {
+                        failureReason = 'failed'
+                    }
+                },
+            })
+        } catch (error) {
+            if (error instanceof SaxoDirectLookupError) return { status: error.reason }
+            return { status: failureReason }
+        }
+
+        if (!result.complete) return { status: failureReason }
+        const matchingActivities = result.activities.filter((activity) => activity.OrderId === orderId)
+        return {
+            status: 'complete',
+            resolution: resolveSaxoOrderActivities(matchingActivities),
+        }
+    }
+
+    async getExecutionPricesForOrdersV2(
+        orders: OrderV2[],
+        options: ExecutionSyncOptions,
+    ): Promise<Map<string, OrderExecutionSyncResult>> {
+        const results = new Map<string, OrderExecutionSyncResult>()
+        const validOrders = orders.flatMap((order) => {
+            const providerOrderId = order.provider_order_ids[0]
+            const metadata = order.broker_order_metadata
+            if (
+                !providerOrderId ||
+                providerOrderId === 'DRY_RUN' ||
+                metadata?.kind !== 'saxo_order_v1' ||
+                !metadata.entry.resolved.order_id
+            ) {
+                return []
+            }
+            const result: OrderExecutionSyncResult = {
+                execution: null,
+                brokerOrderMetadata: metadata,
+            }
+            results.set(order.id, result)
+            return [{ order, metadata, entryOrderId: metadata.entry.resolved.order_id }]
+        })
+
+        const terminalCounts: Record<string, number> = {}
+        const sampleOrderIds = {
+            noMatch: [] as string[],
+            failed: [] as string[],
+            rateLimited: [] as string[],
+            deferred: [] as string[],
+        }
+        const addSample = (target: string[], orderId: string): void => {
+            if (target.length < 5) target.push(orderId)
+        }
+        let batchMatched = 0
+        let recovered = 0
+        let directCandidates = 0
+        let attempted = 0
+        let deferred = 0
+        let failed = 0
+        let rateLimited = 0
+        let noMatch = 0
+        let directRequests = 0
+        let batchComplete = false
+
+        const recordResolution = (resolution: SaxoOrderActivityResolution): void => {
+            const terminal = toSaxoTerminalStatus(resolution.brokerState)
+            if (terminal.terminalStatus) {
+                terminalCounts[terminal.terminalStatus] = (terminalCounts[terminal.terminalStatus] ?? 0) + 1
+            }
+            if (resolution.execution !== null || terminal.terminalStatus !== undefined) recovered += 1
+        }
+
+        if (validOrders.length > 0) {
+            let batch: SaxoOrderActivitiesPageResult
+            try {
+                batch = await this.fetchOrderActivitiesBatch(options.now)
+            } catch (error) {
+                this.logger.warn({ event: 'saxo:orderactivities_reconciliation_batch_failed', error }, 'Saxo reconciliation batch failed')
+                batch = { complete: false, reason: 'HTTP_ERROR' }
+            }
+
+            if (batch.complete) {
+                batchComplete = true
+                const directCandidateOrders = validOrders.filter(({ order, entryOrderId }) => {
+                    const matchingActivities = batch.activities.filter((activity) => activity.OrderId === entryOrderId)
+                    if (matchingActivities.length === 0) return true
+                    batchMatched += 1
+                    const resolution = resolveSaxoOrderActivities(matchingActivities)
+                    recordResolution(resolution)
+                    results.set(order.id, {
+                        execution: resolution.execution,
+                        ...toSaxoTerminalStatus(resolution.brokerState),
+                        brokerOrderMetadata: order.broker_order_metadata,
+                    })
+                    return false
+                })
+                directCandidates = directCandidateOrders.length
+
+                let state: SaxoOrderActivitiesReconciliationState = {}
+                try {
+                    state = await this.getOrderActivitiesReconciliationState()
+                } catch (error) {
+                    this.logger.warn({ event: 'saxo:orderactivities_reconciliation_state_read_failed', error }, 'failed to read Saxo reconciliation state')
+                }
+
+                const sortedCandidates = directCandidateOrders
+                    .slice()
+                    .sort((left, right) => left.entryOrderId.localeCompare(right.entryOrderId))
+                const cursor = state.direct_lookup_after_order_id
+                let startIndex = 0
+                if (cursor && sortedCandidates.length > 0) {
+                    const cursorIndex = sortedCandidates.findIndex((candidate) => candidate.entryOrderId === cursor)
+                    startIndex = cursorIndex >= 0
+                        ? (cursorIndex + 1) % sortedCandidates.length
+                        : sortedCandidates.findIndex((candidate) => candidate.entryOrderId > cursor)
+                    if (startIndex < 0) startIndex = 0
+                }
+                const roundRobinCandidates = sortedCandidates.length === 0
+                    ? []
+                    : [...sortedCandidates.slice(startIndex), ...sortedCandidates.slice(0, startIndex)]
+                const selectedCandidates = roundRobinCandidates.slice(0, SAXO_RECONCILIATION_MAX_DIRECT_CANDIDATES)
+                const requestBudget = { used: 0 }
+                let directAccessToken: string | null = null
+                let clientKey: string | undefined
+                if (selectedCandidates.length > 0) {
+                    try {
+                        directAccessToken = await this.getValidAccessToken()
+                        const directAuth = await this.getAuth()
+                        clientKey = directAuth?.accounts?.[0]?.clientKey
+                    } catch (error) {
+                        this.logger.warn({ event: 'saxo:orderactivities_reconciliation_auth_failed', error }, 'failed to prepare Saxo direct recovery auth')
+                    }
+                }
+                const attemptedIndexes = new Set<number>()
+
+                if (directAccessToken && clientKey) {
+                    const outcomes = await mapWithConcurrency(
+                        selectedCandidates,
+                        SAXO_RECONCILIATION_REQUEST_CONCURRENCY,
+                        async (candidate, index) => {
+                            if (this.isRateLimited()) {
+                                return { candidate, index, attempted: false, status: 'rate_limited' as const }
+                            }
+                            attemptedIndexes.add(index)
+                            const outcome = await this.fetchOrderActivitiesDirect(
+                                candidate.entryOrderId,
+                                directAccessToken,
+                                clientKey,
+                                requestBudget,
+                            )
+                            return { candidate, index, attempted: true, ...outcome }
+                        },
+                    )
+
+                    attempted = attemptedIndexes.size
+                    directRequests = requestBudget.used
+                    for (const outcome of outcomes) {
+                        if (!outcome.attempted) {
+                            deferred += 1
+                            rateLimited += 1
+                            addSample(sampleOrderIds.rateLimited, outcome.candidate.entryOrderId)
+                            continue
+                        }
+                        const metadata = outcome.candidate.order.broker_order_metadata
+                        if (outcome.status === 'complete') {
+                            const { resolution } = outcome
+                            recordResolution(resolution)
+                            results.set(outcome.candidate.order.id, {
+                                execution: resolution.execution,
+                                ...toSaxoTerminalStatus(resolution.brokerState),
+                                brokerOrderMetadata: metadata,
+                            })
+                            const hasMatch = resolution.execution !== null || resolution.brokerState !== 'UNRESOLVED'
+                            if (!hasMatch) {
+                                // The direct history completed but did not contain a usable activity.
+                                noMatch += 1
+                                addSample(sampleOrderIds.noMatch, outcome.candidate.entryOrderId)
+                            }
+                            continue
+                        }
+                        if (outcome.status === 'rate_limited') {
+                            rateLimited += 1
+                            addSample(sampleOrderIds.rateLimited, outcome.candidate.entryOrderId)
+                        } else {
+                            failed += 1
+                            addSample(sampleOrderIds.failed, outcome.candidate.entryOrderId)
+                        }
+                    }
+                } else {
+                    deferred = selectedCandidates.length
+                    for (const candidate of selectedCandidates) addSample(sampleOrderIds.deferred, candidate.entryOrderId)
+                }
+
+                deferred += sortedCandidates.length - selectedCandidates.length
+                for (const candidate of sortedCandidates.slice(selectedCandidates.length)) {
+                    addSample(sampleOrderIds.deferred, candidate.entryOrderId)
+                }
+
+                if (attemptedIndexes.size > 0) {
+                    const lastAttemptedIndex = Math.max(...attemptedIndexes)
+                    const lastAttempted = selectedCandidates[lastAttemptedIndex]
+                    if (lastAttempted) {
+                        try {
+                            await this.saveOrderActivitiesReconciliationState({
+                                direct_lookup_after_order_id: lastAttempted.entryOrderId,
+                                last_direct_lookup_at: options.now.toISOString(),
+                            })
+                        } catch (error) {
+                            this.logger.warn({ event: 'saxo:orderactivities_reconciliation_state_write_failed', error }, 'failed to save Saxo reconciliation state')
+                        }
+                    }
+                }
+            }
+        }
+
+        this.logger.info(
+            {
+                event: 'saxo:orderactivities_reconciliation_summary',
+                pending: orders.length,
+                validMetadata: validOrders.length,
+                batchComplete,
+                batchMatched,
+                directCandidates,
+                attempted,
+                deferred,
+                directRequests,
+                recovered,
+                noMatch,
+                failed,
+                rateLimited,
+                terminalCounts,
+                sampleOrderIds,
+            },
+            'Saxo orderactivities reconciliation session completed',
+        )
+        return results
     }
 
     private async getExecutionFromRecentActivities(orderId: string): Promise<SaxoOrderActivityResolution> {
