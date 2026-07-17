@@ -1604,6 +1604,59 @@ test('SaxoClient.getExecutionPricesForOrdersV2 は direct candidate を10件に�
     assert.deepEqual(secondSummary?.sampleOrderIds?.deferred, ['ORD-08', 'ORD-09'])
 })
 
+test('SaxoClient.getExecutionPricesForOrdersV2 は request budget 到達候補を deferred にする', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({
+        db,
+        logger: logger as any,
+        baseUrl: 'https://example.com',
+        sleepImpl: async () => { },
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            if (!parsedUrl.searchParams.has('OrderId')) return Response.json({ Data: [] })
+            if (parsedUrl.pathname.endsWith('/orderactivities/')) {
+                const orderId = parsedUrl.searchParams.get('OrderId')
+                return Response.json({
+                    Data: [{ LogId: `${orderId}-page-1`, OrderId: orderId, Status: 'Working', SubStatus: 'Confirmed' }],
+                    __next: `/direct-page-2?OrderId=${orderId}`,
+                })
+            }
+            if (parsedUrl.pathname === '/direct-page-2') {
+                const orderId = parsedUrl.searchParams.get('OrderId')
+                return Response.json({
+                    Data: [{ LogId: `${orderId}-page-2`, OrderId: orderId, Status: 'Working', SubStatus: 'Confirmed' }],
+                    __next: `/direct-page-3?OrderId=${orderId}`,
+                })
+            }
+            const orderId = parsedUrl.searchParams.get('OrderId')
+            return Response.json({
+                Data: [{ LogId: `${orderId}-page-3`, OrderId: orderId, Status: 'Working', SubStatus: 'Confirmed' }],
+            })
+        },
+    })
+
+    const orders = Array.from({ length: 10 }, (_, index) => makePendingSaxoOrder(`ORD-budget-${String(index).padStart(2, '0')}`))
+    await client.getExecutionPricesForOrdersV2(orders, { now: new Date('2026-07-17T00:00:00Z') })
+
+    const summary = infoLogs.find((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    assert.equal(summary?.obj.directRequests, 20)
+    assert.equal(summary?.obj.rateLimited, 0)
+    assert.equal(summary?.obj.failed, 0)
+    assert.equal((summary?.obj.attempted as number) + (summary?.obj.deferred as number), 10)
+    assert.ok((summary?.obj.deferred as number) > 0)
+    const sampleOrderIds = summary?.obj.sampleOrderIds as { deferred?: string[] }
+    assert.ok((sampleOrderIds.deferred?.length ?? 0) > 0)
+})
+
 test('SaxoClient.getExecutionPricesForOrdersV2 は direct の5xxを1回retryし、途中failureのpartial activityを破棄する', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

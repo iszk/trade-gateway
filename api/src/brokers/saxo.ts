@@ -918,13 +918,16 @@ export class SaxoClient {
                             if (this.isRateLimited()) {
                                 return { candidate, index, attempted: false, status: 'rate_limited' as const }
                             }
-                            attemptedIndexes.add(index)
                             const outcome = await this.fetchOrderActivitiesDirect(
                                 candidate.entryOrderId,
                                 directAccessToken,
                                 clientKey,
                                 requestBudget,
                             )
+                            if (outcome.status === 'budget') {
+                                return { candidate, index, attempted: false, ...outcome }
+                            }
+                            attemptedIndexes.add(index)
                             return { candidate, index, attempted: true, ...outcome }
                         },
                     )
@@ -934,8 +937,12 @@ export class SaxoClient {
                     for (const outcome of outcomes) {
                         if (!outcome.attempted) {
                             deferred += 1
-                            rateLimited += 1
-                            addSample(sampleOrderIds.rateLimited, outcome.candidate.entryOrderId)
+                            if (outcome.status === 'rate_limited') {
+                                rateLimited += 1
+                                addSample(sampleOrderIds.rateLimited, outcome.candidate.entryOrderId)
+                            } else {
+                                addSample(sampleOrderIds.deferred, outcome.candidate.entryOrderId)
+                            }
                             continue
                         }
                         const metadata = outcome.candidate.order.broker_order_metadata
@@ -958,6 +965,9 @@ export class SaxoClient {
                         if (outcome.status === 'rate_limited') {
                             rateLimited += 1
                             addSample(sampleOrderIds.rateLimited, outcome.candidate.entryOrderId)
+                        } else if (outcome.status === 'budget') {
+                            deferred += 1
+                            addSample(sampleOrderIds.deferred, outcome.candidate.entryOrderId)
                         } else {
                             failed += 1
                             addSample(sampleOrderIds.failed, outcome.candidate.entryOrderId)
