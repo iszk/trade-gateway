@@ -93,6 +93,9 @@ webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証�
 
 ### 制約
 - 親注文・exit 注文ともにドキュメント ID を一意キーとして upsert / update する
+- `orders_v2` の entry 同期では、execution が `requested_size` 以上なら `EXECUTED`、部分 execution と confirmed cancel/expire が共存する場合は execution snapshot を保持して `CANCELED`、execution なしの confirmed cancel/expire は `CANCELED` とする。`Placed + Rejected` は confirmed fill/placement がない場合だけ `FAILED` とする。rejected cancel/change、`DoneForDay`、未知または曖昧な activity は `PENDING` を継続する
+- 部分 terminal の snapshot は `executed_price`、`executed_size`、`executed_at`、取得できた `execution_costs.commission` を保存する。commission の `0` は known zero、field 不在は unknown として区別し、terminal reason は DB schema に保存しない
+- 同一 execution snapshot、status、metadata の再取得では `updated_at` を進める Firestore update を発行しない。requested size を超える overfill は status・execution とも更新しない
 - クローズ済みトレードの read model は別コレクションに保存せず、`orders_v2` から再計算する
 - 一覧・統計・トレード再構成の日時基準は `executed_at` とする。`status=EXECUTED` で `executed_at` が欠落している既存データは集計対象外とし、`created_at` へはフォールバックしない
 - cron による `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。metadata が未設定、または broker が期待する `kind` ではない注文は warn ログを出して同期を no-op とし、旧 order id ベースの探索へフォールバックしない

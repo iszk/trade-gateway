@@ -2,6 +2,7 @@ import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient, setFirestoreDocument } from '../firestore.js'
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { SaxoOrderMetadata } from '../types/broker-order-metadata.js'
+import type { ExecutionSyncTerminal, OrderExecutionSyncResult } from '../types/execution-sync.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { Position } from '../types/position.js'
 import type { Balance } from '../types/balance.js'
@@ -19,13 +20,14 @@ import {
     type SaxoAuthData,
 } from './saxo-auth-store.js'
 import {
-    aggregateSaxoExecution,
     fetchSaxoOrderActivitiesPages,
     SAXO_ORDER_ACTIVITIES_MAX_PAGES,
     SAXO_ORDER_ACTIVITIES_PAGE_SIZE,
     summarizeSaxoActivities,
+    resolveSaxoOrderActivities,
     type SaxoOrderActivity,
     type SaxoOrderActivitiesPageResult,
+    type SaxoOrderActivityResolution,
 } from './saxo-order-activities.js'
 
 type SaxoClientOptions = {
@@ -327,9 +329,21 @@ type SaxoProductInfo = {
     Uic: number
 }
 
-type OrdersV2ExecutionSyncResult = {
-    execution: { price: number, size: number, executed_at?: Date } | null
-    brokerOrderMetadata?: SaxoOrderMetadata
+type OrdersV2ExecutionSyncResult = OrderExecutionSyncResult
+
+const toSaxoTerminalStatus = (
+    brokerState: SaxoOrderActivityResolution['brokerState'],
+): ExecutionSyncTerminal => {
+    if (brokerState === 'CANCELED') {
+        return { terminalStatus: 'CANCELED', terminalReason: 'saxo_confirmed_cancel' }
+    }
+    if (brokerState === 'EXPIRED') {
+        return { terminalStatus: 'CANCELED', terminalReason: 'saxo_confirmed_expire' }
+    }
+    if (brokerState === 'PLACEMENT_REJECTED') {
+        return { terminalStatus: 'FAILED', terminalReason: 'saxo_placement_rejected' }
+    }
+    return {}
 }
 
 const toOrderSide = (side: 'Buy' | 'Sell'): 'BUY' | 'SELL' => side === 'Buy' ? 'BUY' : 'SELL'
@@ -597,12 +611,13 @@ export class SaxoClient {
         return cacheResult(result)
     }
 
-    private async getExecutionFromRecentActivities(orderId: string): Promise<{ price: number, size: number, executed_at?: Date } | null> {
+    private async getExecutionFromRecentActivities(orderId: string): Promise<SaxoOrderActivityResolution> {
         const result = await this.fetchOrderActivitiesBatch()
-        if (!result.complete) return null
+        if (!result.complete) return { execution: null, brokerState: 'UNRESOLVED' }
         const activities = result.activities
         const matchingActivities = activities.filter((activity) => activity.OrderId === orderId)
-        const execution = aggregateSaxoExecution(matchingActivities)
+        const resolution = resolveSaxoOrderActivities(matchingActivities)
+        const execution = resolution.execution
 
         if (matchingActivities.length === 0) {
             this.logger.info(
@@ -614,7 +629,7 @@ export class SaxoClient {
                 },
                 'no Saxo audit activities matched the requested order id',
             )
-            return null
+            return resolution
         }
 
         if (!execution) {
@@ -640,7 +655,7 @@ export class SaxoClient {
             )
         }
 
-        return execution
+        return resolution
     }
 
     async getAuth(): Promise<SaxoAuthData | null> {
@@ -1465,9 +1480,10 @@ export class SaxoClient {
         }
 
         const entryOrderId = metadata.entry.resolved.order_id || metadata.order_id || providerOrderId
-        const execution = await this.getExecutionFromRecentActivities(entryOrderId)
+        const resolution = await this.getExecutionFromRecentActivities(entryOrderId)
         return {
-            execution,
+            execution: resolution.execution,
+            ...toSaxoTerminalStatus(resolution.brokerState),
             brokerOrderMetadata: metadata,
         }
     }
@@ -1501,7 +1517,7 @@ export class SaxoClient {
             const exitOrderId = exit.resolved.order_id
             if (!exitOrderId) continue
 
-            const execution = await this.getExecutionFromRecentActivities(exitOrderId)
+            const execution = (await this.getExecutionFromRecentActivities(exitOrderId)).execution
             if (!execution) continue
 
             const size = execution.size

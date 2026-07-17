@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { executeTenMinutelyTask } from './cron-tasks.js'
+import { applyOrderExecutionSyncResult, executeTenMinutelyTask } from './cron-tasks.js'
 import type { CronContext } from './cron-tasks.js'
 
 const makeLogger = () => {
     const logs: Record<string, unknown>[] = []
     return {
         logger: {
-            info: (obj: Record<string, unknown>) => logs.push(obj),
-            warn: (obj: Record<string, unknown>) => logs.push(obj),
+            info: (obj: Record<string, unknown>, msg?: string) => logs.push({ ...obj, message: msg }),
+            warn: (obj: Record<string, unknown>, msg?: string) => logs.push({ ...obj, message: msg }),
         },
         logs,
     }
@@ -176,6 +176,187 @@ test('executeTenMinutelyTask: entry の overfill は保存しない', async () =
     await executeTenMinutelyTask(ctx)
 
     assert.equal(updatedOrders.length, 0)
+})
+
+const makeApplyOrder = (overrides: Record<string, unknown> = {}): any => ({
+    id: 'v2-apply-order',
+    strategy: 'test',
+    broker: 'saxo',
+    ticker: 'FxSpot:21',
+    side: 'BUY',
+    order_type: 'MARKET',
+    requested_size: 1,
+    executed_size: 0,
+    executed_price: null,
+    status: 'PENDING',
+    provider_order_ids: ['ORD-apply-order'],
+    created_at: new Date('2026-01-01T00:00:00Z'),
+    updated_at: new Date('2026-01-01T00:00:00Z'),
+    ...overrides,
+})
+
+test('applyOrderExecutionSyncResult: terminal status と execution snapshot を優先順位どおり適用する', async () => {
+    const cases = [
+        {
+            name: '全量約定',
+            result: { execution: { price: 101, size: 1, executed_at: new Date('2026-01-01T00:01:00Z') } },
+            expected: { status: 'EXECUTED', executed_price: 101, executed_size: 1, executed_at: new Date('2026-01-01T00:01:00Z') },
+        },
+        {
+            name: '部分約定',
+            result: { execution: { price: 100, size: 0.4, commission: 0 } },
+            expected: { executed_price: 100, executed_size: 0.4, executed_at: new Date('2026-01-01T00:00:00Z'), execution_costs: { commission: 0 } },
+        },
+        {
+            name: '部分約定後の取消',
+            result: { execution: { price: 100, size: 0.4 }, terminalStatus: 'CANCELED' as const, terminalReason: 'test_confirmed_cancel' },
+            expected: { status: 'CANCELED', executed_price: 100, executed_size: 0.4, executed_at: new Date('2026-01-01T00:00:00Z') },
+        },
+        {
+            name: '未約定取消',
+            result: { execution: null, terminalStatus: 'CANCELED' as const, terminalReason: 'test_confirmed_cancel' },
+            expected: { status: 'CANCELED' },
+        },
+        {
+            name: '失効',
+            result: { execution: null, terminalStatus: 'CANCELED' as const, terminalReason: 'test_confirmed_expire' },
+            expected: { status: 'CANCELED' },
+        },
+        {
+            name: '発注拒否',
+            result: { execution: null, terminalStatus: 'FAILED' as const, terminalReason: 'test_placement_rejected' },
+            expected: { status: 'FAILED' },
+        },
+        {
+            name: 'cancel rejected は継続',
+            result: { execution: null },
+            expected: {},
+        },
+        {
+            name: 'DoneForDay は継続',
+            result: { execution: null },
+            expected: {},
+        },
+    ]
+
+    for (const testCase of cases) {
+        const updates: any[] = []
+        const changed = await applyOrderExecutionSyncResult(
+            makeApplyOrder(),
+            testCase.result,
+            async (id, update) => { updates.push({ id, ...update }) },
+        )
+        assert.equal(changed, Object.keys(testCase.expected).length > 0, testCase.name)
+        assert.deepEqual(updates[0], Object.keys(testCase.expected).length > 0
+            ? { id: 'v2-apply-order', ...testCase.expected }
+            : undefined, testCase.name)
+    }
+})
+
+test('applyOrderExecutionSyncResult: 同一 snapshot と overfill は no-op にする', async () => {
+    const order = makeApplyOrder({
+        status: 'EXECUTED',
+        executed_size: 1,
+        executed_price: 101,
+        executed_at: new Date('2026-01-01T00:01:00Z'),
+    })
+    const updates: any[] = []
+
+    const unchanged = await applyOrderExecutionSyncResult(
+        order,
+        { execution: { price: 101, size: 1, executed_at: new Date('2026-01-01T00:01:00Z') } },
+        async (id, update) => { updates.push({ id, ...update }) },
+    )
+    const overfilled = await applyOrderExecutionSyncResult(
+        makeApplyOrder(),
+        { execution: { price: 101, size: 1.00000002 } },
+        async (id, update) => { updates.push({ id, ...update }) },
+    )
+
+    assert.equal(unchanged, false)
+    assert.equal(overfilled, false)
+    assert.equal(updates.length, 0)
+})
+
+test('executeTenMinutelyTask: 部分約定後の confirmed cancel は terminal 同期ログを出す', async () => {
+    const { logger, logs } = makeLogger()
+    const updatedOrders: any[] = []
+    const ctx = makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => [{
+            id: 'v2-partial-cancel-log',
+            broker: 'saxo',
+            ticker: 'FxSpot:21',
+            status: 'PENDING',
+            provider_order_ids: ['ORD-partial-cancel-log'],
+            requested_size: 1,
+            executed_size: 0,
+            executed_price: null,
+            created_at: new Date('2026-01-01T00:00:00Z'),
+        } as any],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: { price: 100, size: 0.4 },
+                    terminalStatus: 'CANCELED' as const,
+                    terminalReason: 'saxo_confirmed_cancel',
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.deepEqual(updatedOrders[0], {
+        id: 'v2-partial-cancel-log',
+        status: 'CANCELED',
+        executed_price: 100,
+        executed_size: 0.4,
+        executed_at: new Date('2026-01-01T00:00:00Z'),
+    })
+    assert.ok(logs.some((log) => (
+        log.event === 'cron:orders_v2_terminal_status_synced' &&
+        log.status === 'CANCELED'
+    )))
+    assert.equal(logs.some((log) => log.event === 'cron:orders_v2_synced'), false)
+})
+
+test('executeTenMinutelyTask: terminal 同期ログは no-op でも更新を断定しない', async () => {
+    const { logger, logs } = makeLogger()
+    const updatedOrders: any[] = []
+    const ctx = makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => [{
+            id: 'v2-terminal-no-op-log',
+            broker: 'saxo',
+            ticker: 'FxSpot:21',
+            status: 'CANCELED',
+            provider_order_ids: ['ORD-terminal-no-op-log'],
+            requested_size: 1,
+            executed_size: 0,
+            executed_price: null,
+            created_at: new Date('2026-01-01T00:00:00Z'),
+        } as any],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: null,
+                    terminalStatus: 'CANCELED' as const,
+                    terminalReason: 'saxo_confirmed_cancel',
+                }),
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+
+    assert.deepEqual(updatedOrders, [])
+    assert.equal(
+        logs.find((log) => log.event === 'cron:orders_v2_terminal_status_synced')?.message,
+        'orders_v2 terminal status synchronized as CANCELED',
+    )
 })
 
 test('executeTenMinutelyTask: PENDING の IFDOCO 親注文が EXECUTED になったとき exit_sync_status を MONITORING にする', async () => {

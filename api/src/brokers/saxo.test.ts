@@ -1437,6 +1437,78 @@ test('SaxoClient.getExecutionPriceForOrderV2 uses batched audit activities and f
     assert.deepEqual(result.execution, { price: 101.6, size: 1000, executed_at: new Date('2026-01-01T00:06:00Z') })
 })
 
+test('SaxoClient.getExecutionPriceForOrderV2 maps confirmed audit terminal states to shared result', async () => {
+    const cases = [
+        { name: 'confirmed cancel', status: 'Cancelled', subStatus: 'Confirmed', expectedStatus: 'CANCELED', expectedReason: 'saxo_confirmed_cancel' },
+        { name: 'confirmed expire', status: 'Expired', subStatus: 'Confirmed', expectedStatus: 'CANCELED', expectedReason: 'saxo_confirmed_expire' },
+        { name: 'placement rejected', status: 'Placed', subStatus: 'Rejected', expectedStatus: 'FAILED', expectedReason: 'saxo_placement_rejected' },
+        { name: 'cancel rejected', status: 'Cancelled', subStatus: 'Rejected', expectedStatus: undefined, expectedReason: undefined },
+        { name: 'change rejected', status: 'Changed', subStatus: 'Rejected', expectedStatus: undefined, expectedReason: undefined },
+        { name: 'done for day', status: 'DoneForDay', subStatus: 'Confirmed', expectedStatus: undefined, expectedReason: undefined },
+    ] as const
+
+    for (const testCase of cases) {
+        const orderId = `ORD-${testCase.name.replaceAll(' ', '-')}`
+        const db = mockFirestore({
+            'saxo_auth_data/saxo_auth': {
+                accessToken: 'valid-token',
+                refreshToken: 'refresh-token',
+                accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+                refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            },
+        })
+        const client = new SaxoClient({
+            db,
+            baseUrl: 'https://example.com',
+            fetchImpl: async () => Response.json({
+                Data: [{
+                    LogId: `L-${testCase.name}`,
+                    OrderId: orderId,
+                    Status: testCase.status,
+                    SubStatus: testCase.subStatus,
+                }],
+            }),
+        })
+
+        const result = await client.getExecutionPriceForOrderV2(makePendingSaxoOrder(orderId))
+
+        assert.equal(result.terminalStatus, testCase.expectedStatus, testCase.name)
+        assert.equal(result.terminalReason, testCase.expectedReason, testCase.name)
+        assert.equal(result.execution, null, testCase.name)
+    }
+})
+
+test('SaxoClient.getExecutionPriceForOrderV2 preserves partial execution snapshot with confirmed cancel', async () => {
+    const orderId = 'ORD-partial-cancel'
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => Response.json({
+            Data: [
+                { LogId: 'L-fill', OrderId: orderId, Status: 'Fill', SubStatus: 'Confirmed', ExecutionPrice: 101, FillAmount: 0.4, ActivityTime: '2026-01-01T00:01:00Z' },
+                { LogId: 'L-cancel', OrderId: orderId, Status: 'Cancelled', SubStatus: 'Confirmed' },
+            ],
+        }),
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(makePendingSaxoOrder(orderId))
+
+    assert.ok(result.execution)
+    assert.ok(Math.abs(result.execution.price - 101) < 0.00000001)
+    assert.equal(result.execution.size, 0.4)
+    assert.deepEqual(result.execution.executed_at, new Date('2026-01-01T00:01:00Z'))
+    assert.equal(result.terminalStatus, 'CANCELED')
+    assert.equal(result.terminalReason, 'saxo_confirmed_cancel')
+})
+
 test('SaxoClient.getExecutionPriceForOrderV2 returns null when batch has no entry fill activity', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

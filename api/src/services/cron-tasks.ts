@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
+import type { ExecutionSyncInfo, ExecutionTerminalStatus, OrderExecutionSyncResult } from '../types/execution-sync.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -16,24 +17,12 @@ type PositionFetcherLike = {
 const SAXO_PENDING_SYNC_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const EPSILON = 0.00000001
 
-type ExecutionInfo = {
-    price: number
-    size: number
-    executed_at?: Date
-    commission?: number
-}
-
-type OrdersV2ExecutionSyncResult = {
-    execution: ExecutionInfo | null
-    brokerOrderMetadata?: BrokerOrderMetadata
-}
-
 export type ExecutionPriceFetcherLike = {
-    getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+    getExecutionPriceForOrderV2(order: OrderV2): Promise<OrderExecutionSyncResult>
 }
 
 export type ClosingExecutionFetcherLike = {
-    getClosingExecutionForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult>
+    getClosingExecutionForOrderV2(order: OrderV2): Promise<OrderExecutionSyncResult>
 }
 
 export type CronContext = {
@@ -49,7 +38,7 @@ export type CronContext = {
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
 }
 
-const resolveExecutedAt = (order: Pick<OrderV2, 'created_at' | 'executed_at'>, execution: ExecutionInfo): Date => (
+const resolveExecutedAt = (order: Pick<OrderV2, 'created_at' | 'executed_at'>, execution: ExecutionSyncInfo): Date => (
     execution.executed_at ?? order.executed_at ?? order.created_at
 )
 
@@ -83,6 +72,58 @@ const getOrderAgeMs = (order: Pick<OrderV2, 'created_at'>, nowMs: number): numbe
 const shouldSkipStaleSaxoPendingOrder = (order: OrderV2, nowMs: number): boolean => (
     order.broker === 'saxo' && order.order_type === 'MARKET' && getOrderAgeMs(order, nowMs) > SAXO_PENDING_SYNC_MAX_AGE_MS
 )
+
+const resolveOrderStatus = (
+    execution: ExecutionSyncInfo | null,
+    terminalStatus: ExecutionTerminalStatus | undefined,
+    requestedSize: number,
+): OrderV2['status'] => {
+    if (execution !== null) {
+        if (execution.size >= requestedSize - EPSILON) return 'EXECUTED'
+        if (terminalStatus === 'CANCELED') return 'CANCELED'
+        return 'PENDING'
+    }
+    return terminalStatus ?? 'PENDING'
+}
+
+/** execution snapshot と broker の終端判定を単一注文へ冪等に適用する。 */
+export const applyOrderExecutionSyncResult = async (
+    order: OrderV2,
+    result: OrderExecutionSyncResult,
+    updateOrderV2: UpdateOrderV2Fn,
+): Promise<boolean> => {
+    const info = result.execution
+    if (info !== null && info.size > order.requested_size + EPSILON) return false
+
+    const updates: Partial<OrderV2> = {}
+    if (
+        result.brokerOrderMetadata !== undefined &&
+        !areSameBrokerOrderMetadata(order.broker_order_metadata, result.brokerOrderMetadata)
+    ) {
+        updates.broker_order_metadata = result.brokerOrderMetadata
+    }
+
+    const nextStatus = resolveOrderStatus(info, result.terminalStatus, order.requested_size)
+    if (order.status !== nextStatus) updates.status = nextStatus
+
+    if (info !== null) {
+        const isCompleted = info.size >= order.requested_size - EPSILON
+        const executedAt = resolveExecutedAt(order, info)
+        if (!areSameNumber(order.executed_price, info.price)) updates.executed_price = info.price
+        if (!areSameNumber(order.executed_size, info.size)) updates.executed_size = info.size
+        if (!areSameDate(order.executed_at, executedAt)) updates.executed_at = executedAt
+        if (info.commission !== undefined && !areSameNumber(order.execution_costs?.commission, info.commission)) {
+            updates.execution_costs = { commission: info.commission }
+        }
+        if (isCompleted && order.order_type === 'IFDOCO' && order.exit_sync_status === undefined) {
+            updates.exit_sync_status = 'MONITORING'
+        }
+    }
+
+    if (Object.keys(updates).length === 0) return false
+    await updateOrderV2(order.id, updates)
+    return true
+}
 
 export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:ten_minutely_task' }, '10-minute task executed')
@@ -179,45 +220,10 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                 continue
             }
 
-            if (info !== null || syncResult.brokerOrderMetadata !== undefined) {
-                const updates: Partial<OrderV2> = {}
-                if (
-                    syncResult.brokerOrderMetadata !== undefined &&
-                    !areSameBrokerOrderMetadata(order.broker_order_metadata, syncResult.brokerOrderMetadata)
-                ) {
-                    updates.broker_order_metadata = syncResult.brokerOrderMetadata
-                }
-                if (info !== null) {
-                    const isCompleted = info.size >= order.requested_size - EPSILON
-                    const executedAt = resolveExecutedAt(order, info)
-                    if (order.status !== (isCompleted ? 'EXECUTED' : 'PENDING')) {
-                        updates.status = isCompleted ? 'EXECUTED' : 'PENDING'
-                    }
-                    if (!areSameNumber(order.executed_price, info.price)) {
-                        updates.executed_price = info.price
-                    }
-                    if (!areSameNumber(order.executed_size, info.size)) {
-                        updates.executed_size = info.size
-                    }
-                    if (!areSameDate(order.executed_at, executedAt)) {
-                        updates.executed_at = executedAt
-                    }
-                    if (!hasSameCommission(order, info.commission)) {
-                        updates.execution_costs = info.commission === undefined
-                            ? {}
-                            : { commission: info.commission }
-                    }
-                    if (isCompleted && order.order_type === 'IFDOCO' && order.exit_sync_status === undefined) {
-                        updates.exit_sync_status = 'MONITORING'
-                    }
-                }
+            await applyOrderExecutionSyncResult(order, syncResult, ctx.updateOrderV2)
 
-                if (Object.keys(updates).length > 0) {
-                    await ctx.updateOrderV2(order.id, updates)
-                }
-            }
-
-            if (info !== null) {
+            const isCompleted = info !== null && info.size >= order.requested_size - EPSILON
+            if (info !== null && (isCompleted || syncResult.terminalStatus !== 'CANCELED')) {
                 ctx.logger.info(
                     {
                         event: 'cron:orders_v2_synced',
@@ -226,9 +232,20 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                         price: info.price,
                         size: info.size,
                     },
-                    info.size >= order.requested_size - EPSILON
-                        ? 'orders_v2 status updated to EXECUTED'
+                    isCompleted
+                        ? 'orders_v2 execution synchronized as EXECUTED'
                         : 'orders_v2 partial execution progress synchronized',
+                )
+            } else if (syncResult.terminalStatus !== undefined) {
+                ctx.logger.info(
+                    {
+                        event: 'cron:orders_v2_terminal_status_synced',
+                        broker: order.broker,
+                        orderId: order.id,
+                        status: syncResult.terminalStatus,
+                        reason: syncResult.terminalReason,
+                    },
+                    `orders_v2 terminal status synchronized as ${syncResult.terminalStatus}`,
                 )
             } else {
                 ctx.logger.info(
