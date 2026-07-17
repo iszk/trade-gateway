@@ -5,6 +5,8 @@ import type { OrderV2 } from '../types/order-v2.js'
 import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
 import type {
     BulkExecutionPriceFetcherLike,
+    ExecutionReconciliationFetcherLike,
+    ExecutionReconciliationRange,
     ExecutionSyncInfo,
     ExecutionTerminalStatus,
     OrderExecutionSyncResult,
@@ -33,6 +35,7 @@ export type CronContext = {
     logger: Logger
     positionFetcher: PositionFetcherLike
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
+    executionReconciliationFetchers?: Partial<Record<string, ExecutionReconciliationFetcherLike>>
     closingExecutionFetchers?: Partial<Record<string, ClosingExecutionFetcherLike>>
     /** Phase 3: orders_v2 のステータス同期用 */
     getPendingOrdersV2?: GetPendingOrdersV2Fn
@@ -156,6 +159,39 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
 
 export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:hourly_task' }, 'hourly task executed')
+
+    if (!ctx.getPendingOrdersV2 || !ctx.updateOrderV2 || !ctx.executionReconciliationFetchers) return
+
+    const pendingOrders = await ctx.getPendingOrdersV2()
+    const saxoOrders = pendingOrders.filter((order) => (
+        order.broker === 'saxo' &&
+        order.provider_order_ids[0] !== undefined &&
+        order.provider_order_ids[0] !== 'DRY_RUN' &&
+        order.broker_order_metadata?.kind === 'saxo_order_v1' &&
+        order.broker_order_metadata.entry.resolved.order_id !== undefined
+    ))
+    const fetcher = ctx.executionReconciliationFetchers.saxo
+    if (!fetcher) return
+
+    const now = new Date()
+    const range: ExecutionReconciliationRange = {
+        from: new Date(now.getTime() - 48 * 60 * 60 * 1000),
+        to: now,
+    }
+
+    try {
+        const results = await fetcher.reconcileExecutionPricesForOrdersV2(saxoOrders, range)
+        // Incomplete reconciliation returns no results, so partial activity is never applied.
+        for (const order of saxoOrders) {
+            const result = results.get(order.id)
+            if (result) await applyOrderExecutionSyncResult(order, result, ctx.updateOrderV2)
+        }
+    } catch (error) {
+        ctx.logger.warn(
+            { event: 'cron:saxo_execution_reconciliation_failed', error },
+            'failed to reconcile Saxo execution prices',
+        )
+    }
 }
 
 const applyPendingOrderSyncResult = async (

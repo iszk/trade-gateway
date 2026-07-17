@@ -30,6 +30,7 @@ import { createDefaultSlotScheduler } from './services/slot-scheduler.js'
 import type { SlotScheduler } from './services/slot-scheduler.js'
 import { executeTenMinutelyTask, executeHourlyTask } from './services/cron-tasks.js'
 import type { CronContext, ExecutionPriceFetcherLike, ClosingExecutionFetcherLike } from './services/cron-tasks.js'
+import type { ExecutionReconciliationFetcherLike } from './types/execution-sync.js'
 
 import { defaultLogger, type Logger } from './logger.js'
 
@@ -238,6 +239,7 @@ type CreateAppOptions = {
     positionFetcher?: PositionFetcherLike
     slotScheduler?: SlotScheduler
     executionPriceFetchers?: Partial<Record<string, ExecutionPriceFetcherLike>>
+    executionReconciliationFetchers?: Partial<Record<string, ExecutionReconciliationFetcherLike>>
     addOrderV2?: AddOrderV2Fn
     getTradeRecords?: GetTradeRecordsFn
     getTradeStats?: GetTradeStatsFn
@@ -308,6 +310,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         logger,
         positionFetcher,
         executionPriceFetchers: options.executionPriceFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
+        executionReconciliationFetchers: options.executionReconciliationFetchers ?? { saxo: saxoClient },
         closingExecutionFetchers: options.closingExecutionFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
         getPendingOrdersV2,
         updateOrderV2,

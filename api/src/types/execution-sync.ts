@@ -23,9 +23,21 @@ export type ExecutionSyncOptions = {
     now: Date
 }
 
+export type ExecutionReconciliationRange = {
+    from: Date
+    to: Date
+}
+
 export type BulkExecutionPriceFetcherLike = {
     getExecutionPricesForOrdersV2?(
         orders: OrderV2[],
         options: ExecutionSyncOptions,
+    ): Promise<Map<string, OrderExecutionSyncResult>>
+}
+
+export type ExecutionReconciliationFetcherLike = {
+    reconcileExecutionPricesForOrdersV2(
+        orders: OrderV2[],
+        range: ExecutionReconciliationRange,
     ): Promise<Map<string, OrderExecutionSyncResult>>
 }

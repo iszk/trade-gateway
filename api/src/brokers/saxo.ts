@@ -3,6 +3,7 @@ import { getFirestoreClient, setFirestoreDocument } from '../firestore.js'
 import type { OrderDispatchFailure, OrderDispatchResult, OrderRequest } from '../types/order.js'
 import type { SaxoOrderMetadata } from '../types/broker-order-metadata.js'
 import type {
+    ExecutionReconciliationRange,
     ExecutionSyncOptions,
     ExecutionSyncTerminal,
     OrderExecutionSyncResult,
@@ -28,6 +29,7 @@ import {
     SAXO_ORDER_ACTIVITIES_MAX_PAGES,
     SAXO_ORDER_ACTIVITIES_PAGE_SIZE,
     summarizeSaxoActivities,
+    normalizeSaxoOrderActivities,
     resolveSaxoOrderActivities,
     type SaxoOrderActivity,
     type SaxoOrderActivitiesPageResult,
@@ -126,7 +128,16 @@ type SaxoOrderActivitiesPollState = {
 type SaxoOrderActivitiesReconciliationState = {
     direct_lookup_after_order_id?: string
     last_direct_lookup_at?: string
+    last_reconciliation_started_at?: string
+    last_reconciliation_completed_at?: string
+    last_reconciliation_window_from?: string
+    last_reconciliation_window_to?: string
+    last_reconciliation_outcome?: 'COMPLETE' | 'INCOMPLETE' | 'RATE_LIMITED' | 'FAILED'
 }
+
+type SaxoRangeFetchResult =
+    | { complete: true, activities: SaxoOrderActivity[], pageCount: number }
+    | { complete: false, reason: 'HTTP_ERROR' | 'PARSE_ERROR' | 'PAGE_LIMIT', pageCount: number, rateLimited: boolean }
 
 const cancelResponseBody = async (response: Response): Promise<void> => {
     try {
@@ -186,6 +197,8 @@ const SAXO_RECONCILIATION_PAGE_SIZE = 500
 const SAXO_RECONCILIATION_MAX_RETRIES = 1
 const SAXO_RECONCILIATION_RETRY_BASE_MS = 100
 const SAXO_RECONCILIATION_RETRY_JITTER_MS = 100
+const SAXO_RECONCILIATION_RECENT_ORDER_MAX_AGE_MS = 24 * 60 * 60 * 1000
+const EPSILON = 0.00000001
 const FIXED_FX_RATES_TO_JPY: Record<string, number> = {
     JPY: 1,
     USD: 160,
@@ -1019,6 +1032,248 @@ export class SaxoClient {
                 sampleOrderIds,
             },
             'Saxo orderactivities reconciliation session completed',
+        )
+        return results
+    }
+
+    private buildOrderActivitiesRangeUrl(auth: SaxoAuthData, range: ExecutionReconciliationRange): string {
+        const params = new URLSearchParams()
+        const clientKey = auth.accounts?.[0]?.clientKey
+        if (clientKey) params.append('ClientKey', clientKey)
+        params.append('FromDateTime', range.from.toISOString())
+        params.append('ToDateTime', range.to.toISOString())
+        params.append('EntryType', 'All')
+        params.append('$top', String(SAXO_ORDER_ACTIVITIES_PAGE_SIZE))
+        return `${this.baseUrl}/cs/v1/audit/orderactivities/?${params.toString()}`
+    }
+
+    private async fetchOrderActivitiesRange(
+        range: ExecutionReconciliationRange,
+    ): Promise<SaxoRangeFetchResult> {
+        if (this.isRateLimited()) {
+            return { complete: false, reason: 'HTTP_ERROR', pageCount: 0, rateLimited: true }
+        }
+
+        const accessToken = await this.getValidAccessToken()
+        if (!accessToken) return { complete: false, reason: 'HTTP_ERROR', pageCount: 0, rateLimited: false }
+
+        const auth = await this.getAuth()
+        if (!auth) return { complete: false, reason: 'HTTP_ERROR', pageCount: 0, rateLimited: false }
+
+        let pageCount = 0
+        let rateLimited = false
+        const result = await fetchSaxoOrderActivitiesPages({
+            initialUrl: this.buildOrderActivitiesRangeUrl(auth, range),
+            maxPages: SAXO_ORDER_ACTIVITIES_MAX_PAGES,
+            resolveNextUrl: (url) => this.buildSaxoApiUrl(url),
+            fetchPage: (url) => {
+                pageCount += 1
+                return saxoAuditRequestLimiter.run(() => this.fetchImpl(url, {
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                }))
+            },
+            onHttpError: async (response) => {
+                if (response.status === 429) {
+                    rateLimited = true
+                    this.markRateLimited(response)
+                }
+                this.logger.warn(
+                    {
+                        event: 'saxo:orderactivities_reconciliation_range_failed',
+                        status: response.status,
+                        response: await response.text(),
+                    },
+                    'failed to fetch Saxo audit orderactivities reconciliation range',
+                )
+            },
+        })
+
+        if (result.complete) {
+            return { complete: true, activities: result.activities, pageCount }
+        }
+        return { complete: false, reason: result.reason, pageCount, rateLimited }
+    }
+
+    private getRetryReconciliationRange(
+        state: SaxoOrderActivitiesReconciliationState,
+        requestedRange: ExecutionReconciliationRange,
+    ): ExecutionReconciliationRange {
+        const shouldRetry = state.last_reconciliation_outcome === 'INCOMPLETE' ||
+            state.last_reconciliation_outcome === 'RATE_LIMITED'
+        if (!shouldRetry) return requestedRange
+
+        const fromMs = state.last_reconciliation_window_from
+            ? Date.parse(state.last_reconciliation_window_from)
+            : NaN
+        const toMs = state.last_reconciliation_window_to
+            ? Date.parse(state.last_reconciliation_window_to)
+            : NaN
+        if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs >= toMs) return requestedRange
+
+        return { from: new Date(fromMs), to: new Date(toMs) }
+    }
+
+    async reconcileExecutionPricesForOrdersV2(
+        orders: OrderV2[],
+        requestedRange: ExecutionReconciliationRange,
+    ): Promise<Map<string, OrderExecutionSyncResult>> {
+        let state: SaxoOrderActivitiesReconciliationState = {}
+        try {
+            state = await this.getOrderActivitiesReconciliationState()
+        } catch (error) {
+            this.logger.warn(
+                { event: 'saxo:orderactivities_reconciliation_state_read_failed', error },
+                'failed to read Saxo reconciliation state',
+            )
+        }
+
+        const range = this.getRetryReconciliationRange(state, requestedRange)
+        const startedAt = new Date().toISOString()
+        const saveState = async (updates: SaxoOrderActivitiesReconciliationState): Promise<void> => {
+            try {
+                await this.saveOrderActivitiesReconciliationState(updates)
+            } catch (error) {
+                this.logger.warn(
+                    { event: 'saxo:orderactivities_reconciliation_state_write_failed', error },
+                    'failed to save Saxo reconciliation state',
+                )
+            }
+        }
+
+        await saveState({
+            last_reconciliation_started_at: startedAt,
+            last_reconciliation_window_from: range.from.toISOString(),
+            last_reconciliation_window_to: range.to.toISOString(),
+        })
+
+        const eligibleOrders = orders.filter((order) => (
+            order.created_at.getTime() >= range.to.getTime() - SAXO_RECONCILIATION_RECENT_ORDER_MAX_AGE_MS &&
+            order.created_at.getTime() <= range.to.getTime()
+        ))
+        const results = new Map<string, OrderExecutionSyncResult>()
+        let pageCount = 0
+        let activityCount = 0
+        let matched = 0
+        let executed = 0
+        let partial = 0
+        let canceled = 0
+        let failed = 0
+        let noMatch = 0
+        let outcome: SaxoOrderActivitiesReconciliationState['last_reconciliation_outcome'] = 'COMPLETE'
+
+        try {
+            let rangeResult: SaxoRangeFetchResult = {
+                complete: true,
+                activities: [],
+                pageCount: 0,
+            }
+            if (eligibleOrders.length > 0) {
+                rangeResult = await this.fetchOrderActivitiesRange(range)
+            }
+            pageCount = rangeResult.pageCount
+
+            if (!rangeResult.complete) {
+                outcome = rangeResult.rateLimited ? 'RATE_LIMITED' : 'INCOMPLETE'
+                await saveState({
+                    last_reconciliation_window_from: range.from.toISOString(),
+                    last_reconciliation_window_to: range.to.toISOString(),
+                    last_reconciliation_outcome: outcome,
+                })
+                this.logger.info(
+                    {
+                        event: 'saxo:orderactivities_reconciliation_summary',
+                        windowFrom: range.from.toISOString(),
+                        windowTo: range.to.toISOString(),
+                        pending: orders.length,
+                        eligible: eligibleOrders.length,
+                        activity: 0,
+                        matched: 0,
+                        executed: 0,
+                        partial: 0,
+                        canceled: 0,
+                        failed: 0,
+                        noMatch: 0,
+                        pageCount,
+                        outcome,
+                    },
+                    'Saxo orderactivities range reconciliation incomplete',
+                )
+                return results
+            }
+
+            const uniqueActivities = normalizeSaxoOrderActivities(rangeResult.activities)
+            activityCount = uniqueActivities.length
+            const activitiesByOrderId = new Map<string, SaxoOrderActivity[]>()
+            for (const activity of uniqueActivities) {
+                const activities = activitiesByOrderId.get(activity.OrderId) ?? []
+                activities.push(activity)
+                activitiesByOrderId.set(activity.OrderId, activities)
+            }
+
+            for (const order of eligibleOrders) {
+                const metadata = order.broker_order_metadata
+                if (metadata?.kind !== 'saxo_order_v1') continue
+                const entryOrderId = metadata.entry.resolved.order_id
+                if (!entryOrderId) continue
+
+                const matchingActivities = activitiesByOrderId.get(entryOrderId) ?? []
+                if (matchingActivities.length > 0) matched += 1
+                const resolution = resolveSaxoOrderActivities(matchingActivities)
+                const terminal = toSaxoTerminalStatus(resolution.brokerState)
+                results.set(order.id, {
+                    execution: resolution.execution,
+                    ...terminal,
+                    brokerOrderMetadata: metadata,
+                })
+
+                if (resolution.execution !== null) {
+                    if (resolution.execution.size >= order.requested_size - EPSILON) executed += 1
+                    else partial += 1
+                } else if (terminal.terminalStatus === undefined) {
+                    noMatch += 1
+                }
+                if (terminal.terminalStatus === 'CANCELED') canceled += 1
+                if (terminal.terminalStatus === 'FAILED') failed += 1
+            }
+
+            await saveState({
+                last_reconciliation_window_from: range.from.toISOString(),
+                last_reconciliation_window_to: range.to.toISOString(),
+                last_reconciliation_outcome: 'COMPLETE',
+                last_reconciliation_completed_at: new Date().toISOString(),
+            })
+        } catch (error) {
+            outcome = 'FAILED'
+            await saveState({
+                last_reconciliation_window_from: range.from.toISOString(),
+                last_reconciliation_window_to: range.to.toISOString(),
+                last_reconciliation_outcome: outcome,
+            })
+            this.logger.warn(
+                { event: 'saxo:orderactivities_reconciliation_failed', error },
+                'failed to reconcile Saxo audit orderactivities range',
+            )
+            return new Map()
+        }
+
+        this.logger.info(
+            {
+                event: 'saxo:orderactivities_reconciliation_summary',
+                windowFrom: range.from.toISOString(),
+                windowTo: range.to.toISOString(),
+                pending: orders.length,
+                eligible: eligibleOrders.length,
+                activity: activityCount,
+                matched,
+                executed,
+                partial,
+                canceled,
+                failed,
+                noMatch,
+                pageCount,
+                outcome,
+            },
+            'Saxo orderactivities range reconciliation completed',
         )
         return results
     }
