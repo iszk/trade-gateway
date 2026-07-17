@@ -253,12 +253,39 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
             continue
         }
 
+        const syncSingleOrder = async (order: OrderV2, logNotFound: boolean): Promise<void> => {
+            try {
+                const providerOrderId = order.provider_order_ids[0]
+                if (!providerOrderId) return
+                const syncResult = await fetcher.getExecutionPriceForOrderV2(order)
+                await applyPendingOrderSyncResult(ctx, order, syncResult, logNotFound)
+            } catch (error) {
+                ctx.logger.info(
+                    { event: 'cron:orders_v2_sync_failed', broker, orderId: order.id, error },
+                    'failed to sync orders_v2',
+                )
+            }
+        }
+
         if (fetcher.getExecutionPricesForOrdersV2) {
             try {
                 const results = await fetcher.getExecutionPricesForOrdersV2(orders, { now: new Date(ctx.nowMs) })
                 for (const order of orders) {
                     const result = results.get(order.id)
                     if (result) await applyPendingOrderSyncResult(ctx, order, result, false)
+                }
+                const missingOrders = orders.filter((order) => !results.has(order.id))
+                if (missingOrders.length > 0) {
+                    ctx.logger.warn(
+                        {
+                            event: 'cron:orders_v2_bulk_result_missing',
+                            broker,
+                            count: missingOrders.length,
+                            orderIds: missingOrders.slice(0, 5).map((order) => order.id),
+                        },
+                        'bulk execution sync returned no result; falling back to single-order sync',
+                    )
+                    for (const order of missingOrders) await syncSingleOrder(order, false)
                 }
             } catch (error) {
                 ctx.logger.info(
@@ -270,17 +297,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
         }
 
         for (const order of orders) {
-            try {
-                const providerOrderId = order.provider_order_ids[0]
-                if (!providerOrderId) continue
-                const syncResult = await fetcher.getExecutionPriceForOrderV2(order)
-                await applyPendingOrderSyncResult(ctx, order, syncResult, true)
-            } catch (error) {
-                ctx.logger.info(
-                    { event: 'cron:orders_v2_sync_failed', broker, orderId: order.id, error },
-                    'failed to sync orders_v2',
-                )
-            }
+            await syncSingleOrder(order, true)
         }
     }
 }
