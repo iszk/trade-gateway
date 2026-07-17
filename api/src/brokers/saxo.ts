@@ -765,7 +765,8 @@ export class SaxoClient {
                 maxPages: SAXO_RECONCILIATION_MAX_DIRECT_PAGES_PER_ORDER,
                 resolveNextUrl: (url) => this.buildSaxoApiUrl(url),
                 fetchPage,
-                onHttpError: (response) => {
+                onHttpError: async (response) => {
+                    await cancelResponseBody(response)
                     if (response.status === 429) {
                         failureReason = 'rate_limited'
                         this.markRateLimited(response)
@@ -851,8 +852,14 @@ export class SaxoClient {
 
             if (batch.complete) {
                 batchComplete = true
+                const activitiesByOrderId = new Map<string, SaxoOrderActivity[]>()
+                for (const activity of batch.activities) {
+                    const activities = activitiesByOrderId.get(activity.OrderId) ?? []
+                    activities.push(activity)
+                    activitiesByOrderId.set(activity.OrderId, activities)
+                }
                 const directCandidateOrders = validOrders.filter(({ order, entryOrderId }) => {
-                    const matchingActivities = batch.activities.filter((activity) => activity.OrderId === entryOrderId)
+                    const matchingActivities = activitiesByOrderId.get(entryOrderId) ?? []
                     if (matchingActivities.length === 0) return true
                     batchMatched += 1
                     const resolution = resolveSaxoOrderActivities(matchingActivities)
