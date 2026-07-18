@@ -112,6 +112,25 @@ test('executeHourlyTask: reconciliation が空結果の場合は partial update 
     assert.deepEqual(updates, [])
 })
 
+test('executeHourlyTask: Saxo対象のPENDINGがない場合はreconciliationを実行しない', async () => {
+    let fetcherCalls = 0
+
+    await executeHourlyTask(makeBaseCtx({
+        getPendingOrdersV2: async () => [],
+        updateOrderV2: async () => {},
+        executionReconciliationFetchers: {
+            saxo: {
+                reconcileExecutionPricesForOrdersV2: async () => {
+                    fetcherCalls += 1
+                    return new Map()
+                },
+            },
+        },
+    }))
+
+    assert.equal(fetcherCalls, 0)
+})
+
 // ─────────────── Phase 3: orders_v2 sync ───────────────
 
 test('executeTenMinutelyTask: orders_v2 の PENDING を EXECUTED に更新する', async () => {

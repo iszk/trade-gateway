@@ -170,6 +170,8 @@ export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
         order.broker_order_metadata?.kind === 'saxo_order_v1' &&
         order.broker_order_metadata.entry.resolved.order_id !== undefined
     ))
+    if (saxoOrders.length === 0) return
+
     const fetcher = ctx.executionReconciliationFetchers.saxo
     if (!fetcher) return
 

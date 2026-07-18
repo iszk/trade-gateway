@@ -1043,7 +1043,7 @@ export class SaxoClient {
         params.append('FromDateTime', range.from.toISOString())
         params.append('ToDateTime', range.to.toISOString())
         params.append('EntryType', 'All')
-        params.append('$top', String(SAXO_ORDER_ACTIVITIES_PAGE_SIZE))
+        params.append('$top', String(SAXO_RECONCILIATION_PAGE_SIZE))
         return `${this.baseUrl}/cs/v1/audit/orderactivities/?${params.toString()}`
     }
 
