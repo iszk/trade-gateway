@@ -23,8 +23,10 @@ const mockFirestore = (data: Record<string, any> = {}) => {
                     exists: store[`${collectionPath}/${docPath}`] !== undefined,
                     data: () => store[`${collectionPath}/${docPath}`],
                 }),
-                set: async (newData: any) => {
-                    store[`${collectionPath}/${docPath}`] = newData
+                set: async (newData: any, options?: { merge?: boolean }) => {
+                    store[`${collectionPath}/${docPath}`] = options?.merge
+                        ? { ...store[`${collectionPath}/${docPath}`], ...newData }
+                        : newData
                 },
                 update: async (updates: any) => {
                     store[`${collectionPath}/${docPath}`] = {
@@ -1485,6 +1487,200 @@ test('SaxoClient.getExecutionPricesForOrdersV2 は batch miss だけ direct look
     const state = db._getStoredData()['cron_metadata/saxo_orderactivities_reconciliation_state'] as Record<string, unknown>
     assert.equal(state.direct_lookup_after_order_id, 'ORD-direct')
     assert.equal(state.last_direct_lookup_at, '2026-07-17T00:00:00.000Z')
+})
+
+test('SaxoClient.reconcileExecutionPricesForOrdersV2 は range を全ページ取得し LogId dedupe する', async () => {
+    const initialPollState = {
+        last_poll_at: '2026-07-16T23:00:00.000Z',
+        next_poll_url: '/poll-existing',
+    }
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+        'cron_metadata/saxo_orderactivities_poll_state': initialPollState,
+        'cron_metadata/saxo_orderactivities_reconciliation_state': {
+            direct_lookup_after_order_id: 'ORD-direct',
+            last_direct_lookup_at: '2026-07-16T23:00:00.000Z',
+        },
+    })
+    const requestedUrls: string[] = []
+    const { logger, infoLogs } = createCapturingLogger()
+    const order = {
+        ...makePendingSaxoOrder('ORD-range'),
+        created_at: new Date('2026-07-16T12:00:00Z'),
+    }
+    const client = new SaxoClient({
+        db,
+        logger: logger as any,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            requestedUrls.push(String(url))
+            if (requestedUrls.length === 1) {
+                return Response.json({
+                    Data: [
+                        { LogId: '1', OrderId: 'ORD-range', Status: 'Fill', SubStatus: 'Confirmed', ExecutionPrice: 100, FillAmount: 0.4 },
+                        { LogId: '2', OrderId: 'ORD-range', Status: 'Fill', SubStatus: 'Confirmed', ExecutionPrice: 110, FillAmount: 0.3 },
+                    ],
+                    __next: '/range-page-2',
+                    __nextPoll: '/must-not-be-saved',
+                })
+            }
+            return Response.json({
+                Data: [
+                    { LogId: '2', OrderId: 'ORD-range', Status: 'Fill', SubStatus: 'Confirmed', ExecutionPrice: 110, FillAmount: 0.3 },
+                    { LogId: '3', OrderId: 'ORD-range', Status: 'FinalFill', SubStatus: 'Confirmed', ExecutionPrice: 120, FillAmount: 0.3 },
+                ],
+                __nextPoll: '/must-not-be-saved-2',
+            })
+        },
+    })
+
+    const result = await client.reconcileExecutionPricesForOrdersV2(
+        [order],
+        { from: new Date('2026-07-15T00:00:00Z'), to: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(requestedUrls.length, 2)
+    const rangeUrl = new URL(requestedUrls[0] as string)
+    assert.equal(rangeUrl.searchParams.get('ClientKey'), 'client-key')
+    assert.equal(rangeUrl.searchParams.get('FromDateTime'), '2026-07-15T00:00:00.000Z')
+    assert.equal(rangeUrl.searchParams.get('ToDateTime'), '2026-07-17T00:00:00.000Z')
+    assert.equal(rangeUrl.searchParams.get('EntryType'), 'All')
+    assert.equal(rangeUrl.searchParams.get('$top'), '500')
+    assert.deepEqual(result.get(order.id)?.execution, { price: 109, size: 1, executed_at: undefined })
+    assert.deepEqual(db._getStoredData()['cron_metadata/saxo_orderactivities_poll_state'], initialPollState)
+    const reconciliationState = db._getStoredData()['cron_metadata/saxo_orderactivities_reconciliation_state'] as Record<string, unknown>
+    assert.equal(reconciliationState.direct_lookup_after_order_id, 'ORD-direct')
+    assert.equal(reconciliationState.last_reconciliation_outcome, 'COMPLETE')
+    assert.equal(reconciliationState.last_reconciliation_window_from, '2026-07-15T00:00:00.000Z')
+    assert.equal(reconciliationState.last_reconciliation_window_to, '2026-07-17T00:00:00.000Z')
+    assert.equal(typeof reconciliationState.last_reconciliation_completed_at, 'string')
+    const summary = infoLogs.find((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    assert.equal(summary?.obj.activity, 3)
+    assert.equal(summary?.obj.matched, 1)
+    assert.equal(summary?.obj.executed, 1)
+    assert.equal(summary?.obj.pageCount, 2)
+    assert.equal(summary?.obj.outcome, 'COMPLETE')
+})
+
+test('SaxoClient.reconcileExecutionPricesForOrdersV2 は INCOMPLETE window を再試行し partial を返さない', async () => {
+    const initialPollState = {
+        last_poll_at: '2026-07-16T23:00:00.000Z',
+        next_poll_url: '/poll-existing',
+    }
+    const retryState = {
+        direct_lookup_after_order_id: 'ORD-direct',
+        last_reconciliation_outcome: 'INCOMPLETE',
+        last_reconciliation_window_from: '2026-07-14T00:00:00.000Z',
+        last_reconciliation_window_to: '2026-07-15T00:00:00.000Z',
+    }
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+        'cron_metadata/saxo_orderactivities_poll_state': initialPollState,
+        'cron_metadata/saxo_orderactivities_reconciliation_state': retryState,
+    })
+    const requestedUrls: string[] = []
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            requestedUrls.push(String(url))
+            return requestedUrls.length === 1
+                ? Response.json({ Data: [{ LogId: 'partial', OrderId: 'ORD-retry', Status: 'Fill', ExecutionPrice: 100, FillAmount: 1 }], __next: '/retry-page-2' })
+                : new Response('failed', { status: 503 })
+        },
+    })
+
+    const result = await client.reconcileExecutionPricesForOrdersV2(
+        [{ ...makePendingSaxoOrder('ORD-retry'), created_at: new Date('2026-07-14T12:00:00Z') }],
+        { from: new Date('2026-07-15T00:00:00Z'), to: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(result.size, 0)
+    assert.equal(requestedUrls.length, 2)
+    const retryUrl = new URL(requestedUrls[0] as string)
+    assert.equal(retryUrl.searchParams.get('FromDateTime'), retryState.last_reconciliation_window_from)
+    assert.equal(retryUrl.searchParams.get('ToDateTime'), retryState.last_reconciliation_window_to)
+    assert.deepEqual(db._getStoredData()['cron_metadata/saxo_orderactivities_poll_state'], initialPollState)
+    const savedState = db._getStoredData()['cron_metadata/saxo_orderactivities_reconciliation_state'] as Record<string, unknown>
+    assert.equal(savedState.direct_lookup_after_order_id, 'ORD-direct')
+    assert.equal(savedState.last_reconciliation_outcome, 'INCOMPLETE')
+    assert.equal(savedState.last_reconciliation_window_from, retryState.last_reconciliation_window_from)
+    assert.equal(savedState.last_reconciliation_window_to, retryState.last_reconciliation_window_to)
+})
+
+test('SaxoClient.reconcileExecutionPricesForOrdersV2 は ClientKey 欠落時にAPIを呼ばず incomplete にする', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: '', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    let requestCount = 0
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            requestCount += 1
+            return Response.json({ Data: [] })
+        },
+    })
+
+    const result = await client.reconcileExecutionPricesForOrdersV2(
+        [{ ...makePendingSaxoOrder('ORD-no-client-key'), created_at: new Date('2026-07-16T12:00:00Z') }],
+        { from: new Date('2026-07-15T00:00:00Z'), to: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(requestCount, 0)
+    assert.equal(result.size, 0)
+    const state = db._getStoredData()['cron_metadata/saxo_orderactivities_reconciliation_state'] as Record<string, unknown>
+    assert.equal(state.last_reconciliation_outcome, 'INCOMPLETE')
+})
+
+test('SaxoClient.reconcileExecutionPricesForOrdersV2 は window end から24時間超の stale order を除外する', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    let requestCount = 0
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            requestCount += 1
+            return Response.json({ Data: [{ LogId: 'fresh', OrderId: 'ORD-fresh', Status: 'FinalFill', ExecutionPrice: 100, FillAmount: 1 }] })
+        },
+    })
+
+    const fresh = { ...makePendingSaxoOrder('ORD-fresh'), created_at: new Date('2026-07-16T12:00:00Z') }
+    const stale = { ...makePendingSaxoOrder('ORD-stale'), created_at: new Date('2026-07-15T23:59:59Z') }
+    const result = await client.reconcileExecutionPricesForOrdersV2(
+        [fresh, stale],
+        { from: new Date('2026-07-15T00:00:00Z'), to: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(requestCount, 1)
+    assert.equal(result.has(fresh.id), true)
+    assert.equal(result.has(stale.id), false)
 })
 
 test('SaxoClient.getExecutionPricesForOrdersV2 は batch hit で direct call を発生させない', async () => {

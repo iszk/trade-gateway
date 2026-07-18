@@ -138,7 +138,7 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 ### ドキュメント ID
 - `task_status`（固定）
 - `saxo_orderactivities_poll_state` — Saxo audit orderactivities の batch polling 状態
-- `saxo_orderactivities_reconciliation_state` — Saxo direct recovery の round-robin 状態
+- `saxo_orderactivities_reconciliation_state` — Saxo direct recovery と hourly range reconciliation の状態
 
 ### フィールド
 `task_status`:
@@ -155,14 +155,23 @@ Cloud Run 上で動作するスロットスケジューラーが、各周期タ�
 ### 制約
 - `task_status` は Firestoreトランザクションを使用して読み書きを行い、重複実行を防止する
 - `saxo_orderactivities_poll_state` は Saxo audit polling の cursor/lookback 管理専用で、30分超の実行間隔では `last_poll_at` から30分巻き戻して再取得する
-- `saxo_orderactivities_reconciliation_state` は batch polling と分離した direct recovery の位置管理専用で、TTL は不要（上書きで管理）
+- `saxo_orderactivities_reconciliation_state` は batch polling と分離し、direct recovery と hourly range reconciliation の state を同じ document に merge 保存する。TTL は不要（上書きで管理）
 
 `saxo_orderactivities_reconciliation_state`:
 
 - `direct_lookup_after_order_id` (string, optional) — 次の10分 sessionで round-robin を開始する直前の Saxo entry OrderId。direct callを1件以上開始した session の最後の開始位置だけを保存する
 - `last_direct_lookup_at` (timestamp string, optional) — direct recovery stateを最後に保存した session時刻
+- `last_reconciliation_started_at` (timestamp string, optional) — hourly range reconciliation の開始時刻
+- `last_reconciliation_completed_at` (timestamp string, optional) — 全ページ取得と結果適用準備が完了した最後の時刻。incomplete runでは更新しない
+- `last_reconciliation_window_from` (timestamp string, optional) — 最後に開始または再試行した range の開始時刻
+- `last_reconciliation_window_to` (timestamp string, optional) — 最後に開始または再試行した range の終了時刻
+- `last_reconciliation_outcome` (string, optional) — `COMPLETE`、`INCOMPLETE`、`RATE_LIMITED`、`FAILED` のいずれか
 
 Saxo direct recovery は1 sessionあたり最大10注文、HTTP request最大20回（paging/retry込み）、1注文あたり最大5ページ、audit request共有同時数2で制限する。state write failureでは注文データを巻き戻さず、次回同じ候補を再照会し得る。batch hitの注文はdirect stateの候補にも含めない。
+
+Hourly range reconciliation は直近48時間を初期 window とし、range end 時点で作成24時間以内の Saxo entry PENDING だけを対象にする。`FromDateTime`、`ToDateTime`、`EntryType=All`、`$top=500` を使い、最大20ページを共通 audit concurrency limiter（2）で取得する。page limit、HTTP failure、parse failure、429では partial activity を適用せず、`INCOMPLETE` または `RATE_LIMITED` と window を保存して次回同じ window を再試行する。
+
+hourly range は `saxo_orderactivities_poll_state` を読み書きせず、response の `__nextPoll` も保存しない。既存 direct recovery の state fields を削除しないよう、reconciliation state document は常に merge 更新する。24時間を超える stale order と exit related order は hourly range の適用対象外で、前者は OrderId direct recovery、後者は exit 同期の責務とする。
 
 ## 6. `saxo_auth_data`
 Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_auth_data/saxo_auth` の固定ドキュメントを使う。

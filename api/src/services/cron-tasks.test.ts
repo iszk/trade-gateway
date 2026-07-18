@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { applyOrderExecutionSyncResult, executeTenMinutelyTask } from './cron-tasks.js'
+import { applyOrderExecutionSyncResult, executeHourlyTask, executeTenMinutelyTask } from './cron-tasks.js'
 import type { CronContext } from './cron-tasks.js'
 
 const makeLogger = () => {
@@ -23,6 +23,114 @@ const makeBaseCtx = (overrides: Partial<CronContext> = {}): CronContext => ({
     logger: makeLogger().logger,
     positionFetcher: makePositionFetcherStub(),
     ...overrides,
+})
+
+test('executeHourlyTask: Saxo reconciliation の fresh 48時間 window と結果適用を行う', async () => {
+    const startedAt = Date.now()
+    const order: any = {
+        id: 'hourly-saxo-order',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        status: 'PENDING',
+        provider_order_ids: ['SAXO-hourly-order'],
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        created_at: new Date(startedAt - 60 * 60 * 1000),
+        updated_at: new Date(startedAt - 60 * 60 * 1000),
+        broker_order_metadata: {
+            kind: 'saxo_order_v1',
+            order_id: 'SAXO-hourly-order',
+            entry: {
+                expected: { side: 'BUY', order_type: 'Market', size: 1 },
+                resolved: { order_id: 'SAXO-hourly-order' },
+            },
+            exits: [],
+        },
+    }
+    const updates: Array<{ id: string, updates: Record<string, unknown> }> = []
+    let requestedRange: { from: Date, to: Date } | undefined
+
+    await executeHourlyTask(makeBaseCtx({
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async (id, value) => { updates.push({ id, updates: value as Record<string, unknown> }) },
+        executionReconciliationFetchers: {
+            saxo: {
+                reconcileExecutionPricesForOrdersV2: async (_orders, range) => {
+                    requestedRange = range
+                    return new Map([[
+                        order.id,
+                        { execution: { price: 101, size: 1 }, brokerOrderMetadata: order.broker_order_metadata },
+                    ]])
+                },
+            },
+        },
+    }))
+    const completedAt = Date.now()
+
+    assert.ok(requestedRange)
+    assert.equal(requestedRange!.to.getTime() - requestedRange!.from.getTime(), 48 * 60 * 60 * 1000)
+    assert.ok(requestedRange!.to.getTime() >= startedAt)
+    assert.ok(requestedRange!.to.getTime() <= completedAt)
+    assert.equal(updates.length, 1)
+    assert.equal(updates[0]?.id, order.id)
+    assert.equal(updates[0]?.updates.status, 'EXECUTED')
+    assert.equal(updates[0]?.updates.executed_price, 101)
+    assert.equal(updates[0]?.updates.executed_size, 1)
+})
+
+test('executeHourlyTask: reconciliation が空結果の場合は partial update を適用しない', async () => {
+    const updates: unknown[] = []
+    const order: any = {
+        id: 'hourly-saxo-incomplete',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        status: 'PENDING',
+        provider_order_ids: ['SAXO-incomplete'],
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        created_at: new Date(),
+        updated_at: new Date(),
+        broker_order_metadata: {
+            kind: 'saxo_order_v1',
+            order_id: 'SAXO-incomplete',
+            entry: {
+                expected: { side: 'BUY', order_type: 'Market', size: 1 },
+                resolved: { order_id: 'SAXO-incomplete' },
+            },
+            exits: [],
+        },
+    }
+
+    await executeHourlyTask(makeBaseCtx({
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async (id, value) => { updates.push({ id, value }) },
+        executionReconciliationFetchers: {
+            saxo: { reconcileExecutionPricesForOrdersV2: async () => new Map() },
+        },
+    }))
+
+    assert.deepEqual(updates, [])
+})
+
+test('executeHourlyTask: Saxo対象のPENDINGがない場合はreconciliationを実行しない', async () => {
+    let fetcherCalls = 0
+
+    await executeHourlyTask(makeBaseCtx({
+        getPendingOrdersV2: async () => [],
+        updateOrderV2: async () => {},
+        executionReconciliationFetchers: {
+            saxo: {
+                reconcileExecutionPricesForOrdersV2: async () => {
+                    fetcherCalls += 1
+                    return new Map()
+                },
+            },
+        },
+    }))
+
+    assert.equal(fetcherCalls, 0)
 })
 
 // ─────────────── Phase 3: orders_v2 sync ───────────────

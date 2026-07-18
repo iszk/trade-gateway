@@ -4,6 +4,10 @@
 
 IFDOCO 注文の親レコードが `orders_v2` に存在している状態で、決済（exit）注文が約定した際に exit レコードを `orders_v2` に作成するまでの流れを説明します。
 
+entry の約定同期では、cursor polling、OrderId direct recovery、hourly range reconciliation が同じ activity resolver と shared execution apply helper を使う。resolver は `LogId` を dedupe し、複数 fill の数量・加重平均価格・最新約定時刻と、confirmed cancel/expire/rejection の terminal state を共通規則で解決する。
+
+hourly range reconciliation は entry PENDING の missed fill を回復する安全網であり、window end 時点で作成24時間以内の注文だけを対象にする。24時間を超える stale entry は range の不完全履歴で上書きせず、OrderId direct recovery が全履歴を取得して救済する。hourly range は exit related order の direct/range recovery には拡張せず、exit は本書の10分監視フローで扱う。
+
 ## 前提条件
 
 `orders_v2` に以下の状態の親レコードが存在すること：

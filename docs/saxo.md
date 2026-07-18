@@ -157,3 +157,15 @@ direct recovery は1 sessionあたり最大10注文、HTTP request最大20回（
 direct candidate は entry の有効な `saxo_order_v1` metadata を持つ注文に限る。provider order ID がない、`DRY_RUN`、metadata 欠落の注文では外部APIを呼ばない。candidate は OrderId の安定順で並べ、`cron_metadata/saxo_orderactivities_reconciliation_state` の位置から round-robin する。direct callを1件以上開始した場合だけ最後に開始した OrderId と時刻を保存し、state write failure は注文同期を失敗扱いにしない。
 
 session結果は `saxo:orderactivities_reconciliation_summary` へ1件に集約し、pending、valid metadata、batch matched、direct candidates、attempted、deferred、recovered、no-match、failed、rate-limited、terminal counts、最大5件の sample OrderId を出力する。24時間を超えた MARKET PENDING も stale skip せず、以後の session で最大10件ずつ救済する。
+
+### Hourly range reconciliation
+
+1時間 cron は、10分 cursor polling および direct lookup とは独立して、Saxo の entry PENDING 注文を直近48時間の range で再照合する。呼び出しには `ClientKey`、`FromDateTime`、`ToDateTime`、`EntryType=All`、`$top=500` を指定し、最大20ページを取得する。`Status` filter は指定しない。
+
+range の対象は有効な `saxo_order_v1` metadata と entry `OrderId` を持つ注文で、range end 時点の作成日時が24時間以内のものに限る。24時間を超える stale 注文は range の不完全な履歴で上書きせず、10分 cron の OrderId direct recovery に任せる。IFDOCO の exit related order は hourly range reconciliation の対象外である。
+
+各ページは共通 audit concurrency limiter（最大2）を通し、`LogId` で全ページの重複を除去してから entry OrderId ごとに共通 activity resolver へ渡す。途中 HTTP failure、parse failure、page limit 到達、または429では全 activity を破棄し、結果を orders_v2 に適用しない。429 は既存 cooldown を設定し、同一 run では再試行しない。
+
+reconciliation state は `cron_metadata/saxo_orderactivities_reconciliation_state` に保存する。`INCOMPLETE` または `RATE_LIMITED` の場合は保存済み window を次回最優先で再試行し、complete の場合だけ `last_reconciliation_completed_at` を更新して次回の新しい48時間 windowへ進む。既存の `direct_lookup_after_order_id` と `last_direct_lookup_at` は同じ document 内で保持する。range response の `__nextPoll` は保存せず、`saxo_orderactivities_poll_state.last_poll_at` と `next_poll_url` は一切変更しない。
+
+complete result のみを shared execution apply helper に渡すため、fill、cancel、expire、rejection の status 更新は direct/cursor と同じ規則で冪等に適用される。同一 window の再取得では同じ snapshot を Firestore に再更新しない。summary log には window、pending、eligible、activity、matched、executed、partial、canceled、failed、no-match、page count、outcome を記録する。
