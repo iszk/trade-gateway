@@ -1620,6 +1620,37 @@ test('SaxoClient.reconcileExecutionPricesForOrdersV2 は INCOMPLETE window を�
     assert.equal(savedState.last_reconciliation_window_to, retryState.last_reconciliation_window_to)
 })
 
+test('SaxoClient.reconcileExecutionPricesForOrdersV2 は ClientKey 欠落時にAPIを呼ばず incomplete にする', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: '', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    let requestCount = 0
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            requestCount += 1
+            return Response.json({ Data: [] })
+        },
+    })
+
+    const result = await client.reconcileExecutionPricesForOrdersV2(
+        [{ ...makePendingSaxoOrder('ORD-no-client-key'), created_at: new Date('2026-07-16T12:00:00Z') }],
+        { from: new Date('2026-07-15T00:00:00Z'), to: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(requestCount, 0)
+    assert.equal(result.size, 0)
+    const state = db._getStoredData()['cron_metadata/saxo_orderactivities_reconciliation_state'] as Record<string, unknown>
+    assert.equal(state.last_reconciliation_outcome, 'INCOMPLETE')
+})
+
 test('SaxoClient.reconcileExecutionPricesForOrdersV2 は window end から24時間超の stale order を除外する', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

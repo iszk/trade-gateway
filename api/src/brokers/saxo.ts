@@ -1059,6 +1059,9 @@ export class SaxoClient {
 
         const auth = await this.getAuth()
         if (!auth) return { complete: false, reason: 'HTTP_ERROR', pageCount: 0, rateLimited: false }
+        if (!auth.accounts?.[0]?.clientKey) {
+            return { complete: false, reason: 'HTTP_ERROR', pageCount: 0, rateLimited: false }
+        }
 
         let pageCount = 0
         let rateLimited = false
