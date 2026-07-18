@@ -26,7 +26,7 @@ const makeBaseCtx = (overrides: Partial<CronContext> = {}): CronContext => ({
 })
 
 test('executeHourlyTask: Saxo reconciliation の fresh 48時間 window と結果適用を行う', async () => {
-    const now = Date.now()
+    const startedAt = Date.now()
     const order: any = {
         id: 'hourly-saxo-order',
         broker: 'saxo',
@@ -36,8 +36,8 @@ test('executeHourlyTask: Saxo reconciliation の fresh 48時間 window と結果
         requested_size: 1,
         executed_size: 0,
         executed_price: null,
-        created_at: new Date(now - 60 * 60 * 1000),
-        updated_at: new Date(now - 60 * 60 * 1000),
+        created_at: new Date(startedAt - 60 * 60 * 1000),
+        updated_at: new Date(startedAt - 60 * 60 * 1000),
         broker_order_metadata: {
             kind: 'saxo_order_v1',
             order_id: 'SAXO-hourly-order',
@@ -66,10 +66,12 @@ test('executeHourlyTask: Saxo reconciliation の fresh 48時間 window と結果
             },
         },
     }))
+    const completedAt = Date.now()
 
     assert.ok(requestedRange)
     assert.equal(requestedRange!.to.getTime() - requestedRange!.from.getTime(), 48 * 60 * 60 * 1000)
-    assert.ok(Math.abs(Date.now() - requestedRange!.to.getTime()) < 2_000)
+    assert.ok(requestedRange!.to.getTime() >= startedAt)
+    assert.ok(requestedRange!.to.getTime() <= completedAt)
     assert.equal(updates.length, 1)
     assert.equal(updates[0]?.id, order.id)
     assert.equal(updates[0]?.updates.status, 'EXECUTED')
