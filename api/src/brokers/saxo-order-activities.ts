@@ -36,6 +36,10 @@ export type SaxoOrderActivityResolution = {
         | 'UNRESOLVED'
 }
 
+export type SaxoExecutionAggregationMode =
+    | 'COMPLETE_HISTORY'
+    | 'INCREMENTAL_SNAPSHOT'
+
 type FetchSaxoOrderActivitiesPagesOptions = {
     initialUrl: string
     fetchPage: (url: string) => Promise<Response>
@@ -156,10 +160,9 @@ export const normalizeSaxoOrderActivities = (
     })
 }
 
-const isSaxoFillActivity = (activity: SaxoOrderActivity): boolean => (
+export const isSaxoFillActivity = (activity: SaxoOrderActivity): boolean => (
     (activity.Status === 'FinalFill' || activity.Status === 'Fill') &&
-    (activity.SubStatus === undefined || activity.SubStatus === 'Confirmed') &&
-    (typeof activity.ExecutionPrice === 'number' || typeof activity.AveragePrice === 'number')
+    (activity.SubStatus === undefined || activity.SubStatus === 'Confirmed')
 )
 
 const getSaxoActivityPrice = (activity: SaxoOrderActivity): number | null => (
@@ -168,6 +171,12 @@ const getSaxoActivityPrice = (activity: SaxoOrderActivity): number | null => (
         : typeof activity.AveragePrice === 'number'
             ? activity.AveragePrice
             : null
+)
+
+const getSaxoActivityAveragePrice = (activity: SaxoOrderActivity): number | null => (
+    typeof activity.AveragePrice === 'number'
+        ? activity.AveragePrice
+        : getSaxoActivityPrice(activity)
 )
 
 const getSaxoActivityFillAmount = (activity: SaxoOrderActivity): number | null => {
@@ -189,6 +198,7 @@ const getSaxoActivityCumulativeAmount = (activity: SaxoOrderActivity): number | 
 
 export const aggregateSaxoExecution = (
     activities: SaxoOrderActivity[],
+    mode: SaxoExecutionAggregationMode = 'COMPLETE_HISTORY',
 ): SaxoOrderActivityResolution['execution'] => {
     const fills = normalizeSaxoOrderActivities(activities).filter(isSaxoFillActivity)
     if (fills.length === 0) return null
@@ -205,11 +215,14 @@ export const aggregateSaxoExecution = (
         amount: getSaxoActivityFillAmount(fill),
         price: getSaxoActivityPrice(fill),
     }))
-    if (perFillAmounts.some((item) => item.amount !== null)) {
+    if (
+        mode === 'COMPLETE_HISTORY' &&
+        perFillAmounts.every((item) => item.amount !== null && item.price !== null)
+    ) {
         let totalSize = 0
         let totalValue = 0
         for (const item of perFillAmounts) {
-            if (item.amount === null || item.price === null) continue
+            if (item.amount === null || item.price === null) return null
             totalSize += item.amount
             totalValue += item.price * item.amount
         }
@@ -218,19 +231,23 @@ export const aggregateSaxoExecution = (
         }
     }
 
-    const latestFill = fills.at(-1)
-    if (!latestFill) return null
-    const latestPrice = getSaxoActivityPrice(latestFill)
-    if (latestPrice === null) return null
+    const cumulativeCandidates = fills.flatMap((fill, index) => {
+        const amount = getSaxoActivityCumulativeAmount(fill)
+        const price = getSaxoActivityAveragePrice(fill)
+        return amount !== null && price !== null ? [{ amount, price, index }] : []
+    })
+    if (cumulativeCandidates.length === 0) return null
 
-    const cumulativeSize = Math.max(
-        ...fills
-            .map(getSaxoActivityCumulativeAmount)
-            .filter((amount): amount is number => amount !== null),
-        0,
-    )
-    if (cumulativeSize <= 0) return null
-    return { price: latestPrice, size: cumulativeSize, executed_at: latestExecutedAt }
+    const latestCumulative = cumulativeCandidates.reduce((latest, candidate) => (
+        candidate.amount > latest.amount || candidate.amount === latest.amount && candidate.index > latest.index
+            ? candidate
+            : latest
+    ))
+    return {
+        price: latestCumulative.price,
+        size: latestCumulative.amount,
+        executed_at: latestExecutedAt,
+    }
 }
 
 const resolveSaxoBrokerState = (
@@ -288,8 +305,9 @@ const resolveSaxoBrokerState = (
 
 export const resolveSaxoOrderActivities = (
     activities: SaxoOrderActivity[],
+    mode: SaxoExecutionAggregationMode = 'COMPLETE_HISTORY',
 ): SaxoOrderActivityResolution => ({
-    execution: aggregateSaxoExecution(activities),
+    execution: aggregateSaxoExecution(activities, mode),
     brokerState: resolveSaxoBrokerState(activities),
 })
 

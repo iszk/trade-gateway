@@ -408,9 +408,14 @@ test('applyOrderExecutionSyncResult: terminal status と execution snapshot を�
         const changed = await applyOrderExecutionSyncResult(
             makeApplyOrder(),
             testCase.result,
-            async (id, update) => { updates.push({ id, ...update }) },
+            async (id, mutate) => {
+                const update = mutate(makeApplyOrder())
+                if (!update) return false
+                updates.push({ id, ...update })
+                return true
+            },
         )
-        assert.equal(changed, Object.keys(testCase.expected).length > 0, testCase.name)
+        assert.equal(changed.updated, Object.keys(testCase.expected).length > 0, testCase.name)
         assert.deepEqual(updates[0], Object.keys(testCase.expected).length > 0
             ? { id: 'v2-apply-order', ...testCase.expected }
             : undefined, testCase.name)
@@ -429,17 +434,132 @@ test('applyOrderExecutionSyncResult: 同一 snapshot と overfill は no-op に�
     const unchanged = await applyOrderExecutionSyncResult(
         order,
         { execution: { price: 101, size: 1, executed_at: new Date('2026-01-01T00:01:00Z') } },
-        async (id, update) => { updates.push({ id, ...update }) },
+        async (id, mutate) => {
+            const update = mutate(order)
+            if (!update) return false
+            updates.push({ id, ...update })
+            return true
+        },
     )
     const overfilled = await applyOrderExecutionSyncResult(
         makeApplyOrder(),
         { execution: { price: 101, size: 1.00000002 } },
-        async (id, update) => { updates.push({ id, ...update }) },
+        async (id, mutate) => {
+            const update = mutate(makeApplyOrder())
+            if (!update) return false
+            updates.push({ id, ...update })
+            return true
+        },
     )
 
-    assert.equal(unchanged, false)
-    assert.equal(overfilled, false)
+    assert.equal(unchanged.updated, false)
+    assert.equal(unchanged.noOpReason, 'UNCHANGED')
+    assert.equal(overfilled.updated, false)
+    assert.equal(overfilled.noOpReason, 'OVERFILL')
     assert.equal(updates.length, 0)
+})
+
+test('applyOrderExecutionSyncResult: stale な PENDING 引数を使っても transaction 内の EXECUTED を維持する', async () => {
+    const current: any = makeApplyOrder()
+    const staleOrder: any = makeApplyOrder()
+    const atomicUpdates: any[] = []
+    const atomicUpdater = async (id: string, mutate: (order: any) => Record<string, unknown> | null) => {
+        const updates = mutate(current)
+        if (!updates) return false
+        Object.assign(current, updates)
+        atomicUpdates.push({ id, updates })
+        return true
+    }
+
+    const first = await applyOrderExecutionSyncResult(
+        staleOrder,
+        { execution: { price: 101, size: 1, executed_at: new Date('2026-01-01T00:01:00Z') } },
+        atomicUpdater,
+    )
+    const second = await applyOrderExecutionSyncResult(
+        staleOrder,
+        { execution: { price: 99, size: 0.4, executed_at: new Date('2026-01-01T00:02:00Z') } },
+        atomicUpdater,
+    )
+
+    assert.equal(first.updated, true)
+    assert.equal(second.updated, false)
+    assert.equal(second.noOpReason, 'STALE')
+    assert.equal(current.status, 'EXECUTED')
+    assert.equal(current.executed_size, 1)
+    assert.equal(current.executed_price, 101)
+    assert.deepEqual(current.executed_at, new Date('2026-01-01T00:01:00Z'))
+    assert.equal(atomicUpdates.length, 1)
+})
+
+test('applyOrderExecutionSyncResult: 同値snapshotは未設定fieldだけ補完し、既存値を訂正しない', async () => {
+    const current: any = makeApplyOrder({
+        executed_size: 0.4,
+        executed_price: null,
+        executed_at: undefined,
+        execution_costs: undefined,
+    })
+    const warnings: unknown[] = []
+    const updated = await applyOrderExecutionSyncResult(
+        current,
+        { execution: { price: 100, size: 0.4, executed_at: new Date('2026-01-01T00:02:00Z'), commission: 0 } },
+        async (_id, mutate) => {
+            const updates = mutate(current)
+            if (updates) Object.assign(current, updates)
+            return updates !== null
+        },
+        { warn: (obj) => warnings.push(obj), info: () => {} },
+    )
+
+    assert.equal(updated.updated, true)
+    assert.equal(current.executed_size, 0.4)
+    assert.equal(current.executed_price, 100)
+    assert.deepEqual(current.executed_at, new Date('2026-01-01T00:02:00Z'))
+    assert.deepEqual(current.execution_costs, { commission: 0 })
+    assert.equal(warnings.length, 0)
+
+    const conflictOrder: any = makeApplyOrder({
+        executed_size: 0.4,
+        executed_price: 100,
+        executed_at: new Date('2026-01-01T00:02:00Z'),
+        execution_costs: { commission: 0 },
+    })
+    const conflictWarnings: unknown[] = []
+    const conflict = await applyOrderExecutionSyncResult(
+        conflictOrder,
+        { execution: { price: 101, size: 0.4, executed_at: new Date('2026-01-01T00:03:00Z'), commission: 1 } },
+        async (_id, mutate) => mutate(conflictOrder) === null ? false : false,
+        { warn: (obj) => conflictWarnings.push(obj), info: () => {} },
+    )
+    assert.equal(conflict.updated, false)
+    assert.equal(conflictWarnings.length, 1)
+    assert.equal(conflictOrder.executed_price, 100)
+    assert.equal(conflictOrder.execution_costs.commission, 0)
+})
+
+test('applyOrderExecutionSyncResult: partial execution後のterminal-only cancelはsnapshotを保持する', async () => {
+    const current: any = makeApplyOrder({
+        executed_size: 0.4,
+        executed_price: 100,
+        executed_at: new Date('2026-01-01T00:01:00Z'),
+        execution_costs: { commission: 0 },
+    })
+    const outcome = await applyOrderExecutionSyncResult(
+        current,
+        { execution: null, terminalStatus: 'CANCELED', terminalReason: 'confirmed_cancel' },
+        async (_id, mutate) => {
+            const updates = mutate(current)
+            if (updates) Object.assign(current, updates)
+            return updates !== null
+        },
+    )
+
+    assert.equal(outcome.updated, true)
+    assert.equal(current.status, 'CANCELED')
+    assert.equal(current.executed_size, 0.4)
+    assert.equal(current.executed_price, 100)
+    assert.deepEqual(current.executed_at, new Date('2026-01-01T00:01:00Z'))
+    assert.deepEqual(current.execution_costs, { commission: 0 })
 })
 
 test('executeTenMinutelyTask: 部分約定後の confirmed cancel は terminal 同期ログを出す', async () => {

@@ -142,7 +142,7 @@ polling 状態は `cron_metadata/saxo_orderactivities_poll_state` に保存す�
 
 activity は `LogId` で重複排除し、`ActivityTime` と時系列性が保証された `LogId` で正規化してから注文単位で解決する。同じ `LogId` が複数ページや overlap 範囲に含まれても約定数量へ二重加算しない。
 
-約定数量は `FillAmount` を優先して fill ごとに合算し、価格は約定数量による加重平均にする。`FillAmount` がない場合は `FilledAmount` / `Amount` の最大累積数量と最新の約定価格を使う。数量フィールドがないレスポンスは、誤同期を避けるため約定未確定として扱う。有効な時刻を持つ fill のうち最新の時刻を約定時刻にする。
+約定集約は履歴の完全性を明示して使い分ける。OrderId direct照会とhourly range reconciliationの `COMPLETE_HISTORY` では、全 confirmed fill に有効な `FillAmount` と価格がある場合だけ fill ごとの合計と数量加重平均価格を使う。1件でも欠落する場合は一部のfillだけを合算せず、最大の `FilledAmount` / `Amount` と、その累積値に対応する最新の平均価格へ fallback する。cursor poll batchとrecent activityの `INCREMENTAL_SNAPSHOT` では差分 `FillAmount` を合算せず、`FilledAmount` / `Amount` と価格で注文全体の累積snapshotを確定できる場合だけ約定を返す。数量または価格が確定できないfillは誤同期を避けるため未確定として扱う。有効な時刻を持つfillのうち最新の時刻を約定時刻にする。
 
 broker state は `Status` と `SubStatus` を組み合わせて解決する。confirmed の `FinalFill` / `Fill` / `Cancelled` / `Expired`、`Placed + Rejected`、進行中の placement/change/working と、未知または曖昧な activity を区別する。既存 payload 互換のため `SubStatus` 欠落時の fill は認識するが、requested/rejected fill は約定へ集約しない。confirmed fill は placement rejection より優先し、confirmed cancel/expire と部分約定が共存する場合は約定 snapshot を保持したまま `orders_v2` を `CANCELED` にする。`Placed + Rejected` は confirmed fill または confirmed placement がない場合だけ `FAILED` にし、rejected cancel/change と `DoneForDay` は非終端として `PENDING` を継続する。未知または cancel と expire が矛盾する activity は安全側で `PENDING` とする。
 
@@ -168,4 +168,4 @@ range の対象は有効な `saxo_order_v1` metadata と entry `OrderId` を持�
 
 reconciliation state は `cron_metadata/saxo_orderactivities_reconciliation_state` に保存する。`INCOMPLETE` または `RATE_LIMITED` の場合は保存済み window を次回最優先で再試行し、complete の場合だけ `last_reconciliation_completed_at` を更新して次回の新しい48時間 windowへ進む。既存の `direct_lookup_after_order_id` と `last_direct_lookup_at` は同じ document 内で保持する。range response の `__nextPoll` は保存せず、`saxo_orderactivities_poll_state.last_poll_at` と `next_poll_url` は一切変更しない。
 
-complete result のみを shared execution apply helper に渡すため、fill、cancel、expire、rejection の status 更新は direct/cursor と同じ規則で冪等に適用される。同一 window の再取得では同じ snapshot を Firestore に再更新しない。summary log には window、pending、eligible、activity、matched、executed、partial、canceled、failed、no-match、page count、outcome を記録する。
+complete result のみを shared execution apply helper に渡すため、fill、cancel、expire、rejection の status 更新は direct/cursor と同じ規則で冪等に適用される。同一 window の再取得では同じ snapshot を Firestore に再更新しない。poll batchでfill activityはあるが累積snapshotを確定できない注文は、暫定値を保存せずdirect candidateへ回す。direct capまたはrequest budgetの対象外になった場合は次回sessionへdeferする。summary log には window、pending、eligible、activity、matched、executed、partial、canceled、failed、no-match、page count、outcome を記録する。

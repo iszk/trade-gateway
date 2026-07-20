@@ -143,6 +143,33 @@ test('resolveSaxoOrderActivities は confirmed でない fill を約定へ集約
     assert.equal(resolveSaxoOrderActivities([fill({ SubStatus: 'Rejected' })]).execution, null)
 })
 
+test('aggregateSaxoExecution: COMPLETE_HISTORY は FillAmount が混在すると累積snapshotへfallbackする', () => {
+    assert.deepEqual(
+        aggregateSaxoExecution([
+            fill({ LogId: 'mixed-1', FillAmount: 0.4, FilledAmount: 0.4, ExecutionPrice: 100 }),
+            fill({ LogId: 'mixed-2', FillAmount: undefined, FilledAmount: 1, AveragePrice: 105, ExecutionPrice: undefined, ActivityTime: '2026-01-01T00:01:00Z' }),
+        ], 'COMPLETE_HISTORY'),
+        { price: 105, size: 1, executed_at: new Date('2026-01-01T00:01:00Z') },
+    )
+})
+
+test('aggregateSaxoExecution: INCREMENTAL_SNAPSHOT は FillAmount を合算せず累積fieldだけを使う', () => {
+    assert.equal(
+        aggregateSaxoExecution([
+            fill({ LogId: 'incremental-1', FillAmount: 0.4 }),
+            fill({ LogId: 'incremental-2', FillAmount: 0.6 }),
+        ], 'INCREMENTAL_SNAPSHOT'),
+        null,
+    )
+    assert.deepEqual(
+        aggregateSaxoExecution([
+            fill({ LogId: 'incremental-3', FillAmount: 0.4, FilledAmount: 0.4, ExecutionPrice: 100 }),
+            fill({ LogId: 'incremental-4', FillAmount: 0.6, FilledAmount: 1, AveragePrice: 101, ExecutionPrice: undefined }),
+        ], 'INCREMENTAL_SNAPSHOT'),
+        { price: 101, size: 1, executed_at: new Date('2026-01-01T00:00:00Z') },
+    )
+})
+
 test('fetchSaxoOrderActivitiesPages は全ページ取得後に activities と nextPollUrl を返す', async () => {
     const requestedUrls: string[] = []
     const finalPage: SaxoOrderActivitiesResponse = {

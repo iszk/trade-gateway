@@ -18,8 +18,8 @@ import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, 
 import type { EnsureTradableSymbolFn, GetTradableSymbolFn, ListTradableSymbolsFn, UpdateTradeControlFn, UpsertTradableSymbolFn } from './services/tradable-symbols.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
 import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
-import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn, createDefaultListOrderUpdatesFn } from './services/orders-v2.js'
-import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn, ListOrdersV2ByDateRangeFn, ListOrderUpdatesFn, OrderUpdate } from './services/orders-v2.js'
+import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultUpdateOrderV2AtomicallyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn, createDefaultListOrderUpdatesFn } from './services/orders-v2.js'
+import type { AddOrderV2Fn, GetPendingOrdersV2Fn, UpdateOrderV2Fn, UpdateOrderV2AtomicallyFn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn, ListOrdersV2ByDateRangeFn, ListOrderUpdatesFn, OrderUpdate } from './services/orders-v2.js'
 import { computeStatsV2 } from './services/stats-v2.js'
 import type { StatsV2 } from './services/stats-v2.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
@@ -247,6 +247,7 @@ type CreateAppOptions = {
     // Phase 3 新フロー
     getPendingOrdersV2?: GetPendingOrdersV2Fn
     updateOrderV2?: UpdateOrderV2Fn
+    updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
     getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
     listOrdersV2ByDateRange?: ListOrdersV2ByDateRangeFn
@@ -278,6 +279,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const getTradeStats = options.getTradeStats ?? createDefaultGetTradeStatsFn()
     const getPendingOrdersV2 = options.getPendingOrdersV2 ?? createDefaultGetPendingOrdersV2Fn()
     const updateOrderV2 = options.updateOrderV2 ?? createDefaultUpdateOrderV2Fn()
+    const updateOrderV2Atomically = options.updateOrderV2Atomically ?? createDefaultUpdateOrderV2AtomicallyFn()
     const getOrderV2 = options.getOrderV2 ?? createDefaultGetOrderV2Fn()
     const getActiveIfdOrdersV2 = options.getActiveIfdOrdersV2 ?? createDefaultGetActiveIfdOrdersV2Fn()
     const listOrdersV2ByDateRange = options.listOrdersV2ByDateRange ?? createDefaultListOrdersV2ByDateRangeFn()
@@ -314,6 +316,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         closingExecutionFetchers: options.closingExecutionFetchers ?? { bitflyer: bitflyerClient, saxo: saxoClient },
         getPendingOrdersV2,
         updateOrderV2,
+        updateOrderV2Atomically,
         addOrderV2,
         getOrderV2,
         getActiveIfdOrdersV2,

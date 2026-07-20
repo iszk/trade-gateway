@@ -6,6 +6,7 @@ import {
     createListOrderUpdatesFn,
     createListOrdersV2ByDateRangeFn,
     createUpdateOrderV2Fn,
+    createUpdateOrderV2AtomicallyFn,
 } from './orders-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 
@@ -95,6 +96,27 @@ const createWriteDbStub = () => {
     }
 }
 
+const createTransactionDbStub = (order: OrderV2 | null) => {
+    const state: { updatePayload?: Record<string, unknown>, reads: number } = { reads: 0 }
+    const docRef = {}
+    const db = {
+        collection: () => ({ doc: () => docRef }),
+        runTransaction: async (callback: (transaction: unknown) => Promise<boolean>) => callback({
+            get: async () => {
+                state.reads += 1
+                return {
+                    exists: order !== null,
+                    data: () => order ? toFirestoreOrder(order) : undefined,
+                }
+            },
+            update: (_ref: unknown, payload: Record<string, unknown>) => {
+                state.updatePayload = payload
+            },
+        }),
+    }
+    return { db, state }
+}
+
 test('createAddOrderV2Fn: Firestore write 前に undefined フィールドを除去する', async () => {
     const { db, state } = createWriteDbStub()
     const addOrderV2 = createAddOrderV2Fn(db as any)
@@ -126,6 +148,42 @@ test('createUpdateOrderV2Fn: Firestore update 前に undefined フィールド�
     assert.equal('exit_sync_status' in state.updatePayload, false)
     assert.equal(state.updatePayload.status, 'EXECUTED')
     assert.ok(state.updatePayload.updated_at instanceof Date)
+})
+
+test('createUpdateOrderV2AtomicallyFn: transaction内の最新orderを正規化して更新する', async () => {
+    const current = makeOrder({
+        id: 'atomic-order',
+        updated_at: new Date('2026-01-02T00:00:00Z'),
+        executed_at: new Date('2026-01-01T01:00:00Z'),
+    })
+    const { db, state } = createTransactionDbStub(current)
+    const updateOrderV2Atomically = createUpdateOrderV2AtomicallyFn(db as any)
+
+    const updated = await updateOrderV2Atomically('atomic-order', (latest) => {
+        assert.ok(latest.created_at instanceof Date)
+        assert.ok(latest.updated_at instanceof Date)
+        assert.ok(latest.executed_at instanceof Date)
+        return { status: 'CANCELED', executed_at: undefined }
+    })
+
+    assert.equal(updated, true)
+    assert.equal(state.reads, 1)
+    assert.equal(state.updatePayload?.status, 'CANCELED')
+    assert.equal('executed_at' in (state.updatePayload ?? {}), false)
+    assert.ok(state.updatePayload?.updated_at instanceof Date)
+})
+
+test('createUpdateOrderV2AtomicallyFn: documentなしと空diffではwriteしない', async () => {
+    for (const [order, mutate] of [
+        [null, () => null],
+        [makeOrder({ id: 'atomic-empty' }), () => ({})],
+    ] as const) {
+        const { db, state } = createTransactionDbStub(order)
+        const updateOrderV2Atomically = createUpdateOrderV2AtomicallyFn(db as any)
+        assert.equal(await updateOrderV2Atomically(order?.id ?? 'missing-order', mutate), false)
+        assert.equal(state.updatePayload, undefined)
+        assert.equal(state.reads, 1)
+    }
 })
 
 test('createListOrdersV2ByDateRangeFn: executed_at のみで期間抽出し降順に返す', async () => {

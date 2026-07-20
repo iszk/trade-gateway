@@ -1402,8 +1402,8 @@ test('SaxoClient.getExecutionPriceForOrderV2 uses batched audit activities and f
             new Response(
                 JSON.stringify({
                     Data: [
-                        { LogId: 'L1', OrderId: 'ORD-entry-3', Status: 'Fill', ExecutionPrice: 101, FillAmount: 400, ActivityTime: '2026-01-01T00:05:00Z' },
-                        { LogId: 'L2', OrderId: 'ORD-entry-3', Status: 'FinalFill', ExecutionPrice: 102, FillAmount: 600, ActivityTime: '2026-01-01T00:06:00Z' },
+                        { LogId: 'L1', OrderId: 'ORD-entry-3', Status: 'Fill', ExecutionPrice: 101, FillAmount: 400, FilledAmount: 400, ActivityTime: '2026-01-01T00:05:00Z' },
+                        { LogId: 'L2', OrderId: 'ORD-entry-3', Status: 'FinalFill', ExecutionPrice: 102, FillAmount: 600, FilledAmount: 1000, ActivityTime: '2026-01-01T00:06:00Z' },
                     ],
                     __nextPoll: '/cs/v1/audit/orderactivities/subscriptions/sub-1',
                 }),
@@ -1436,7 +1436,7 @@ test('SaxoClient.getExecutionPriceForOrderV2 uses batched audit activities and f
         },
     })
 
-    assert.deepEqual(result.execution, { price: 101.6, size: 1000, executed_at: new Date('2026-01-01T00:06:00Z') })
+    assert.deepEqual(result.execution, { price: 102, size: 1000, executed_at: new Date('2026-01-01T00:06:00Z') })
 })
 
 test('SaxoClient.getExecutionPricesForOrdersV2 は batch miss だけ direct lookup して約定を救済する', async () => {
@@ -1701,7 +1701,7 @@ test('SaxoClient.getExecutionPricesForOrdersV2 は batch hit で direct call を
             const parsedUrl = new URL(String(url))
             if (parsedUrl.searchParams.has('OrderId')) directRequestCount += 1
             return Response.json({
-                Data: [{ LogId: 'batch-fill', OrderId: 'ORD-batch-hit', Status: 'FinalFill', ExecutionPrice: 99, FillAmount: 1 }],
+                Data: [{ LogId: 'batch-fill', OrderId: 'ORD-batch-hit', Status: 'FinalFill', ExecutionPrice: 99, FillAmount: 1, FilledAmount: 1 }],
             })
         },
     })
@@ -1713,6 +1713,49 @@ test('SaxoClient.getExecutionPricesForOrdersV2 は batch hit で direct call を
 
     assert.equal(directRequestCount, 0)
     assert.equal(result.get('evt-ORD-batch-hit')?.execution?.price, 99)
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は累積snapshot不明のpoll fillをdirect candidateへ回す', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    const requestedUrls: string[] = []
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            requestedUrls.push(parsedUrl.toString())
+            if (parsedUrl.searchParams.has('OrderId')) {
+                return Response.json({
+                    Data: [{ LogId: 'direct-recovery', OrderId: 'ORD-incomplete-poll', Status: 'FinalFill', ExecutionPrice: 101, FillAmount: 1 }],
+                })
+            }
+            return Response.json({
+                Data: [{ LogId: 'poll-incomplete', OrderId: 'ORD-incomplete-poll', Status: 'Fill', ExecutionPrice: 100, FillAmount: 0.4 }],
+            })
+        },
+        sleepImpl: async () => { },
+    })
+
+    const result = await client.getExecutionPricesForOrdersV2(
+        [makePendingSaxoOrder('ORD-incomplete-poll')],
+        { now: new Date('2026-07-17T00:00:00Z') },
+    )
+
+    assert.equal(requestedUrls.length, 2)
+    assert.equal(new URL(requestedUrls[1] as string).searchParams.get('OrderId'), 'ORD-incomplete-poll')
+    assert.deepEqual(result.get('evt-ORD-incomplete-poll')?.execution, {
+        price: 101,
+        size: 1,
+        executed_at: undefined,
+    })
 })
 
 test('SaxoClient.getExecutionPricesForOrdersV2 は direct の cancel を terminal statusへ変換する', async () => {
@@ -1985,7 +2028,7 @@ test('SaxoClient.getExecutionPriceForOrderV2 preserves partial execution snapsho
         baseUrl: 'https://example.com',
         fetchImpl: async () => Response.json({
             Data: [
-                { LogId: 'L-fill', OrderId: orderId, Status: 'Fill', SubStatus: 'Confirmed', ExecutionPrice: 101, FillAmount: 0.4, ActivityTime: '2026-01-01T00:01:00Z' },
+                { LogId: 'L-fill', OrderId: orderId, Status: 'Fill', SubStatus: 'Confirmed', ExecutionPrice: 101, FillAmount: 0.4, FilledAmount: 0.4, ActivityTime: '2026-01-01T00:01:00Z' },
                 { LogId: 'L-cancel', OrderId: orderId, Status: 'Cancelled', SubStatus: 'Confirmed' },
             ],
         }),
@@ -2218,8 +2261,8 @@ test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executio
             return new Response(
                 JSON.stringify({
                     Data: [
-                        { LogId: 'L-sl-4', OrderId: 'ORD-sl-4', Status: 'FinalFill', ExecutionPrice: 98, FillAmount: 0.5 },
-                        { LogId: 'L-tp-4', OrderId: 'ORD-tp-4', Status: 'FinalFill', ExecutionPrice: 104, FillAmount: 1.5 },
+                        { LogId: 'L-sl-4', OrderId: 'ORD-sl-4', Status: 'FinalFill', ExecutionPrice: 98, FillAmount: 0.5, FilledAmount: 0.5 },
+                        { LogId: 'L-tp-4', OrderId: 'ORD-tp-4', Status: 'FinalFill', ExecutionPrice: 104, FillAmount: 1.5, FilledAmount: 1.5 },
                     ],
                 }),
                 { status: 200, headers: { 'content-type': 'application/json' } },
@@ -2412,13 +2455,13 @@ test('SaxoClient.getExecutionPriceForOrderV2 saves the final cursor only after a
             requestedUrls.push(String(url))
             if (requestedUrls.length === 1) {
                 return Response.json({
-                    Data: [{ LogId: '1', OrderId: 'ORD-paged', Status: 'Fill', ExecutionPrice: 100, FillAmount: 1 }],
+                    Data: [{ LogId: '1', OrderId: 'ORD-paged', Status: 'Fill', ExecutionPrice: 100, FillAmount: 1, FilledAmount: 1 }],
                     __next: '/page-2',
                     __nextPoll: '/poll-1',
                 })
             }
             return Response.json({
-                Data: [{ LogId: '2', OrderId: 'ORD-paged', Status: 'FinalFill', ExecutionPrice: 110, FillAmount: 1 }],
+                Data: [{ LogId: '2', OrderId: 'ORD-paged', Status: 'FinalFill', ExecutionPrice: 110, FillAmount: 1, FilledAmount: 2 }],
                 __nextPoll: '/poll-2',
             })
         },
@@ -2428,7 +2471,7 @@ test('SaxoClient.getExecutionPriceForOrderV2 saves the final cursor only after a
 
     assert.equal(new URL(requestedUrls[0] as string).searchParams.get('$top'), '500')
     assert.equal(requestedUrls[1], 'https://example.com/page-2')
-    assert.deepEqual(result.execution, { price: 105, size: 2, executed_at: undefined })
+    assert.deepEqual(result.execution, { price: 110, size: 2, executed_at: undefined })
     const state = db._getStoredData()['cron_metadata/saxo_orderactivities_poll_state'] as Record<string, unknown>
     assert.equal(state.next_poll_url, '/poll-2')
     assert.equal(typeof state.last_poll_at, 'string')
