@@ -1,5 +1,6 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient, setFirestoreDocument, updateFirestoreDocument } from '../firestore.js'
+import { omitUndefinedFields } from '../omit-undefined-fields.js'
 import type { OrderV2 } from '../types/order-v2.js'
 
 const COLLECTION_NAME = 'orders_v2'
@@ -102,6 +103,29 @@ export const createUpdateOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
     }
 }
 
+export const createUpdateOrderV2AtomicallyFn = (db: Firestore = getFirestoreClient()): UpdateOrderV2AtomicallyFn => {
+    return async (id, mutate): Promise<boolean> => {
+        const docRef = db.collection(COLLECTION_NAME).doc(id)
+        return db.runTransaction(async (transaction) => {
+            const doc = await transaction.get(docRef)
+            if (!doc.exists) return false
+
+            const current = fromFirestoreOrderV2(doc.data() as OrderV2)
+            const updates = mutate(current)
+            if (!updates) return false
+
+            const firestoreUpdates = omitUndefinedFields(updates as Record<string, unknown>)
+            if (Object.keys(firestoreUpdates).length === 0) return false
+
+            transaction.update(docRef, {
+                ...firestoreUpdates,
+                updated_at: new Date(),
+            })
+            return true
+        })
+    }
+}
+
 const createGetOrderV2Fn = (db: Firestore = getFirestoreClient()) => {
     return async (id: string): Promise<OrderV2 | null> => {
         const doc = await db.collection(COLLECTION_NAME).doc(id).get()
@@ -172,6 +196,10 @@ export const createListOrderUpdatesFn = (db: Firestore = getFirestoreClient()) =
 
 export type AddOrderV2Fn = (order: OrderV2) => Promise<void>
 export type UpdateOrderV2Fn = (id: string, updates: Partial<OrderV2>) => Promise<void>
+export type UpdateOrderV2AtomicallyFn = (
+    id: string,
+    mutate: (current: OrderV2) => Partial<OrderV2> | null,
+) => Promise<boolean>
 export type GetOrderV2Fn = (id: string) => Promise<OrderV2 | null>
 export type GetPendingOrdersV2Fn = () => Promise<OrderV2[]>
 export type GetActiveIfdOrdersV2Fn = () => Promise<OrderV2[]>
@@ -180,6 +208,7 @@ export type ListOrderUpdatesFn = (updatedFrom: Date, updatedTo: Date) => Promise
 
 export const createDefaultAddOrderV2Fn = (): AddOrderV2Fn => createAddOrderV2Fn(getFirestoreClient())
 export const createDefaultUpdateOrderV2Fn = (): UpdateOrderV2Fn => createUpdateOrderV2Fn(getFirestoreClient())
+export const createDefaultUpdateOrderV2AtomicallyFn = (): UpdateOrderV2AtomicallyFn => createUpdateOrderV2AtomicallyFn(getFirestoreClient())
 export const createDefaultGetOrderV2Fn = (): GetOrderV2Fn => createGetOrderV2Fn(getFirestoreClient())
 export const createDefaultGetPendingOrdersV2Fn = (): GetPendingOrdersV2Fn => createGetPendingOrdersV2Fn(getFirestoreClient())
 export const createDefaultGetActiveIfdOrdersV2Fn = (): GetActiveIfdOrdersV2Fn => createGetActiveIfdOrdersV2Fn(getFirestoreClient())

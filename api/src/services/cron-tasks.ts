@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util'
 
-import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, AddOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
+import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, UpdateOrderV2AtomicallyFn, AddOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
 import type {
@@ -40,6 +40,7 @@ export type CronContext = {
     /** Phase 3: orders_v2 のステータス同期用 */
     getPendingOrdersV2?: GetPendingOrdersV2Fn
     updateOrderV2?: UpdateOrderV2Fn
+    updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
     addOrderV2?: AddOrderV2Fn
     getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
@@ -73,54 +74,147 @@ const areSameBrokerOrderMetadata = (
 ): boolean => isDeepStrictEqual(left, right)
 
 const resolveOrderStatus = (
+    currentStatus: OrderV2['status'],
     execution: ExecutionSyncInfo | null,
     terminalStatus: ExecutionTerminalStatus | undefined,
     requestedSize: number,
 ): OrderV2['status'] => {
-    if (execution !== null) {
-        if (execution.size >= requestedSize - EPSILON) return 'EXECUTED'
-        if (terminalStatus === 'CANCELED') return 'CANCELED'
-        return 'PENDING'
-    }
-    return terminalStatus ?? 'PENDING'
+    const isCompleted = execution !== null && execution.size >= requestedSize - EPSILON
+    if (isCompleted) return 'EXECUTED'
+    if (currentStatus !== 'PENDING') return currentStatus
+    if (terminalStatus === 'CANCELED') return 'CANCELED'
+    if (terminalStatus === 'FAILED' && execution === null) return 'FAILED'
+    return 'PENDING'
 }
 
-/** execution snapshot と broker の終端判定を単一注文へ冪等に適用する。 */
-export const applyOrderExecutionSyncResult = async (
-    order: OrderV2,
-    result: OrderExecutionSyncResult,
-    updateOrderV2: UpdateOrderV2Fn,
-): Promise<boolean> => {
-    const info = result.execution
-    if (info !== null && info.size > order.requested_size + EPSILON) return false
+const mergeDefinedValues = (current: unknown, incoming: unknown): unknown => {
+    if (current === undefined || current === null) return incoming
+    if (incoming === undefined || incoming === null) return current
+    if (Array.isArray(current) && Array.isArray(incoming)) {
+        const length = Math.max(current.length, incoming.length)
+        return Array.from({ length }, (_, index) => mergeDefinedValues(current[index], incoming[index]))
+    }
+    if (typeof current === 'object' && typeof incoming === 'object' && !Array.isArray(current) && !Array.isArray(incoming)) {
+        const currentRecord = current as Record<string, unknown>
+        const incomingRecord = incoming as Record<string, unknown>
+        const keys = new Set([...Object.keys(currentRecord), ...Object.keys(incomingRecord)])
+        return Object.fromEntries([...keys].map((key) => [
+            key,
+            mergeDefinedValues(currentRecord[key], incomingRecord[key]),
+        ]))
+    }
+    return current
+}
 
+const mergeBrokerOrderMetadata = (
+    current: BrokerOrderMetadata | undefined,
+    incoming: BrokerOrderMetadata | undefined,
+): BrokerOrderMetadata | undefined => (
+    incoming === undefined
+        ? current
+        : mergeDefinedValues(current, incoming) as BrokerOrderMetadata
+)
+
+export type OrderExecutionSyncApplyOutcome = {
+    updated: boolean
+    noOpReason?: 'OVERFILL' | 'UNCHANGED' | 'STALE'
+}
+
+const buildOrderExecutionSyncUpdates = (
+    current: OrderV2,
+    result: OrderExecutionSyncResult,
+): Partial<OrderV2> | null => {
+    const info = result.execution
     const updates: Partial<OrderV2> = {}
-    if (
-        result.brokerOrderMetadata !== undefined &&
-        !areSameBrokerOrderMetadata(order.broker_order_metadata, result.brokerOrderMetadata)
-    ) {
-        updates.broker_order_metadata = result.brokerOrderMetadata
+    const nextStatus = resolveOrderStatus(current.status, info, result.terminalStatus, current.requested_size)
+    if (current.status !== nextStatus) updates.status = nextStatus
+
+    const mergedMetadata = mergeBrokerOrderMetadata(current.broker_order_metadata, result.brokerOrderMetadata)
+    if (!areSameBrokerOrderMetadata(current.broker_order_metadata, mergedMetadata)) {
+        updates.broker_order_metadata = mergedMetadata
     }
 
-    const nextStatus = resolveOrderStatus(info, result.terminalStatus, order.requested_size)
-    if (order.status !== nextStatus) updates.status = nextStatus
-
     if (info !== null) {
-        const isCompleted = info.size >= order.requested_size - EPSILON
-        const executedAt = resolveExecutedAt(order, info)
-        if (!areSameNumber(order.executed_price, info.price)) updates.executed_price = info.price
-        if (!areSameNumber(order.executed_size, info.size)) updates.executed_size = info.size
-        if (!areSameDate(order.executed_at, executedAt)) updates.executed_at = executedAt
-        if (info.commission !== undefined && !areSameNumber(order.execution_costs?.commission, info.commission)) {
-            updates.execution_costs = { commission: info.commission }
+        const currentExecutedSize = current.executed_size ?? 0
+        const isLargerSnapshot = info.size > currentExecutedSize + EPSILON
+        const isSameSnapshotSize = areSameNumber(currentExecutedSize, info.size)
+        const executedAt = resolveExecutedAt(current, info)
+
+        if (isLargerSnapshot) {
+            updates.executed_size = info.size
+            updates.executed_price = info.price
+            updates.executed_at = executedAt
+            if (info.commission !== undefined) {
+                updates.execution_costs = { commission: info.commission }
+            }
+        } else if (isSameSnapshotSize) {
+            if (current.executed_price == null) updates.executed_price = info.price
+            if (current.executed_at === undefined) updates.executed_at = executedAt
+            if (current.execution_costs?.commission === undefined && info.commission !== undefined) {
+                updates.execution_costs = { commission: info.commission }
+            }
         }
-        if (isCompleted && order.order_type === 'IFDOCO' && order.exit_sync_status === undefined) {
+
+        if (
+            nextStatus === 'EXECUTED' &&
+            current.status !== 'EXECUTED' &&
+            current.order_type === 'IFDOCO' &&
+            current.exit_sync_status === undefined
+        ) {
             updates.exit_sync_status = 'MONITORING'
         }
     }
 
-    if (Object.keys(updates).length === 0) return false
-    await updateOrderV2(order.id, updates)
+    return Object.keys(updates).length === 0 ? null : updates
+}
+
+/** execution snapshot と broker の終端判定を最新注文へ冪等に適用する。 */
+export const applyOrderExecutionSyncResult = async (
+    order: OrderV2,
+    result: OrderExecutionSyncResult,
+    updateOrderV2Atomically: UpdateOrderV2AtomicallyFn,
+    logger?: Logger,
+): Promise<OrderExecutionSyncApplyOutcome> => {
+    const info = result.execution
+    if (info !== null && info.size > order.requested_size + EPSILON) {
+        return { updated: false, noOpReason: 'OVERFILL' }
+    }
+
+    if (
+        info !== null &&
+        areSameNumber(order.executed_size, info.size) &&
+        ((order.executed_price !== null && !areSameNumber(order.executed_price, info.price)) ||
+            (order.executed_at !== undefined && info.executed_at !== undefined && !areSameDate(order.executed_at, info.executed_at)) ||
+            (order.execution_costs?.commission !== undefined && info.commission !== undefined &&
+                !areSameNumber(order.execution_costs.commission, info.commission)) ||
+            (order.broker_order_metadata !== undefined && result.brokerOrderMetadata !== undefined &&
+                !areSameBrokerOrderMetadata(order.broker_order_metadata, result.brokerOrderMetadata)))
+    ) {
+        logger?.warn(
+            {
+                event: 'cron:orders_v2_execution_snapshot_conflict',
+                orderId: order.id,
+                executionSize: info.size,
+            },
+            'same-size execution snapshot contains conflicting resolved fields; preserving existing values',
+        )
+    }
+
+    const expectedUpdates = buildOrderExecutionSyncUpdates(order, result)
+    const updated = await updateOrderV2Atomically(order.id, (current) => buildOrderExecutionSyncUpdates(current, result))
+
+    return updated
+        ? { updated: true }
+        : { updated: false, noOpReason: expectedUpdates ? 'STALE' : 'UNCHANGED' }
+}
+
+const createLegacyAtomicUpdater = (
+    order: OrderV2,
+    updateOrderV2: UpdateOrderV2Fn,
+): UpdateOrderV2AtomicallyFn => async (id, mutate) => {
+    const updates = mutate(order)
+    if (!updates || Object.keys(updates).length === 0) return false
+    await updateOrderV2(id, updates)
     return true
 }
 
@@ -140,6 +234,7 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             executionPriceFetchers: ctx.executionPriceFetchers,
             getPendingOrdersV2: ctx.getPendingOrdersV2,
             updateOrderV2: ctx.updateOrderV2,
+            updateOrderV2Atomically: ctx.updateOrderV2Atomically,
             nowMs,
         })
     }
@@ -186,7 +281,14 @@ export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
         // Incomplete reconciliation returns no results, so partial activity is never applied.
         for (const order of saxoOrders) {
             const result = results.get(order.id)
-            if (result) await applyOrderExecutionSyncResult(order, result, ctx.updateOrderV2)
+            if (result) {
+                await applyOrderExecutionSyncResult(
+                    order,
+                    result,
+                    ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2),
+                    ctx.logger,
+                )
+            }
         }
     } catch (error) {
         ctx.logger.warn(
@@ -200,6 +302,7 @@ const applyPendingOrderSyncResult = async (
     ctx: {
         logger: Logger
         updateOrderV2: UpdateOrderV2Fn
+        updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
     },
     order: OrderV2,
     syncResult: OrderExecutionSyncResult,
@@ -220,7 +323,12 @@ const applyPendingOrderSyncResult = async (
         return
     }
 
-    await applyOrderExecutionSyncResult(order, syncResult, ctx.updateOrderV2)
+    const applyOutcome = await applyOrderExecutionSyncResult(
+        order,
+        syncResult,
+        ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2),
+        ctx.logger,
+    )
 
     const isCompleted = info !== null && info.size >= order.requested_size - EPSILON
     if (info !== null && (isCompleted || syncResult.terminalStatus !== 'CANCELED')) {
@@ -231,6 +339,8 @@ const applyPendingOrderSyncResult = async (
                 orderId: order.id,
                 price: info.price,
                 size: info.size,
+                updated: applyOutcome.updated,
+                noOpReason: applyOutcome.noOpReason,
             },
             isCompleted
                 ? 'orders_v2 execution synchronized as EXECUTED'
@@ -244,6 +354,8 @@ const applyPendingOrderSyncResult = async (
                 orderId: order.id,
                 status: syncResult.terminalStatus,
                 reason: syncResult.terminalReason,
+                updated: applyOutcome.updated,
+                noOpReason: applyOutcome.noOpReason,
             },
             `orders_v2 terminal status synchronized as ${syncResult.terminalStatus}`,
         )
@@ -266,6 +378,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
     executionPriceFetchers: Partial<Record<string, ExecutionPriceFetcherLike>>
     getPendingOrdersV2: GetPendingOrdersV2Fn
     updateOrderV2: UpdateOrderV2Fn
+    updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
     nowMs: number
 }): Promise<void> => {
     const pendingOrders = await ctx.getPendingOrdersV2()

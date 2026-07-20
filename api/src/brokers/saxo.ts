@@ -26,6 +26,7 @@ import {
 } from './saxo-auth-store.js'
 import {
     fetchSaxoOrderActivitiesPages,
+    isSaxoFillActivity,
     SAXO_ORDER_ACTIVITIES_MAX_PAGES,
     SAXO_ORDER_ACTIVITIES_PAGE_SIZE,
     summarizeSaxoActivities,
@@ -797,7 +798,7 @@ export class SaxoClient {
         const matchingActivities = result.activities.filter((activity) => activity.OrderId === orderId)
         return {
             status: 'complete',
-            resolution: resolveSaxoOrderActivities(matchingActivities),
+            resolution: resolveSaxoOrderActivities(matchingActivities, 'COMPLETE_HISTORY'),
         }
     }
 
@@ -874,12 +875,14 @@ export class SaxoClient {
                 const directCandidateOrders = validOrders.filter(({ order, entryOrderId }) => {
                     const matchingActivities = activitiesByOrderId.get(entryOrderId) ?? []
                     if (matchingActivities.length === 0) return true
+                    const resolution = resolveSaxoOrderActivities(matchingActivities, 'INCREMENTAL_SNAPSHOT')
+                    const terminal = toSaxoTerminalStatus(resolution.brokerState)
+                    if (matchingActivities.some(isSaxoFillActivity) && resolution.execution === null) return true
                     batchMatched += 1
-                    const resolution = resolveSaxoOrderActivities(matchingActivities)
                     recordResolution(resolution)
                     results.set(order.id, {
                         execution: resolution.execution,
-                        ...toSaxoTerminalStatus(resolution.brokerState),
+                        ...terminal,
                         brokerOrderMetadata: order.broker_order_metadata,
                     })
                     return false
@@ -1221,7 +1224,7 @@ export class SaxoClient {
 
                 const matchingActivities = activitiesByOrderId.get(entryOrderId) ?? []
                 if (matchingActivities.length > 0) matched += 1
-                const resolution = resolveSaxoOrderActivities(matchingActivities)
+                const resolution = resolveSaxoOrderActivities(matchingActivities, 'COMPLETE_HISTORY')
                 const terminal = toSaxoTerminalStatus(resolution.brokerState)
                 results.set(order.id, {
                     execution: resolution.execution,
@@ -1286,7 +1289,7 @@ export class SaxoClient {
         if (!result.complete) return { execution: null, brokerState: 'UNRESOLVED' }
         const activities = result.activities
         const matchingActivities = activities.filter((activity) => activity.OrderId === orderId)
-        const resolution = resolveSaxoOrderActivities(matchingActivities)
+        const resolution = resolveSaxoOrderActivities(matchingActivities, 'INCREMENTAL_SNAPSHOT')
         const execution = resolution.execution
 
         if (matchingActivities.length === 0) {
