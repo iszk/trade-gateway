@@ -2314,6 +2314,20 @@ test('SaxoClient.getExecutionPricesForOrdersV2 は空のprovider idをsummary sa
     })
 })
 
+test('SaxoClient.getExecutionPricesForOrdersV2 は非文字列provider idでsummary sample処理をクラッシュさせない', async () => {
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({ db: mockFirestore(), logger: logger as any, baseUrl: 'https://example.com' })
+    const order = { ...makePendingSaxoOrder('ORD-malformed-provider'), id: 'evt-malformed-provider', provider_order_ids: [123 as any] }
+
+    const result = await client.getExecutionPricesForOrdersV2([order], { now: new Date('2026-07-17T00:00:00Z') })
+
+    assert.deepEqual(result.get(order.id), { execution: null })
+    const summary = infoLogs.find((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    assert.deepEqual(summary?.obj.unrecoverableOrderIds, {
+        PROVIDER_ORDER_ID_MISSING: ['evt-malformed-provider'],
+    })
+})
+
 test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executions from one audit batch', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {
