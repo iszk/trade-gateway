@@ -37,6 +37,16 @@ test('Saxo metadata classifier: metadata 欠落の単体 MARKET は最小 metada
     assert.deepEqual(result.metadata.exits, [])
 })
 
+test('Saxo metadata classifier: provider ID は trim して metadata に保存する', () => {
+    const result = classifySaxoOrderMetadata(makeOrder({ provider_order_ids: [' ORD-1 '] }))
+
+    assert.equal(result.kind, 'RECOVERABLE_MARKET')
+    if (result.kind === 'RECOVERABLE_MARKET') {
+        assert.equal(result.metadata.order_id, 'ORD-1')
+        assert.equal(result.metadata.entry.resolved.order_id, 'ORD-1')
+    }
+})
+
 test('Saxo metadata classifier: valid metadata は同一 object を VALID として返す', () => {
     const order = makeOrder({ broker_order_metadata: validMetadata })
     const result = classifySaxoOrderMetadata(order)
@@ -66,6 +76,7 @@ const unrecoverableCases: Array<[string, Record<string, unknown>, string]> = [
     ['provider id missing', { provider_order_ids: [] }, 'PROVIDER_ORDER_ID_MISSING'],
     ['provider id blank', { provider_order_ids: ['  '] }, 'PROVIDER_ORDER_ID_MISSING'],
     ['dry run', { provider_order_ids: ['DRY_RUN'] }, 'DRY_RUN'],
+    ['trimmed dry run', { provider_order_ids: [' DRY_RUN '] }, 'DRY_RUN'],
     ['wrong metadata kind', { broker_order_metadata: { kind: 'bitflyer_parent_order_v1' } }, 'METADATA_KIND_CONFLICT'],
     ['malformed Saxo metadata', { broker_order_metadata: { kind: 'saxo_order_v1' } }, 'METADATA_INVALID'],
     ['provider id conflict', { broker_order_metadata: { ...validMetadata, order_id: 'ORD-other' } }, 'METADATA_CONFLICT'],

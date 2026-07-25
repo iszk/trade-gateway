@@ -29,6 +29,12 @@ const isNonEmptyString = (value: unknown): value is string => (
     typeof value === 'string' && value.trim().length > 0
 )
 
+const normalizeProviderOrderId = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null
+    const normalized = value.trim()
+    return normalized.length > 0 ? normalized : null
+}
+
 const isPositiveFiniteNumber = (value: unknown): value is number => (
     typeof value === 'number' && Number.isFinite(value) && value > 0
 )
@@ -124,8 +130,8 @@ const classifyExistingMetadata = (
 export const classifySaxoOrderMetadata = (order: SaxoOrderMetadataOrder): SaxoMetadataClassification => {
     if (order.broker !== 'saxo') return { kind: 'UNRECOVERABLE', reason: 'BROKER_MISMATCH' }
 
-    const providerOrderId = order.provider_order_ids[0]
-    if (!isNonEmptyString(providerOrderId)) {
+    const providerOrderId = normalizeProviderOrderId(order.provider_order_ids[0])
+    if (providerOrderId === null) {
         return { kind: 'UNRECOVERABLE', reason: 'PROVIDER_ORDER_ID_MISSING' }
     }
     if (providerOrderId === 'DRY_RUN') return { kind: 'UNRECOVERABLE', reason: 'DRY_RUN' }
