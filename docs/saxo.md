@@ -150,6 +150,14 @@ Saxo の execution sync result は、約定 snapshot、終端 status（`CANCELED
 
 ### Batch miss recovery
 
+10分 cron は PENDING orders_v2 を broker 単位で渡し、Saxo の bulk contract は account-wide cursor batch を1回だけ取得する。batch に entry の `OrderId` がない注文だけを direct candidate とし、`ClientKey`、`OrderId`、`EntryType=All`、`$top=500` を付けた orderactivities endpoint を最大5ページまで取得する。batch hit では direct call を発生させない。
+
+direct recovery は1 sessionあたり最大10注文、HTTP request最大20回（paging/retry込み）、audit request共有同時数2で実行する。network error/5xx は budget 内で1回だけ指数 backoff + jitter retry し、429 は `Retry-After` または既存 cooldown を設定して同一 session 内で再試行しない。page limit、途中HTTP failure、parse failureの場合はその注文のpartial activityを適用しない。
+
+direct candidate は runtime validation 済みの `saxo_order_v1` metadata を持つ注文（同一 session で合成した単体 MARKET を含む）に限る。provider order ID がない、`DRY_RUN`、補完不能な metadata の注文では外部APIを呼ばない。candidate は OrderId の安定順で並べ、`cron_metadata/saxo_orderactivities_reconciliation_state` の位置から round-robin する。direct callを1件以上開始した場合だけ最後に開始した OrderId と時刻を保存し、state write failure は注文同期を失敗扱いにしない。
+
+session結果は `saxo:orderactivities_reconciliation_summary` へ1件に集約し、pending、valid metadata、recoverable / generated metadata、unrecoverable reason 別件数、batch matched、direct candidates、attempted、deferred、recovered、no-match、failed、rate-limited、terminal counts、最大5件の sample OrderId を出力する。24時間を超えた MARKET PENDING も stale skip せず、以後の session で最大10件ずつ救済する。
+
 ### Legacy MARKET metadata recovery
 
 10分の entry 同期は、Saxo の単体 `MARKET` で `broker_order_metadata` が完全に欠落している legacy order に限り自己修復する。対象は Saxo、非空で `DRY_RUN` ではない先頭 `provider_order_ids`、`BUY` / `SELL` の side、正の `requested_size` を持つ注文である。`MARKET` 以外、特に metadata 欠落 IFDOCO、provider ID 欠落、別 broker、別 kind、malformed data、provider ID・entry ID・side・size・external reference が矛盾する既存 `saxo_order_v1` は補完しない。
@@ -167,14 +175,6 @@ exits: []
 生成後も status を推測せず、既存 resolver が confirmed fill、cancel/expire、placement rejection を返した場合だけ execution / terminal status を更新する。no-match、未確定、deferred、429、batch/direct failure でも metadata-only result を共通 transaction へ渡すため、次回から通常の entry sync 対象へ復帰する。summary では valid metadata、recoverable / generated metadata、unrecoverable reason 別件数、最大5件の provider OrderId sample を execution recovered counter と分けて記録する。
 
 合成 metadata は transaction 内で未設定時だけ保存する。同一 metadata が先行保存済みなら lifecycle の単調差分を継続し、別 metadata が先行保存済みなら metadata・execution・status を上書きしない。10分同期の batch cursor、direct recovery、single fallback が同じ分類を使い、bulk reject 時も各 order を single fallback へ隔離して渡す。
-
-10分 cron は PENDING orders_v2 を broker 単位で渡し、Saxo の bulk contract は account-wide cursor batch を1回だけ取得する。batch に entry の `OrderId` がない注文だけを direct candidate とし、`ClientKey`、`OrderId`、`EntryType=All`、`$top=500` を付けた orderactivities endpoint を最大5ページまで取得する。batch hit では direct call を発生させない。
-
-direct recovery は1 sessionあたり最大10注文、HTTP request最大20回（paging/retry込み）、audit request共有同時数2で実行する。network error/5xx は budget 内で1回だけ指数 backoff + jitter retry し、429 は `Retry-After` または既存 cooldown を設定して同一 session 内で再試行しない。page limit、途中HTTP failure、parse failureの場合はその注文のpartial activityを適用しない。
-
-direct candidate は runtime validation 済みの `saxo_order_v1` metadata を持つ注文（同一 session で合成した単体 MARKET を含む）に限る。provider order ID がない、`DRY_RUN`、補完不能な metadata の注文では外部APIを呼ばない。candidate は OrderId の安定順で並べ、`cron_metadata/saxo_orderactivities_reconciliation_state` の位置から round-robin する。direct callを1件以上開始した場合だけ最後に開始した OrderId と時刻を保存し、state write failure は注文同期を失敗扱いにしない。
-
-session結果は `saxo:orderactivities_reconciliation_summary` へ1件に集約し、pending、valid metadata、recoverable / generated metadata、unrecoverable reason 別件数、batch matched、direct candidates、attempted、deferred、recovered、no-match、failed、rate-limited、terminal counts、最大5件の sample OrderId を出力する。24時間を超えた MARKET PENDING も stale skip せず、以後の session で最大10件ずつ救済する。
 
 ### Hourly range reconciliation
 

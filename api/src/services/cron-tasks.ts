@@ -220,8 +220,8 @@ export const applyOrderExecutionSyncResult = async (
         )
     }
 
-    const expectedUpdates = buildOrderExecutionSyncUpdates(order, result)
     let metadataConflict = false
+    let transactionUpdates: Partial<OrderV2> | null = null
     const updated = await updateOrderV2Atomically(
         order.id,
         (current) => {
@@ -229,7 +229,8 @@ export const applyOrderExecutionSyncResult = async (
                 current.broker_order_metadata !== undefined &&
                 result.brokerOrderMetadata !== undefined &&
                 !areSameBrokerOrderMetadata(current.broker_order_metadata, result.brokerOrderMetadata)
-            return buildOrderExecutionSyncUpdates(current, result, logger)
+            transactionUpdates = buildOrderExecutionSyncUpdates(current, result, logger)
+            return transactionUpdates
         },
     )
 
@@ -239,7 +240,7 @@ export const applyOrderExecutionSyncResult = async (
             updated: false,
             noOpReason: metadataConflict
                 ? 'METADATA_CONFLICT'
-                : expectedUpdates ? 'STALE' : 'UNCHANGED',
+                : transactionUpdates ? 'STALE' : 'UNCHANGED',
         }
 }
 

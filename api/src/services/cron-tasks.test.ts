@@ -537,7 +537,7 @@ test('applyOrderExecutionSyncResult: stale な PENDING 引数を使っても tra
 
     assert.equal(first.updated, true)
     assert.equal(second.updated, false)
-    assert.equal(second.noOpReason, 'STALE')
+    assert.equal(second.noOpReason, 'UNCHANGED')
     assert.equal(current.status, 'EXECUTED')
     assert.equal(current.executed_size, 1)
     assert.equal(current.executed_price, 101)
