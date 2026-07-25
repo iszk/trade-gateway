@@ -2300,6 +2300,20 @@ test('SaxoClient.getExecutionPriceForOrderV2 は metadata欠落MARKETを single 
     assert.equal(warnLogs.some((log) => log.obj.event === 'saxo:orders_v2_sync_unrecoverable'), false)
 })
 
+test('SaxoClient.getExecutionPricesForOrdersV2 は空のprovider idをsummary sampleに記録しない', async () => {
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({ db: mockFirestore(), logger: logger as any, baseUrl: 'https://example.com' })
+    const order = { ...makePendingSaxoOrder('   '), id: 'evt-blank-provider' }
+
+    const result = await client.getExecutionPricesForOrdersV2([order], { now: new Date('2026-07-17T00:00:00Z') })
+
+    assert.deepEqual(result.get(order.id), { execution: null })
+    const summary = infoLogs.find((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    assert.deepEqual(summary?.obj.unrecoverableOrderIds, {
+        PROVIDER_ORDER_ID_MISSING: ['evt-blank-provider'],
+    })
+})
+
 test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executions from one audit batch', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

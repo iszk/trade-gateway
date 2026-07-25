@@ -828,7 +828,8 @@ export class SaxoClient {
             const classification = classifySaxoOrderMetadata(order)
             if (classification.kind === 'UNRECOVERABLE') {
                 results.set(order.id, { execution: null })
-                addUnrecoverable(classification.reason, order.provider_order_ids[0] ?? order.id)
+                const providerOrderId = order.provider_order_ids[0]?.trim()
+                addUnrecoverable(classification.reason, providerOrderId || order.id)
                 return []
             }
 
