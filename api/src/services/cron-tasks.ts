@@ -372,7 +372,7 @@ const applyPendingOrderSyncResult = async (
                 updated: applyOutcome.updated,
                 noOpReason: applyOutcome.noOpReason,
             },
-            'orders_v2 Saxo legacy metadata recovered without confirmed execution',
+            'orders_v2 Saxo legacy metadata recovery attempted without confirmed execution',
         )
     }
 

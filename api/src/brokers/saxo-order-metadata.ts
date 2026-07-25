@@ -41,27 +41,28 @@ const isOptionalExternalReference = (value: unknown): boolean => (
 
 const areSameNumber = (left: number, right: number): boolean => Math.abs(left - right) < 0.00000001
 
-const isSaxoOrderMetadataKind = (value: unknown): value is SaxoOrderMetadata => (
+type SaxoOrderMetadataKind = Pick<SaxoOrderMetadata, 'kind'>
+
+const isSaxoOrderMetadataKind = (value: unknown): value is SaxoOrderMetadataKind => (
     isRecord(value) && value.kind === 'saxo_order_v1'
 )
 
 const isValidSaxoMetadataShape = (value: unknown): value is SaxoOrderMetadata => {
-    if (
-        !isSaxoOrderMetadataKind(value) ||
-        !isNonEmptyString(value.order_id) ||
-        !isOptionalExternalReference(value.external_reference)
-    ) return false
-    if (!isRecord(value.entry) || !isRecord(value.entry.expected) || !isRecord(value.entry.resolved)) return false
+    if (!isSaxoOrderMetadataKind(value) || !isRecord(value)) return false
+    const metadata = value as Record<string, unknown>
+    if (!isNonEmptyString(metadata.order_id) || !isOptionalExternalReference(metadata.external_reference)) return false
+    const entry = metadata.entry
+    if (!isRecord(entry) || !isRecord(entry.expected) || !isRecord(entry.resolved)) return false
 
-    const expected = value.entry.expected
-    const resolved = value.entry.resolved
+    const expected = entry.expected
+    const resolved = entry.resolved
     if (!isOrderSide(expected.side) || expected.order_type !== 'Market' || !isPositiveFiniteNumber(expected.size)) {
         return false
     }
     if (!isNonEmptyString(resolved.order_id) || !isOptionalExternalReference(resolved.external_reference)) return false
-    if (!Array.isArray(value.exits)) return false
+    if (!Array.isArray(metadata.exits)) return false
 
-    for (const exit of value.exits) {
+    for (const exit of metadata.exits) {
         if (!isRecord(exit) || !isRecord(exit.expected) || !isRecord(exit.resolved)) return false
         const expectedExit = exit.expected
         const resolvedExit = exit.resolved

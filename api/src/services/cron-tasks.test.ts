@@ -577,6 +577,53 @@ test('applyOrderExecutionSyncResult: Saxo legacy metadata-only result は PENDIN
     assert.deepEqual(updates[0], { id: current.id, broker_order_metadata: metadata })
 })
 
+test('executeTenMinutelyTask: metadata recovery の no-op は recovery attempted と記録する', async () => {
+    const { logger, logs } = makeLogger()
+    const metadata: any = {
+        kind: 'saxo_order_v1',
+        order_id: 'ORD-metadata-no-op',
+        entry: {
+            expected: { side: 'BUY', order_type: 'Market', size: 1 },
+            resolved: { order_id: 'ORD-metadata-no-op' },
+        },
+        exits: [],
+    }
+    const order: any = {
+        id: 'saxo-metadata-no-op',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'MARKET',
+        status: 'PENDING',
+        provider_order_ids: ['ORD-metadata-no-op'],
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        broker_order_metadata: metadata,
+    }
+
+    await executeTenMinutelyTask(makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async () => {},
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: null,
+                    brokerOrderMetadata: metadata,
+                    brokerOrderMetadataPolicy: 'SET_IF_UNSET' as const,
+                }),
+            },
+        },
+    }))
+
+    const recoveryLog = logs.find((log) => log.event === 'cron:orders_v2_metadata_recovered')
+    assert.equal(recoveryLog?.updated, false)
+    assert.equal(recoveryLog?.noOpReason, 'UNCHANGED')
+    assert.equal(recoveryLog?.message, 'orders_v2 Saxo legacy metadata recovery attempted without confirmed execution')
+})
+
 test('applyOrderExecutionSyncResult: 合成 metadata と confirmed fill を同一 atomic update で適用する', async () => {
     const current = makeApplyOrder()
     const metadata: any = {
