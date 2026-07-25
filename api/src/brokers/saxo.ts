@@ -835,13 +835,12 @@ export class SaxoClient {
             }
 
             const metadata = classification.metadata
-            results.set(order.id, {
-                execution: null,
-                brokerOrderMetadata: metadata,
-                ...(classification.kind === 'RECOVERABLE_MARKET'
-                    ? { brokerOrderMetadataPolicy: 'SET_IF_UNSET' as const }
-                    : {}),
-            })
+            results.set(
+                order.id,
+                classification.kind === 'RECOVERABLE_MARKET'
+                    ? { execution: null, brokerOrderMetadata: metadata, brokerOrderMetadataPolicy: 'SET_IF_UNSET' }
+                    : { execution: null, brokerOrderMetadata: metadata },
+            )
             return [{
                 order,
                 metadata,
@@ -876,12 +875,16 @@ export class SaxoClient {
         const toSyncResult = (
             candidate: SaxoOrderCandidate,
             resolution: SaxoOrderActivityResolution,
-        ): OrderExecutionSyncResult => ({
-            execution: resolution.execution,
-            ...toSaxoTerminalStatus(resolution.brokerState),
-            brokerOrderMetadata: candidate.metadata,
-            ...(candidate.metadataRecovered ? { brokerOrderMetadataPolicy: 'SET_IF_UNSET' as const } : {}),
-        })
+        ): OrderExecutionSyncResult => {
+            const result = {
+                execution: resolution.execution,
+                ...toSaxoTerminalStatus(resolution.brokerState),
+                brokerOrderMetadata: candidate.metadata,
+            }
+            return candidate.metadataRecovered
+                ? { ...result, brokerOrderMetadataPolicy: 'SET_IF_UNSET' }
+                : result
+        }
 
         const recordResolution = (resolution: SaxoOrderActivityResolution): void => {
             const terminal = toSaxoTerminalStatus(resolution.brokerState)
@@ -2186,22 +2189,18 @@ export class SaxoClient {
                 { event: 'saxo:orders_v2_sync_activity_failed', orderId: order.id, error },
                 'Saxo activity lookup failed; preserving metadata-only recovery result',
             )
-            return {
-                execution: null,
-                brokerOrderMetadata: metadata,
-                ...(classification.kind === 'RECOVERABLE_MARKET'
-                    ? { brokerOrderMetadataPolicy: 'SET_IF_UNSET' as const }
-                    : {}),
-            }
+            return classification.kind === 'RECOVERABLE_MARKET'
+                ? { execution: null, brokerOrderMetadata: metadata, brokerOrderMetadataPolicy: 'SET_IF_UNSET' }
+                : { execution: null, brokerOrderMetadata: metadata }
         }
-        return {
+        const result = {
             execution: resolution.execution,
             ...toSaxoTerminalStatus(resolution.brokerState),
             brokerOrderMetadata: metadata,
-            ...(classification.kind === 'RECOVERABLE_MARKET'
-                ? { brokerOrderMetadataPolicy: 'SET_IF_UNSET' as const }
-                : {}),
         }
+        return classification.kind === 'RECOVERABLE_MARKET'
+            ? { ...result, brokerOrderMetadataPolicy: 'SET_IF_UNSET' }
+            : result
     }
 
     async getClosingExecutionForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {

@@ -14,12 +14,22 @@ export type ExecutionSyncInfo = {
     commission?: number
 }
 
-export type OrderExecutionSyncResult = {
+type ExecutionSyncResultBase = {
     execution: ExecutionSyncInfo | null
-    brokerOrderMetadata?: BrokerOrderMetadata
-    /** 合成 metadata は transaction 内で未設定時だけ保存する。 */
-    brokerOrderMetadataPolicy?: 'SET_IF_UNSET'
-} & ExecutionSyncTerminal
+}
+
+type ExecutionSyncResultMetadata =
+    | {
+        brokerOrderMetadata: BrokerOrderMetadata
+        /** 合成 metadata は transaction 内で未設定時だけ保存する。 */
+        brokerOrderMetadataPolicy: 'SET_IF_UNSET'
+    }
+    | {
+        brokerOrderMetadata?: BrokerOrderMetadata
+        brokerOrderMetadataPolicy?: never
+    }
+
+export type OrderExecutionSyncResult = ExecutionSyncResultBase & ExecutionSyncResultMetadata & ExecutionSyncTerminal
 
 export type ExecutionSyncOptions = {
     now: Date
