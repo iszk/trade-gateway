@@ -17,6 +17,8 @@ export type ExecutionSyncInfo = {
 export type OrderExecutionSyncResult = {
     execution: ExecutionSyncInfo | null
     brokerOrderMetadata?: BrokerOrderMetadata
+    /** 合成 metadata は transaction 内で未設定時だけ保存する。 */
+    brokerOrderMetadataPolicy?: 'SET_IF_UNSET'
 } & ExecutionSyncTerminal
 
 export type ExecutionSyncOptions = {

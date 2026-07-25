@@ -12,7 +12,7 @@ const makeLogger = () => {
             warn: (obj: Record<string, unknown>, msg?: string) => logs.push({ ...obj, message: msg }),
         },
         logs,
-    }
+    } as const
 }
 
 const makePositionFetcherStub = () => ({
@@ -31,6 +31,8 @@ test('executeHourlyTask: Saxo reconciliation の fresh 48時間 window と結果
         id: 'hourly-saxo-order',
         broker: 'saxo',
         ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'MARKET',
         status: 'PENDING',
         provider_order_ids: ['SAXO-hourly-order'],
         requested_size: 1,
@@ -47,7 +49,7 @@ test('executeHourlyTask: Saxo reconciliation の fresh 48時間 window と結果
             },
             exits: [],
         },
-    }
+    } as const
     const updates: Array<{ id: string, updates: Record<string, unknown> }> = []
     let requestedRange: { from: Date, to: Date } | undefined
 
@@ -85,6 +87,8 @@ test('executeHourlyTask: reconciliation が空結果の場合は partial update 
         id: 'hourly-saxo-incomplete',
         broker: 'saxo',
         ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'MARKET',
         status: 'PENDING',
         provider_order_ids: ['SAXO-incomplete'],
         requested_size: 1,
@@ -100,8 +104,8 @@ test('executeHourlyTask: reconciliation が空結果の場合は partial update 
                 resolved: { order_id: 'SAXO-incomplete' },
             },
             exits: [],
-        },
-    }
+        } as const,
+    } as const
 
     await executeHourlyTask(makeBaseCtx({
         getPendingOrdersV2: async () => [order],
@@ -218,6 +222,55 @@ test('executeTenMinutelyTask: broker単位でbulk fetcherを1回呼び、missing
         orderIds: ['bulk-saxo-2'],
         message: 'bulk execution sync returned no result; falling back to single-order sync',
     })
+})
+
+test('executeTenMinutelyTask: bulk reject 時は全注文を single fallback へ渡す', async () => {
+    const order: any = {
+        id: 'bulk-rejected-saxo',
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'BUY',
+        order_type: 'MARKET',
+        status: 'PENDING',
+        provider_order_ids: ['ORD-bulk-rejected'],
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+    }
+    const updatedOrders: any[] = []
+    let singleCalls = 0
+
+    await executeTenMinutelyTask(makeBaseCtx({
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async (id, updates) => { updatedOrders.push({ id, ...updates }) },
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPriceForOrderV2: async () => {
+                    singleCalls += 1
+                    return {
+                        execution: null,
+                        brokerOrderMetadata: {
+                            kind: 'saxo_order_v1',
+                            order_id: 'ORD-bulk-rejected',
+                            entry: {
+                                expected: { side: 'BUY', order_type: 'Market', size: 1 },
+                                resolved: { order_id: 'ORD-bulk-rejected' },
+                            },
+                            exits: [],
+                        },
+                        brokerOrderMetadataPolicy: 'SET_IF_UNSET' as const,
+                    }
+                },
+                getExecutionPricesForOrdersV2: async () => { throw new Error('bulk unavailable') },
+            },
+        },
+    }))
+
+    assert.equal(singleCalls, 1)
+    assert.equal(updatedOrders.length, 1)
+    assert.equal(updatedOrders[0].status, undefined)
+    assert.equal(updatedOrders[0].broker_order_metadata.order_id, 'ORD-bulk-rejected')
 })
 
 test('executeTenMinutelyTask: entry の部分約定を PENDING のまま累積同期し、再取得では no-op にする', async () => {
@@ -490,6 +543,111 @@ test('applyOrderExecutionSyncResult: stale な PENDING 引数を使っても tra
     assert.equal(current.executed_price, 101)
     assert.deepEqual(current.executed_at, new Date('2026-01-01T00:01:00Z'))
     assert.equal(atomicUpdates.length, 1)
+})
+
+test('applyOrderExecutionSyncResult: Saxo legacy metadata-only result は PENDING のまま atomic 保存する', async () => {
+    const current = makeApplyOrder()
+    const updates: any[] = []
+    const metadata: any = {
+        kind: 'saxo_order_v1',
+        order_id: 'ORD-apply-order',
+        entry: {
+            expected: { side: 'BUY', order_type: 'Market', size: 1 },
+            resolved: { order_id: 'ORD-apply-order' },
+        },
+        exits: [],
+    }
+
+    const outcome = await applyOrderExecutionSyncResult(
+        current,
+        { execution: null, brokerOrderMetadata: metadata, brokerOrderMetadataPolicy: 'SET_IF_UNSET' },
+        async (id, mutate) => {
+            const diff = mutate(current)
+            if (diff) {
+                Object.assign(current, diff)
+                updates.push({ id, ...diff })
+            }
+            return diff !== null
+        },
+    )
+
+    assert.equal(outcome.updated, true)
+    assert.equal(current.status, 'PENDING')
+    assert.deepEqual(current.broker_order_metadata, metadata)
+    assert.deepEqual(updates[0], { id: current.id, broker_order_metadata: metadata })
+})
+
+test('applyOrderExecutionSyncResult: 合成 metadata と confirmed fill を同一 atomic update で適用する', async () => {
+    const current = makeApplyOrder()
+    const metadata: any = {
+        kind: 'saxo_order_v1',
+        order_id: 'ORD-apply-order',
+        entry: {
+            expected: { side: 'BUY', order_type: 'Market', size: 1 },
+            resolved: { order_id: 'ORD-apply-order' },
+        },
+        exits: [],
+    }
+
+    const outcome = await applyOrderExecutionSyncResult(
+        current,
+        {
+            execution: { price: 101, size: 1 },
+            brokerOrderMetadata: metadata,
+            brokerOrderMetadataPolicy: 'SET_IF_UNSET',
+        },
+        async (_id, mutate) => {
+            const diff = mutate(current)
+            if (diff) Object.assign(current, diff)
+            return diff !== null
+        },
+    )
+
+    assert.equal(outcome.updated, true)
+    assert.equal(current.status, 'EXECUTED')
+    assert.equal(current.executed_price, 101)
+    assert.deepEqual(current.broker_order_metadata, metadata)
+})
+
+test('applyOrderExecutionSyncResult: 競合 metadata が先行保存済みなら execution/status も no-op にする', async () => {
+    const current = makeApplyOrder({
+        broker_order_metadata: {
+            kind: 'saxo_order_v1',
+            order_id: 'ORD-other',
+            entry: {
+                expected: { side: 'BUY', order_type: 'Market', size: 1 },
+                resolved: { order_id: 'ORD-other' },
+            },
+            exits: [],
+        },
+    })
+    const incomingMetadata: any = {
+        kind: 'saxo_order_v1',
+        order_id: 'ORD-apply-order',
+        entry: {
+            expected: { side: 'BUY', order_type: 'Market', size: 1 },
+            resolved: { order_id: 'ORD-apply-order' },
+        },
+        exits: [],
+    }
+    const warnings: unknown[] = []
+
+    const outcome = await applyOrderExecutionSyncResult(
+        makeApplyOrder(),
+        {
+            execution: { price: 101, size: 1 },
+            brokerOrderMetadata: incomingMetadata,
+            brokerOrderMetadataPolicy: 'SET_IF_UNSET',
+        },
+        async (_id, mutate) => mutate(current) !== null,
+        { warn: (obj) => warnings.push(obj), info: () => {} },
+    )
+
+    assert.equal(outcome.updated, false)
+    assert.equal(outcome.noOpReason, 'METADATA_CONFLICT')
+    assert.equal(current.status, 'PENDING')
+    assert.equal(current.executed_size, 0)
+    assert.equal(warnings.length, 1)
 })
 
 test('applyOrderExecutionSyncResult: 同値snapshotは未設定fieldだけ補完し、既存値を訂正しない', async () => {

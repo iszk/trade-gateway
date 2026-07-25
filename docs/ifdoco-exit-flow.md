@@ -85,6 +85,8 @@ exit 同期では、`cs/v1/audit/orderactivities` を時間範囲または poll 
 片側の related order だけが約定している場合は、その約定だけを exit レコードへ反映する。もう片側が未約定またはキャンセル済みで audit activity がない場合は無視する。Saxo の発注レスポンスで related order id が返らず `resolved.order_id === null` の場合、誤同期を避けるため exit 同期は no-op になる。
 `broker_order_metadata.kind !== 'saxo_order_v1'` の場合も warn ログを出して no-op にし、entry order id だけを使った旧探索へはフォールバックしない。
 
+Saxo metadata の自己修復は、exits が空の単体 `MARKET` entry に限定される。metadata 欠落 IFDOCO や related order の復元、既存 IFDOCO の exit metadata 補完には適用しない。自己修復で保存された metadata は entry の batch / direct / range 同期へ復帰させるが、exit 同期の対象を推測して追加することはない。
+
 ### 5. バリデーション
 
 ```typescript
@@ -167,7 +169,7 @@ bitflyer では IFDOCO の exit 注文（STOP / LIMIT）が部分約定する可
 
 ## 注意事項
 
-- `broker_order_metadata` が正しく設定されていない場合、orders_v2 の約定・exit 同期は安全側で no-op になります。既存の metadata 欠落レコードを同期したい場合は、metadata を backfill するか、対象レコードを手動で破棄・再作成してください
+- Saxo の単体 MARKET で provider order ID などの安全条件を満たす metadata 欠落 entry は、10分同期で最小 metadata を自己修復します。IFDOCO、related order、別 broker、`DRY_RUN`、provider ID 欠落、malformed / 矛盾 metadata は従来どおり安全側で no-op となり、手動 backfill が必要です
 - bitflyer API のレート制限により、大量の IFDOCO 注文を同時に処理する場合は遅延が発生する可能性があります
 - Saxo の related order id が発注レスポンスに含まれない場合、exit 同期は安全側で no-op になります
 - Saxo の部分約定数量は audit activity だけでは確定できないため、正確な fill amount の取得元が確認できたら同期数量の算出を見直す必要があります
