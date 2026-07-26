@@ -282,6 +282,7 @@ test('executeTenMinutelyTask: 復旧中の metadata 競合と終端更新を上�
                 resolved: { order_id: `${index === 0 ? 'OTHER-STOP' : 'OTHER-LIMIT'}-${order.id}` },
             })),
         }
+        const { logger, logs } = makeLogger()
         let atomicCall = 0
         const updateOrderV2Atomically = async (
             _id: string,
@@ -299,6 +300,7 @@ test('executeTenMinutelyTask: 復旧中の metadata 競合と終端更新を上�
         }
 
         await executeTenMinutelyTask(makeBaseCtx({
+            logger,
             getPendingOrdersV2: async () => [order],
             updateOrderV2: async () => {},
             updateOrderV2Atomically: updateOrderV2Atomically as any,
@@ -316,9 +318,17 @@ test('executeTenMinutelyTask: 復旧中の metadata 競合と終端更新を上�
 
         if (concurrentUpdate === 'metadata') {
             assert.deepEqual(order.broker_order_metadata, concurrentMetadata)
+            assert.equal(
+                logs.find((log) => log.event === 'cron:saxo_ifdoco_metadata_recovery_summary')?.skippedConcurrentUpdates,
+                0,
+            )
         } else {
             assert.equal(order.status, 'CANCELED')
             assert.equal(order.broker_order_metadata, undefined)
+            assert.equal(
+                logs.find((log) => log.event === 'cron:saxo_ifdoco_metadata_recovery_summary')?.skippedConcurrentUpdates,
+                1,
+            )
         }
         assert.equal(order.saxo_ifdoco_recovery, undefined)
     }

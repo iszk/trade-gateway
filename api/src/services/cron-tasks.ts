@@ -409,8 +409,11 @@ const recoverSaxoIfdocoMetadata = async (ctx: {
             summary.retries += 1
             incrementReason(summary, reason)
         } else {
-            if (latestReadyOrder) readyOrders.push(latestReadyOrder)
-            summary.skippedConcurrentUpdates += 1
+            if (latestReadyOrder) {
+                readyOrders.push(latestReadyOrder)
+            } else {
+                summary.skippedConcurrentUpdates += 1
+            }
         }
     }
 
