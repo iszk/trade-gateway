@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import type { SaxoIfdocoMetadataRecoveryCandidate } from './saxo-order-metadata.js'
 import {
+    parseSaxoOpenOrderEvidence,
     recoverSaxoIfdocoMetadataFromEvidence,
     type SaxoIfdocoRecoveryEvidence,
     type SaxoOpenOrderEvidence,
@@ -127,6 +128,10 @@ const expectedMetadata = {
         },
     ],
 }
+
+test('IFDOCO recovery: RelatedOpenOrders が空の open evidence を拒否する', () => {
+    assert.equal(parseSaxoOpenOrderEvidence(openOrder({ RelatedOpenOrders: [] })), null)
+})
 
 for (const scenario of [
     { name: 'open', evidence: makeEvidence() },

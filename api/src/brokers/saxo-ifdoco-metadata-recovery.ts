@@ -63,6 +63,7 @@ export const parseSaxoOpenOrderEvidence = (value: unknown): SaxoOpenOrderEvidenc
         !(value.Price === undefined || isFiniteNumber(value.Price)) ||
         !(value.ExternalReference === undefined || isNonEmptyString(value.ExternalReference)) ||
         !Array.isArray(value.RelatedOpenOrders) ||
+        value.RelatedOpenOrders.length === 0 ||
         !value.RelatedOpenOrders.every(isRelatedOpenOrderEvidence)
     ) {
         return null
