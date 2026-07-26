@@ -6,6 +6,8 @@ Cloud Run は Cloud Scheduler により **1分間隔** で起動される。こ�
 
 Cloud Run はステートレスであるため、直前の実行履歴を保持できない。また Cloud Scheduler の起動時刻には数秒のジッター（前後誤差）が生じる可能性がある。これらの課題を解決するために、Firestore を用いて「最後に実行した時間枠（スロット）」を管理し、**重複実行や実行漏れを防止する**。
 
+orders_v2 の Saxo legacy MARKET metadata 自己修復は新しい scheduler や管理 endpoint ではなく、既存の10分 entry sync の責務で行う。1時間の reconciliation は、10分同期で保存された runtime validation 済み metadata を対象に履歴を再照合する。scheduler の cadence、slot 制御、cursor/direct/range の状態管理はこの自己修復によって変更されない。
+
 ---
 
 ## スロット計算ロジック

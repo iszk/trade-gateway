@@ -1785,7 +1785,7 @@ test('SaxoClient.getExecutionPricesForOrdersV2 は direct の cancel を termina
     assert.equal(result.get('evt-ORD-direct-cancel')?.terminalReason, 'saxo_confirmed_cancel')
 })
 
-test('SaxoClient.getExecutionPricesForOrdersV2 は metadata欠落注文だけなら外部APIを呼ばない', async () => {
+test('SaxoClient.getExecutionPricesForOrdersV2 は metadata欠落MARKETを metadata-only result として返す', async () => {
     let requestCount = 0
     const client = new SaxoClient({
         db: mockFirestore(),
@@ -1802,7 +1802,55 @@ test('SaxoClient.getExecutionPricesForOrdersV2 は metadata欠落注文だけな
     }], { now: new Date('2026-07-17T00:00:00Z') })
 
     assert.equal(requestCount, 0)
-    assert.equal(result.size, 0)
+    assert.equal(result.size, 1)
+    assert.deepEqual(result.get('evt-ORD-metadata-missing')?.brokerOrderMetadata, {
+        kind: 'saxo_order_v1',
+        order_id: 'ORD-metadata-missing',
+        entry: {
+            expected: { side: 'BUY', order_type: 'Market', size: 1 },
+            resolved: { order_id: 'ORD-metadata-missing' },
+        },
+        exits: [],
+    })
+    assert.equal(result.get('evt-ORD-metadata-missing')?.brokerOrderMetadataPolicy, 'SET_IF_UNSET')
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は metadata欠落MARKETを batch/direct pipeline へ投入する', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{ accountKey: 'account', clientKey: 'client-key', legalAssetTypes: ['FxSpot'], currency: 'USD', displayName: 'Primary' }],
+        },
+    })
+    const requestedUrls: string[] = []
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            requestedUrls.push(parsedUrl.toString())
+            return parsedUrl.searchParams.has('OrderId')
+                ? Response.json({ Data: [{ LogId: 'legacy-direct', OrderId: 'ORD-legacy-recovery', Status: 'FinalFill', ExecutionPrice: 101, FillAmount: 1, FilledAmount: 1 }] })
+                : Response.json({ Data: [] })
+        },
+    })
+
+    const result = await client.getExecutionPricesForOrdersV2([{
+        ...makePendingSaxoOrder('ORD-legacy-recovery'),
+        broker_order_metadata: undefined,
+    }], { now: new Date('2026-07-17T00:00:00Z') })
+
+    assert.equal(requestedUrls.length, 2)
+    assert.equal(new URL(requestedUrls[1] as string).searchParams.get('OrderId'), 'ORD-legacy-recovery')
+    assert.deepEqual(result.get('evt-ORD-legacy-recovery')?.execution, {
+        price: 101,
+        size: 1,
+        executed_at: undefined,
+    })
+    assert.equal(result.get('evt-ORD-legacy-recovery')?.brokerOrderMetadataPolicy, 'SET_IF_UNSET')
 })
 
 test('SaxoClient.getExecutionPricesForOrdersV2 は direct candidate を10件に制限し次回へ round-robin する', async () => {
@@ -2207,7 +2255,7 @@ test('SaxoClient.getExecutionPriceForOrderV2 logs when audit activities do not m
     assert.ok(infoLogs.some((log) => log.obj.event === 'saxo:execution_audit_no_match'))
 })
 
-test('SaxoClient.getExecutionPriceForOrderV2 no-ops when metadata is missing', async () => {
+test('SaxoClient.getExecutionPriceForOrderV2 は metadata欠落MARKETを single recovery する', async () => {
     const db = mockFirestore()
     const { logger, warnLogs } = createCapturingLogger()
     const requestedUrls: string[] = []
@@ -2239,7 +2287,45 @@ test('SaxoClient.getExecutionPriceForOrderV2 no-ops when metadata is missing', a
 
     assert.equal(result.execution, null)
     assert.equal(requestedUrls.length, 0)
-    assert.ok(warnLogs.some((log) => log.obj.event === 'saxo:orders_v2_metadata_missing'))
+    assert.deepEqual(result.brokerOrderMetadata, {
+        kind: 'saxo_order_v1',
+        order_id: 'ORD-legacy',
+        entry: {
+            expected: { side: 'BUY', order_type: 'Market', size: 1 },
+            resolved: { order_id: 'ORD-legacy' },
+        },
+        exits: [],
+    })
+    assert.equal(result.brokerOrderMetadataPolicy, 'SET_IF_UNSET')
+    assert.equal(warnLogs.some((log) => log.obj.event === 'saxo:orders_v2_sync_unrecoverable'), false)
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は空のprovider idをsummary sampleに記録しない', async () => {
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({ db: mockFirestore(), logger: logger as any, baseUrl: 'https://example.com' })
+    const order = { ...makePendingSaxoOrder('   '), id: 'evt-blank-provider' }
+
+    const result = await client.getExecutionPricesForOrdersV2([order], { now: new Date('2026-07-17T00:00:00Z') })
+
+    assert.deepEqual(result.get(order.id), { execution: null })
+    const summary = infoLogs.find((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    assert.deepEqual(summary?.obj.unrecoverableOrderIds, {
+        PROVIDER_ORDER_ID_MISSING: ['evt-blank-provider'],
+    })
+})
+
+test('SaxoClient.getExecutionPricesForOrdersV2 は非文字列provider idでsummary sample処理をクラッシュさせない', async () => {
+    const { logger, infoLogs } = createCapturingLogger()
+    const client = new SaxoClient({ db: mockFirestore(), logger: logger as any, baseUrl: 'https://example.com' })
+    const order = { ...makePendingSaxoOrder('ORD-malformed-provider'), id: 'evt-malformed-provider', provider_order_ids: [123 as any] }
+
+    const result = await client.getExecutionPricesForOrdersV2([order], { now: new Date('2026-07-17T00:00:00Z') })
+
+    assert.deepEqual(result.get(order.id), { execution: null })
+    const summary = infoLogs.find((log) => log.obj.event === 'saxo:orderactivities_reconciliation_summary')
+    assert.deepEqual(summary?.obj.unrecoverableOrderIds, {
+        PROVIDER_ORDER_ID_MISSING: ['evt-malformed-provider'],
+    })
 })
 
 test('SaxoClient.getClosingExecutionForOrderV2 aggregates resolved exit executions from one audit batch', async () => {

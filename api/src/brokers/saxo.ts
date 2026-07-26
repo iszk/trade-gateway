@@ -9,6 +9,9 @@ import type {
     OrderExecutionSyncResult,
 } from '../types/execution-sync.js'
 import type { OrderV2 } from '../types/order-v2.js'
+import {
+    classifySaxoOrderMetadata,
+} from './saxo-order-metadata.js'
 import type { Position } from '../types/position.js'
 import type { Balance } from '../types/balance.js'
 import type {
@@ -807,23 +810,43 @@ export class SaxoClient {
         options: ExecutionSyncOptions,
     ): Promise<Map<string, OrderExecutionSyncResult>> {
         const results = new Map<string, OrderExecutionSyncResult>()
-        const validOrders = orders.flatMap((order) => {
-            const providerOrderId = order.provider_order_ids[0]
-            const metadata = order.broker_order_metadata
-            if (
-                !providerOrderId ||
-                providerOrderId === 'DRY_RUN' ||
-                metadata?.kind !== 'saxo_order_v1' ||
-                !metadata.entry.resolved.order_id
-            ) {
+        const unrecoverableReasons: Record<string, number> = {}
+        const unrecoverableOrderIds: Record<string, string[]> = {}
+        const addUnrecoverable = (reason: string, orderId: string): void => {
+            unrecoverableReasons[reason] = (unrecoverableReasons[reason] ?? 0) + 1
+            const samples = unrecoverableOrderIds[reason] ?? []
+            if (samples.length < 5) samples.push(orderId)
+            unrecoverableOrderIds[reason] = samples
+        }
+        type SaxoOrderCandidate = {
+            order: OrderV2
+            metadata: SaxoOrderMetadata
+            entryOrderId: string
+            metadataRecovered: boolean
+        }
+        const validOrders = orders.flatMap((order): SaxoOrderCandidate[] => {
+            const classification = classifySaxoOrderMetadata(order)
+            if (classification.kind === 'UNRECOVERABLE') {
+                results.set(order.id, { execution: null })
+                const rawProviderOrderId: unknown = order.provider_order_ids[0]
+                const providerOrderId = typeof rawProviderOrderId === 'string' ? rawProviderOrderId.trim() : ''
+                addUnrecoverable(classification.reason, providerOrderId || order.id)
                 return []
             }
-            const result: OrderExecutionSyncResult = {
-                execution: null,
-                brokerOrderMetadata: metadata,
-            }
-            results.set(order.id, result)
-            return [{ order, metadata, entryOrderId: metadata.entry.resolved.order_id }]
+
+            const metadata = classification.metadata
+            results.set(
+                order.id,
+                classification.kind === 'RECOVERABLE_MARKET'
+                    ? { execution: null, brokerOrderMetadata: metadata, brokerOrderMetadataPolicy: 'SET_IF_UNSET' }
+                    : { execution: null, brokerOrderMetadata: metadata },
+            )
+            return [{
+                order,
+                metadata,
+                entryOrderId: metadata.entry.resolved.order_id,
+                metadataRecovered: classification.kind === 'RECOVERABLE_MARKET',
+            }]
         })
 
         const terminalCounts: Record<string, number> = {}
@@ -846,6 +869,22 @@ export class SaxoClient {
         let noMatch = 0
         let directRequests = 0
         let batchComplete = false
+        const validMetadata = validOrders.filter((candidate) => !candidate.metadataRecovered).length
+        const recoverableMarket = validOrders.filter((candidate) => candidate.metadataRecovered).length
+
+        const toSyncResult = (
+            candidate: SaxoOrderCandidate,
+            resolution: SaxoOrderActivityResolution,
+        ): OrderExecutionSyncResult => {
+            const result = {
+                execution: resolution.execution,
+                ...toSaxoTerminalStatus(resolution.brokerState),
+                brokerOrderMetadata: candidate.metadata,
+            }
+            return candidate.metadataRecovered
+                ? { ...result, brokerOrderMetadataPolicy: 'SET_IF_UNSET' }
+                : result
+        }
 
         const recordResolution = (resolution: SaxoOrderActivityResolution): void => {
             const terminal = toSaxoTerminalStatus(resolution.brokerState)
@@ -872,19 +911,14 @@ export class SaxoClient {
                     activities.push(activity)
                     activitiesByOrderId.set(activity.OrderId, activities)
                 }
-                const directCandidateOrders = validOrders.filter(({ order, entryOrderId }) => {
-                    const matchingActivities = activitiesByOrderId.get(entryOrderId) ?? []
+                const directCandidateOrders = validOrders.filter((candidate) => {
+                    const matchingActivities = activitiesByOrderId.get(candidate.entryOrderId) ?? []
                     if (matchingActivities.length === 0) return true
                     const resolution = resolveSaxoOrderActivities(matchingActivities, 'INCREMENTAL_SNAPSHOT')
-                    const terminal = toSaxoTerminalStatus(resolution.brokerState)
                     if (matchingActivities.some(isSaxoFillActivity) && resolution.execution === null) return true
                     batchMatched += 1
                     recordResolution(resolution)
-                    results.set(order.id, {
-                        execution: resolution.execution,
-                        ...terminal,
-                        brokerOrderMetadata: order.broker_order_metadata,
-                    })
+                    results.set(candidate.order.id, toSyncResult(candidate, resolution))
                     return false
                 })
                 directCandidates = directCandidateOrders.length
@@ -961,15 +995,10 @@ export class SaxoClient {
                             }
                             continue
                         }
-                        const metadata = outcome.candidate.order.broker_order_metadata
                         if (outcome.status === 'complete') {
                             const { resolution } = outcome
                             recordResolution(resolution)
-                            results.set(outcome.candidate.order.id, {
-                                execution: resolution.execution,
-                                ...toSaxoTerminalStatus(resolution.brokerState),
-                                brokerOrderMetadata: metadata,
-                            })
+                            results.set(outcome.candidate.order.id, toSyncResult(outcome.candidate, resolution))
                             const hasMatch = resolution.execution !== null || resolution.brokerState !== 'UNRESOLVED'
                             if (!hasMatch) {
                                 // The direct history completed but did not contain a usable activity.
@@ -1020,7 +1049,12 @@ export class SaxoClient {
             {
                 event: 'saxo:orderactivities_reconciliation_summary',
                 pending: orders.length,
-                validMetadata: validOrders.length,
+                validMetadata,
+                recoverableMarket,
+                generatedMetadata: recoverableMarket,
+                unrecoverable: orders.length - validOrders.length,
+                unrecoverableReasons,
+                unrecoverableOrderIds,
                 batchComplete,
                 batchMatched,
                 directCandidates,
@@ -2132,33 +2166,41 @@ export class SaxoClient {
     }
 
     async getExecutionPriceForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {
-        const providerOrderId = order.provider_order_ids[0]
-        if (!providerOrderId || providerOrderId === 'DRY_RUN') {
-            return { execution: null }
-        }
-
-        const metadata = order.broker_order_metadata
-        if (metadata?.kind !== 'saxo_order_v1') {
+        const classification = classifySaxoOrderMetadata(order)
+        if (classification.kind === 'UNRECOVERABLE') {
             this.logger.warn(
                 {
-                    event: 'saxo:orders_v2_metadata_missing',
+                    event: 'saxo:orders_v2_sync_unrecoverable',
                     orderId: order.id,
-                    ticker: order.ticker,
-                    expectedKind: 'saxo_order_v1',
-                    actualKind: metadata?.kind,
+                    reason: classification.reason,
                 },
-                'orders_v2 execution sync skipped: broker_order_metadata is missing or invalid',
+                'orders_v2 execution sync skipped: Saxo metadata is unrecoverable',
             )
             return { execution: null }
         }
 
-        const entryOrderId = metadata.entry.resolved.order_id || metadata.order_id || providerOrderId
-        const resolution = await this.getExecutionFromRecentActivities(entryOrderId)
-        return {
+        const metadata = classification.metadata
+        const entryOrderId = metadata.entry.resolved.order_id
+        let resolution: SaxoOrderActivityResolution
+        try {
+            resolution = await this.getExecutionFromRecentActivities(entryOrderId)
+        } catch (error) {
+            this.logger.warn(
+                { event: 'saxo:orders_v2_sync_activity_failed', orderId: order.id, error },
+                'Saxo activity lookup failed; preserving metadata-only recovery result',
+            )
+            return classification.kind === 'RECOVERABLE_MARKET'
+                ? { execution: null, brokerOrderMetadata: metadata, brokerOrderMetadataPolicy: 'SET_IF_UNSET' }
+                : { execution: null, brokerOrderMetadata: metadata }
+        }
+        const result = {
             execution: resolution.execution,
             ...toSaxoTerminalStatus(resolution.brokerState),
             brokerOrderMetadata: metadata,
         }
+        return classification.kind === 'RECOVERABLE_MARKET'
+            ? { ...result, brokerOrderMetadataPolicy: 'SET_IF_UNSET' }
+            : result
     }
 
     async getClosingExecutionForOrderV2(order: OrderV2): Promise<OrdersV2ExecutionSyncResult> {

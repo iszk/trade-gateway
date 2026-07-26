@@ -99,7 +99,8 @@ webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証�
 - orders_v2 の約定同期は専用の Firestore transaction で document を再読込して適用する。取得開始時の stale snapshotを直接updateせず、transaction内の最新 `executed_size`、status、execution snapshot、broker metadataを基準に単調mergeする。数量が増えるsnapshotだけが execution fields を更新し、同値では未設定fieldだけを補完し、数量後退や terminal status の downgrade は行わない
 - クローズ済みトレードの read model は別コレクションに保存せず、`orders_v2` から再計算する
 - 一覧・統計・トレード再構成の日時基準は `executed_at` とする。`status=EXECUTED` で `executed_at` が欠落している既存データは集計対象外とし、`created_at` へはフォールバックしない
-- cron による `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。metadata が未設定、または broker が期待する `kind` ではない注文は warn ログを出して同期を no-op とし、旧 order id ベースの探索へフォールバックしない
+- cron による `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。ただし Saxo の `broker=saxo`、`order_type=MARKET`、metadata 欠落、非空かつ `DRY_RUN` ではない先頭 `provider_order_ids`、有効な side / requested_size をすべて満たす単体 MARKET だけは、先頭 provider order ID を entry `OrderId` とする最小 `saxo_order_v1` metadata（`exits: []`、`external_reference` なし）を10分同期で自己修復する。metadata を生成しただけでは status や execution を変更しない。confirmed fill、cancel/expire、placement rejection は Saxo OrderActivities resolver の結果だけを適用する。no-match、deferred、rate limit、API failure でも metadata-only result は transaction で保存する。metadata 欠落 IFDOCO、provider ID 欠落 / `DRY_RUN`、別 broker、別 kind、malformed または order/provider と矛盾する既存 metadata は API を呼ばず no-op とする
+- 合成 metadata の同期結果は `SET_IF_UNSET` guard 付きで transaction 内に適用する。最新 metadata が未設定なら metadata と lifecycle 差分を同時に保存し、同一 metadata が先に保存済みなら lifecycle の単調差分だけを適用する。別 metadata が先行保存済みなら metadata・execution・status をすべて保持する。通常の broker metadata merge は従来どおりとする
 - `execution_costs` と `execution_costs.commission` は optional とする。Firestore 上で `execution_costs` またはその `commission` field が未設定の場合は、legacy order、broker 未対応、約定情報の欠落などで値が unknown であることを表し、`0` とは区別する。注文更新 API の DTO では DB 上の未設定を `execution_costs: { commission: null }` に正規化して公開する（[注文更新 API OpenAPI](./openapi/order-updates.openapi.yaml)、[API 利用仕様](./api-spec.md#order-updates-api)）。
 - commission は broker execution の明示手数料だけを保存する。spread、funding、slippage、売買価格差などの実質コストはこの field に含めず、現行 schema では保存しない。
 - TTL は現時点で使用しない
@@ -233,7 +234,7 @@ Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_au
 1. `webhook_events` のドキュメント ID は `{broker}:{symbol}:{event_id}` とし、同一 broker / symbol / event の重複を拒否する
 2. `order_dispatch_logs.event_id` は webhook の `event_id` と同じ値を保存する
 3. `orders_v2` は webhook dispatch 成功時のみ作成する
-4. `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にし、metadata 欠落時は安全側で no-op にする
+4. `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。限定された Saxo 単体 MARKET の metadata 欠落だけは、上記の runtime validation と transaction guard を通る場合に自己修復し、それ以外の metadata 欠落は安全側で no-op にする
 5. `cron_metadata/task_status` の更新は Firestore transaction で行う
 6. `saxo_auth_data/saxo_auth.refreshingUntil` の更新は Firestore transaction で行う
 

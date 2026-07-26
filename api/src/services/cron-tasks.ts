@@ -11,6 +11,7 @@ import type {
     ExecutionTerminalStatus,
     OrderExecutionSyncResult,
 } from '../types/execution-sync.js'
+import { classifySaxoOrderMetadata } from '../brokers/saxo-order-metadata.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -117,13 +118,32 @@ const mergeBrokerOrderMetadata = (
 
 export type OrderExecutionSyncApplyOutcome = {
     updated: boolean
-    noOpReason?: 'OVERFILL' | 'UNCHANGED' | 'STALE'
+    noOpReason?: 'OVERFILL' | 'UNCHANGED' | 'STALE' | 'METADATA_CONFLICT'
 }
 
 const buildOrderExecutionSyncUpdates = (
     current: OrderV2,
     result: OrderExecutionSyncResult,
+    logger?: Logger,
 ): Partial<OrderV2> | null => {
+    if (result.brokerOrderMetadataPolicy === 'SET_IF_UNSET') {
+        const incomingMetadata = result.brokerOrderMetadata
+        if (incomingMetadata === undefined) return null
+        if (
+            current.broker_order_metadata !== undefined &&
+            !areSameBrokerOrderMetadata(current.broker_order_metadata, incomingMetadata)
+        ) {
+            logger?.warn(
+                {
+                    event: 'cron:orders_v2_metadata_recovery_conflict',
+                    orderId: current.id,
+                },
+                'preserving concurrently written broker metadata and execution state',
+            )
+            return null
+        }
+    }
+
     const info = result.execution
     const updates: Partial<OrderV2> = {}
     const nextStatus = resolveOrderStatus(current.status, info, result.terminalStatus, current.requested_size)
@@ -200,12 +220,28 @@ export const applyOrderExecutionSyncResult = async (
         )
     }
 
-    const expectedUpdates = buildOrderExecutionSyncUpdates(order, result)
-    const updated = await updateOrderV2Atomically(order.id, (current) => buildOrderExecutionSyncUpdates(current, result))
+    let metadataConflict = false
+    let transactionUpdates: Partial<OrderV2> | null = null
+    const updated = await updateOrderV2Atomically(
+        order.id,
+        (current) => {
+            metadataConflict = result.brokerOrderMetadataPolicy === 'SET_IF_UNSET' &&
+                current.broker_order_metadata !== undefined &&
+                result.brokerOrderMetadata !== undefined &&
+                !areSameBrokerOrderMetadata(current.broker_order_metadata, result.brokerOrderMetadata)
+            transactionUpdates = buildOrderExecutionSyncUpdates(current, result, logger)
+            return transactionUpdates
+        },
+    )
 
     return updated
         ? { updated: true }
-        : { updated: false, noOpReason: expectedUpdates ? 'STALE' : 'UNCHANGED' }
+        : {
+            updated: false,
+            noOpReason: metadataConflict
+                ? 'METADATA_CONFLICT'
+                : transactionUpdates ? 'STALE' : 'UNCHANGED',
+        }
 }
 
 const createLegacyAtomicUpdater = (
@@ -259,11 +295,7 @@ export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
 
     const pendingOrders = await ctx.getPendingOrdersV2()
     const saxoOrders = pendingOrders.filter((order) => (
-        order.broker === 'saxo' &&
-        order.provider_order_ids[0] !== undefined &&
-        order.provider_order_ids[0] !== 'DRY_RUN' &&
-        order.broker_order_metadata?.kind === 'saxo_order_v1' &&
-        order.broker_order_metadata.entry.resolved.order_id !== undefined
+        classifySaxoOrderMetadata(order).kind === 'VALID'
     ))
     if (saxoOrders.length === 0) return
 
@@ -329,6 +361,20 @@ const applyPendingOrderSyncResult = async (
         ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2),
         ctx.logger,
     )
+
+    if (syncResult.brokerOrderMetadataPolicy === 'SET_IF_UNSET' && info === null && syncResult.terminalStatus === undefined) {
+        ctx.logger.info(
+            {
+                event: 'cron:orders_v2_metadata_recovered',
+                broker: order.broker,
+                orderId: order.id,
+                metadataOnly: true,
+                updated: applyOutcome.updated,
+                noOpReason: applyOutcome.noOpReason,
+            },
+            'orders_v2 Saxo legacy metadata recovery attempted without confirmed execution',
+        )
+    }
 
     const isCompleted = info !== null && info.size >= order.requested_size - EPSILON
     if (info !== null && (isCompleted || syncResult.terminalStatus !== 'CANCELED')) {
@@ -443,6 +489,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
                     { event: 'cron:orders_v2_bulk_sync_failed', broker, count: orders.length, error },
                     'failed to bulk sync orders_v2',
                 )
+                for (const order of orders) await syncSingleOrder(order, false)
             }
             continue
         }
