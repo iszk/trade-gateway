@@ -833,6 +833,11 @@ export class SaxoClient {
                 addUnrecoverable(classification.reason, providerOrderId || order.id)
                 return []
             }
+            if (classification.kind === 'RECOVERABLE_IFDOCO') {
+                results.set(order.id, { execution: null })
+                addUnrecoverable('IFDOCO_RECOVERY_NOT_INTEGRATED', classification.candidate.entryOrderId)
+                return []
+            }
 
             const metadata = classification.metadata
             results.set(
@@ -2176,6 +2181,9 @@ export class SaxoClient {
                 },
                 'orders_v2 execution sync skipped: Saxo metadata is unrecoverable',
             )
+            return { execution: null }
+        }
+        if (classification.kind === 'RECOVERABLE_IFDOCO') {
             return { execution: null }
         }
 

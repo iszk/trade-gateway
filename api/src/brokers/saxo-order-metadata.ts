@@ -4,6 +4,7 @@ import type { OrderV2 } from '../types/order-v2.js'
 export type SaxoMetadataClassification =
     | { kind: 'VALID', metadata: SaxoOrderMetadata }
     | { kind: 'RECOVERABLE_MARKET', metadata: SaxoOrderMetadata }
+    | { kind: 'RECOVERABLE_IFDOCO', candidate: SaxoIfdocoMetadataRecoveryCandidate }
     | {
         kind: 'UNRECOVERABLE'
         reason:
@@ -11,6 +12,7 @@ export type SaxoMetadataClassification =
             | 'ORDER_TYPE_UNSUPPORTED'
             | 'PROVIDER_ORDER_ID_MISSING'
             | 'DRY_RUN'
+            | 'TICKER_INVALID'
             | 'METADATA_KIND_CONFLICT'
             | 'METADATA_INVALID'
             | 'METADATA_CONFLICT'
@@ -18,8 +20,16 @@ export type SaxoMetadataClassification =
 
 type SaxoOrderMetadataOrder = Pick<
     OrderV2,
-    'broker' | 'order_type' | 'side' | 'requested_size' | 'provider_order_ids' | 'broker_order_metadata'
+    'broker' | 'ticker' | 'order_type' | 'side' | 'requested_size' | 'provider_order_ids' | 'broker_order_metadata'
 >
+
+export type SaxoIfdocoMetadataRecoveryCandidate = {
+    entryOrderId: string
+    side: 'BUY' | 'SELL'
+    size: number
+    assetType: string
+    uic: number
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
     typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -46,6 +56,14 @@ const isOptionalExternalReference = (value: unknown): boolean => (
 )
 
 const areSameNumber = (left: number, right: number): boolean => Math.abs(left - right) < 0.00000001
+
+const parseSaxoTicker = (ticker: string): Pick<SaxoIfdocoMetadataRecoveryCandidate, 'assetType' | 'uic'> | null => {
+    const match = ticker.trim().match(/^([^:\s]+):(\d+)$/)
+    if (!match?.[1] || !match[2]) return null
+    const uic = Number(match[2])
+    if (!Number.isSafeInteger(uic) || uic <= 0) return null
+    return { assetType: match[1], uic }
+}
 
 type SaxoOrderMetadataKind = Pick<SaxoOrderMetadata, 'kind'>
 
@@ -115,7 +133,7 @@ const classifyExistingMetadata = (
             metadata.external_reference !== exit.resolved.external_reference
         )) ||
         (order.order_type === 'MARKET' && metadata.exits.length > 0) ||
-        (order.order_type !== 'MARKET' && metadata.exits.length === 0 && order.order_type !== 'IFDOCO')
+        (order.order_type !== 'MARKET' && metadata.exits.length === 0)
     ) {
         return { kind: 'UNRECOVERABLE', reason: 'METADATA_CONFLICT' }
     }
@@ -145,11 +163,25 @@ export const classifySaxoOrderMetadata = (order: SaxoOrderMetadataOrder): SaxoMe
         return classifyExistingMetadata(order, providerOrderId)
     }
 
-    if (order.order_type !== 'MARKET') {
+    if (order.order_type !== 'MARKET' && order.order_type !== 'IFDOCO') {
         return { kind: 'UNRECOVERABLE', reason: 'ORDER_TYPE_UNSUPPORTED' }
     }
     if (!hasValidOrderFields(order)) {
         return { kind: 'UNRECOVERABLE', reason: 'METADATA_INVALID' }
+    }
+
+    if (order.order_type === 'IFDOCO') {
+        const instrument = parseSaxoTicker(order.ticker)
+        if (!instrument) return { kind: 'UNRECOVERABLE', reason: 'TICKER_INVALID' }
+        return {
+            kind: 'RECOVERABLE_IFDOCO',
+            candidate: {
+                entryOrderId: providerOrderId,
+                side: order.side,
+                size: order.requested_size,
+                ...instrument,
+            },
+        }
     }
 
     return {
