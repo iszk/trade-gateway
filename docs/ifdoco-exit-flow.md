@@ -57,11 +57,11 @@ bitflyer では SL がトリガーされた後、STOP 子注文ではなく MARK
 
 #### 4-2. 約定情報の取得
 
-bitFlyer の `GET /v1/me/getexecutions` は `product_code` 単位で batch 取得し、`child_order_acceptance_id` ごとにメモリ上で突合する。batch cache は BitflyerClient インスタンス内のプロセス内 Map で、TTL は 30 秒。entry / exit ともに同じ batch cache を使うため、同一 `product_code` の複数注文を短時間に同期する場合でも `getexecutions` の呼び出し数は注文数に比例しない。
+bitFlyer の `GET /v1/me/getexecutions` は、24時間以内に作成された注文について `product_code` 単位で直近100件を1ページだけ batch 取得し、`child_order_acceptance_id` ごとにメモリ上で突合する。batch cache は BitflyerClient インスタンス内のプロセス内 Map で、TTL は 30 秒。entry / exit ともに同じ batch cache を使うため、同一 `product_code` の複数注文を短時間に同期する場合でも、直近batch取得の呼び出し数は注文数に比例しない。24時間を超えた stale 注文は全体batchを取得せず、対象 `child_order_acceptance_id` の個別取得へ進む。
 
-解決済みの各 exit の `acceptance_id` に対応する executions を batch から取り出し、全ての exit の約定を **加重平均価格・合計数量** で集計して返す。
+解決済みの各 exit の `acceptance_id` に対応する executions を batch から取り出し、全ての exit の約定を **加重平均価格・合計数量** で集計して返す。batch内の対象約定数量が期待数量と一致した場合だけbatch結果を採用する。対象がbatchにない場合、数量が不足する場合、または超過する場合は、対象 `child_order_acceptance_id` 指定の個別取得へ切り替える。数量不足・未約定を `exec_date` の日時境界で確定することはしない。
 
-batch 取得はページ上限を持つ。ページ上限に達した場合、またはレスポンスの `id` 欠落でページング継続できない場合は batch を不完全として扱う。不完全 batch の場合は、部分約定の過小集計を避けるため、対象 `acceptance_id` が batch 内に見つかっていても既存の `child_order_acceptance_id` 指定取得へフォールバックする。
+個別取得は `count=100` と `before` によるページングを行い、期待数量に達するか100件未満のページに到達するまで取得する。最大5ページ、execution ID欠落、cursor不進行などで完全性を確認できない場合は部分結果を確定せず、次回cronへ持ち越す。
 
 #### 4-3. 未約定の場合
 

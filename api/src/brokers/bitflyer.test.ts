@@ -493,8 +493,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 resolves entry acceptance id fr
                 },
             ],
         },
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     }
 
     let callCount = 0
@@ -567,8 +567,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 returns null when resolved entr
             },
             exits: [],
         },
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     }
 
     const requestedUrls: string[] = []
@@ -589,9 +589,10 @@ test('BitflyerClient.getExecutionPriceForOrderV2 returns null when resolved entr
 
     assert.equal(result.execution, null)
     assert.deepEqual(result.brokerOrderMetadata, order.broker_order_metadata)
-    assert.equal(requestedUrls.length, 1)
+    assert.equal(requestedUrls.length, 2)
     assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('child_order_acceptance_id'), null)
     assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('product_code'), 'BTC_JPY')
+    assert.equal(new URL(requestedUrls[1] ?? '').searchParams.get('child_order_acceptance_id'), 'JRF-child-entry-no-execution')
 })
 
 test('BitflyerClient.getExecutionPriceForOrderV2 reuses product execution batch cache', async () => {
@@ -617,8 +618,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 reuses product execution batch 
             },
             exits: [],
         },
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     })
 
     const requestedUrls: string[] = []
@@ -647,7 +648,268 @@ test('BitflyerClient.getExecutionPriceForOrderV2 reuses product execution batch 
     assert.equal(result2.execution?.price, 9800000)
 })
 
-test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup when batch page limit is reached', async () => {
+test('BitflyerClient.getExecutionPriceForOrderV2 skips batch lookup for stale orders', async () => {
+    const order: OrderV2 = {
+        id: 'v2-entry-stale',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-parent-stale'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-stale',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-child-stale' },
+            },
+            exits: [],
+        },
+        created_at: new Date(Date.now() - 25 * 60 * 60 * 1000),
+        updated_at: new Date(),
+    }
+
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const urlStr = String(url)
+            requestedUrls.push(urlStr)
+            const params = new URL(urlStr).searchParams
+            assert.equal(params.get('child_order_acceptance_id'), 'JRF-child-stale')
+            return new Response(
+                JSON.stringify([
+                    { id: 1, child_order_acceptance_id: 'JRF-child-stale', price: 9700000, size: 0.01, exec_date: '2026-01-01T00:05:00.000Z' },
+                ]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(order)
+
+    assert.deepEqual(result.execution, { price: 9700000, size: 0.01, executed_at: new Date('2026-01-01T00:05:00.000Z') })
+    assert.equal(requestedUrls.length, 1)
+})
+
+test('BitflyerClient.getExecutionPriceForOrderV2 pages direct lookup beyond 100 executions', async () => {
+    const order: OrderV2 = {
+        id: 'v2-entry-direct-pagination',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-parent-direct-pagination'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-direct-pagination',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-child-direct-pagination' },
+            },
+            exits: [],
+        },
+        created_at: new Date(),
+        updated_at: new Date(),
+    }
+
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const urlStr = String(url)
+            requestedUrls.push(urlStr)
+            const params = new URL(urlStr).searchParams
+            const childAcceptanceId = params.get('child_order_acceptance_id')
+
+            if (childAcceptanceId === null) {
+                return new Response(
+                    JSON.stringify([
+                        { id: 200, child_order_acceptance_id: 'JRF-other-direct-pagination', price: 9600000, size: 0.01, exec_date: '2026-01-01T00:00:00.000Z' },
+                    ]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            if (params.get('before') === null) {
+                return new Response(
+                    JSON.stringify(Array.from({ length: 100 }, (_, index) => ({
+                        id: 100 - index,
+                        child_order_acceptance_id: 'JRF-child-direct-pagination',
+                        price: 9700000,
+                        size: index === 0 ? 0.004 : 0,
+                        exec_date: '2026-01-01T00:05:00.000Z',
+                    }))),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            assert.equal(params.get('before'), '1')
+            return new Response(
+                JSON.stringify([
+                    { id: 0, child_order_acceptance_id: 'JRF-child-direct-pagination', price: 9800000, size: 0.006, exec_date: '2026-01-01T00:06:00.000Z' },
+                ]),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(order)
+
+    assert.equal(result.execution?.size, 0.01)
+    assert.equal(requestedUrls.length, 3)
+    assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('child_order_acceptance_id'), null)
+    assert.equal(new URL(requestedUrls[1] ?? '').searchParams.get('child_order_acceptance_id'), 'JRF-child-direct-pagination')
+    assert.equal(new URL(requestedUrls[2] ?? '').searchParams.get('before'), '1')
+})
+
+test('BitflyerClient.getExecutionPriceForOrderV2 does not return partial data when direct pagination is incomplete', async () => {
+    const order: OrderV2 = {
+        id: 'v2-entry-direct-incomplete',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-parent-direct-incomplete'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-direct-incomplete',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-child-direct-incomplete' },
+            },
+            exits: [],
+        },
+        created_at: new Date(),
+        updated_at: new Date(),
+    }
+
+    const { logger, warnLogs } = createCapturingLogger()
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        logger: logger as any,
+        fetchImpl: async (url) => {
+            const urlStr = String(url)
+            requestedUrls.push(urlStr)
+            const params = new URL(urlStr).searchParams
+            if (params.get('child_order_acceptance_id') === null) {
+                return new Response(
+                    JSON.stringify([{ id: 1000, child_order_acceptance_id: 'JRF-other-direct-incomplete', price: 9600000, size: 0.01 }]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            return new Response(
+                JSON.stringify(Array.from({ length: 100 }, (_, index) => ({
+                    child_order_acceptance_id: 'JRF-child-direct-incomplete',
+                    price: 9700000,
+                    size: index === 0 ? 0.004 : 0,
+                }))),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(order)
+
+    assert.equal(result.execution, null)
+    assert.equal(requestedUrls.length, 2)
+    assert.equal(warnLogs[0]?.obj.event, 'bitflyer:executions_direct_lookup_incomplete')
+    assert.equal(warnLogs[0]?.obj.reason, 'missing_execution_ids')
+})
+
+test('BitflyerClient.getExecutionPriceForOrderV2 does not return partial data when direct pagination cursor does not advance', async () => {
+    const order: OrderV2 = {
+        id: 'v2-entry-direct-cursor-stuck',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-parent-direct-cursor-stuck'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-direct-cursor-stuck',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-child-direct-cursor-stuck' },
+            },
+            exits: [],
+        },
+        created_at: new Date(),
+        updated_at: new Date(),
+    }
+
+    const { logger, warnLogs } = createCapturingLogger()
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        logger: logger as any,
+        fetchImpl: async (url) => {
+            const urlStr = String(url)
+            requestedUrls.push(urlStr)
+            const params = new URL(urlStr).searchParams
+            if (params.get('child_order_acceptance_id') === null) {
+                return new Response(
+                    JSON.stringify([{ id: 1000, child_order_acceptance_id: 'JRF-other-direct-cursor-stuck', price: 9600000, size: 0.01 }]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            return new Response(
+                JSON.stringify(Array.from({ length: 100 }, (_, index) => ({
+                    id: 100 - index,
+                    child_order_acceptance_id: 'JRF-child-direct-cursor-stuck',
+                    price: 9700000,
+                    size: index === 0 ? 0.004 : 0,
+                }))),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(order)
+
+    assert.equal(result.execution, null)
+    assert.equal(requestedUrls.length, 3)
+    assert.equal(new URL(requestedUrls[2] ?? '').searchParams.get('before'), '1')
+    assert.equal(warnLogs[0]?.obj.event, 'bitflyer:executions_direct_lookup_incomplete')
+    assert.equal(warnLogs[0]?.obj.reason, 'cursor_not_advanced')
+})
+
+test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup when one-page batch is insufficient', async () => {
     const order: OrderV2 = {
         id: 'v2-entry-page-limit',
         strategy: 'MA',
@@ -670,8 +932,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
             },
             exits: [],
         },
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     }
 
     const requestedUrls: string[] = []
@@ -693,11 +955,10 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
                 )
             }
 
-            const before = Number(params.get('before') ?? 601)
             return new Response(
                 JSON.stringify(Array.from({ length: 100 }, (_, index) => ({
-                    id: before - index - 1,
-                    child_order_acceptance_id: `JRF-child-other-${before}-${index}`,
+                    id: 600 - index,
+                    child_order_acceptance_id: `JRF-child-other-${index}`,
                     price: 9600000,
                     size: 0.001,
                     exec_date: '2026-01-01T00:00:00.000Z',
@@ -710,12 +971,12 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
     const result = await client.getExecutionPriceForOrderV2(order)
 
     assert.deepEqual(result.execution, { price: 9700000, size: 0.01, executed_at: new Date('2026-01-01T00:05:00.000Z') })
-    assert.equal(requestedUrls.length, 6)
-    assert.ok(requestedUrls.slice(0, 5).every((url) => new URL(url).searchParams.get('child_order_acceptance_id') === null))
-    assert.equal(new URL(requestedUrls[5] ?? '').searchParams.get('child_order_acceptance_id'), 'JRF-child-page-limit-target')
+    assert.equal(requestedUrls.length, 2)
+    assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('child_order_acceptance_id'), null)
+    assert.equal(new URL(requestedUrls[1] ?? '').searchParams.get('child_order_acceptance_id'), 'JRF-child-page-limit-target')
 })
 
-test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup when batch execution ids are missing', async () => {
+test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup when batch target quantity is incomplete', async () => {
     const order: OrderV2 = {
         id: 'v2-entry-missing-execution-ids',
         strategy: 'MA',
@@ -738,17 +999,15 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
             },
             exits: [],
         },
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     }
 
-    const { logger, warnLogs } = createCapturingLogger()
     const requestedUrls: string[] = []
     const client = new BitflyerClient({
         apiKey: 'test-key',
         apiSecret: 'test-secret',
         baseUrl: 'https://example.com',
-        logger: logger as any,
         fetchImpl: async (url) => {
             const urlStr = String(url)
             requestedUrls.push(urlStr)
@@ -765,6 +1024,7 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
 
             return new Response(
                 JSON.stringify(Array.from({ length: 100 }, (_, index) => ({
+                    id: 500 - index,
                     child_order_acceptance_id: index === 0 ? 'JRF-child-missing-execution-ids-target' : `JRF-child-other-missing-id-${index}`,
                     price: 9600000,
                     size: index === 0 ? 0.004 : 0.001,
@@ -781,10 +1041,6 @@ test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup whe
     assert.equal(requestedUrls.length, 2)
     assert.equal(new URL(requestedUrls[0] ?? '').searchParams.get('child_order_acceptance_id'), null)
     assert.equal(new URL(requestedUrls[1] ?? '').searchParams.get('child_order_acceptance_id'), 'JRF-child-missing-execution-ids-target')
-    assert.equal(warnLogs[0]?.obj.event, 'bitflyer:executions_batch_pagination_incomplete')
-    assert.equal(warnLogs[1]?.obj.event, 'bitflyer:executions_batch_direct_lookup_after_incomplete_batch')
-    assert.equal(warnLogs[1]?.obj.reason, 'missing_execution_ids')
-    assert.equal(warnLogs[1]?.obj.batchMatchCount, 1)
 })
 
 test('BitflyerClient.getExecutionPriceForOrderV2 resolves metadata-less MARKET order from provider order id', async () => {
@@ -817,8 +1073,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 resolves metadata-less MARKET o
         executed_price: null,
         status: 'PENDING',
         provider_order_ids: ['JRF-child-legacy'],
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     })
 
     assert.deepEqual(result.execution, { price: 9700000, size: 0.01, executed_at: new Date('2026-01-01T00:05:00.000Z') })
@@ -862,8 +1118,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 rounds split execution size tot
         executed_price: null,
         status: 'PENDING',
         provider_order_ids: ['JRF-child-split-entry'],
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     })
 
     assert.deepEqual(result.execution, { price: expectedPrice, size: 1, executed_at: new Date('2026-01-01T00:05:00.000Z') })
@@ -898,8 +1154,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 preserves known zero commission
         executed_price: null,
         status: 'PENDING',
         provider_order_ids: ['JRF-child-commission-zero'],
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     })
 
     assert.equal(result.execution?.commission, 0)
@@ -943,8 +1199,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 sums signed commission across f
         executed_price: null,
         status: 'PENDING',
         provider_order_ids: ['JRF-child-commission-sum'],
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     })
 
     assert.equal(result.execution?.commission, -0.0001)
@@ -987,8 +1243,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 leaves commission unknown when 
         executed_price: null,
         status: 'PENDING',
         provider_order_ids: ['JRF-child-commission-unknown'],
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     })
 
     assert.ok(result.execution)
@@ -1021,8 +1277,8 @@ test('BitflyerClient.getExecutionPriceForOrderV2 no-ops when IFDOCO metadata is 
         executed_price: null,
         status: 'PENDING',
         provider_order_ids: ['JRF-parent-missing-metadata'],
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     })
 
     assert.equal(result.execution, null)
@@ -1063,8 +1319,8 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves close acceptance ids
                 },
             ],
         },
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     }
 
     let callCount = 0
@@ -1096,7 +1352,14 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves close acceptance ids
             }
 
             assert.ok(urlStr.includes('getexecutions'))
-            assert.equal(new URL(urlStr).searchParams.get('child_order_acceptance_id'), null)
+            const childAcceptanceId = new URL(urlStr).searchParams.get('child_order_acceptance_id')
+            if (childAcceptanceId !== null) {
+                assert.equal(childAcceptanceId, 'JRF-child-limit-meta')
+                return new Response(
+                    JSON.stringify([]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
             return new Response(
                 JSON.stringify([
                     { id: 202, child_order_acceptance_id: 'JRF-child-stop-meta', price: 9500000, size: 0.01, exec_date: '2026-01-01T01:10:00.000Z' },
@@ -1146,8 +1409,8 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves stop loss MARKET chi
                 },
             ],
         },
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     }
 
     let callCount = 0
@@ -1179,7 +1442,14 @@ test('BitflyerClient.getClosingExecutionForOrderV2 resolves stop loss MARKET chi
             }
 
             assert.ok(urlStr.includes('getexecutions'))
-            assert.equal(new URL(urlStr).searchParams.get('child_order_acceptance_id'), null)
+            const childAcceptanceId = new URL(urlStr).searchParams.get('child_order_acceptance_id')
+            if (childAcceptanceId !== null) {
+                assert.equal(childAcceptanceId, 'JRF-child-limit-sl-market')
+                return new Response(
+                    JSON.stringify([]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
             return new Response(
                 JSON.stringify([
                     { id: 302, child_order_acceptance_id: 'JRF-child-stop-sl-market', price: 9500000, size: 0.01, exec_date: '2026-01-01T01:10:00.000Z' },
@@ -1229,8 +1499,8 @@ test('BitflyerClient.getClosingExecutionForOrderV2 returns partial close and no-
                 },
             ],
         },
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     }
 
     const requestedUrls: string[] = []
@@ -1242,7 +1512,19 @@ test('BitflyerClient.getClosingExecutionForOrderV2 returns partial close and no-
             const urlStr = String(url)
             requestedUrls.push(urlStr)
             assert.ok(urlStr.includes('getexecutions'))
-            assert.equal(new URL(urlStr).searchParams.get('child_order_acceptance_id'), null)
+            const childAcceptanceId = new URL(urlStr).searchParams.get('child_order_acceptance_id')
+            if (childAcceptanceId !== null) {
+                if (childAcceptanceId === 'JRF-child-stop-partial-noop') {
+                    return new Response(
+                        JSON.stringify([
+                            { id: 401, child_order_acceptance_id: 'JRF-child-stop-partial-noop', price: 9500000, size: 0.004, exec_date: '2026-01-01T01:00:00.000Z' },
+                        ]),
+                        { status: 200, headers: { 'content-type': 'application/json' } },
+                    )
+                }
+                assert.equal(childAcceptanceId, 'JRF-child-limit-partial-noop')
+                return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
+            }
             return new Response(
                 JSON.stringify([
                     { id: 401, child_order_acceptance_id: 'JRF-child-stop-partial-noop', price: 9500000, size: 0.004, exec_date: '2026-01-01T01:00:00.000Z' },
@@ -1256,7 +1538,7 @@ test('BitflyerClient.getClosingExecutionForOrderV2 returns partial close and no-
 
     assert.deepEqual(result.execution, { price: 9500000, size: 0.004, executed_at: new Date('2026-01-01T01:00:00.000Z') })
     assert.deepEqual(result.brokerOrderMetadata, order.broker_order_metadata)
-    assert.equal(requestedUrls.length, 1)
+    assert.equal(requestedUrls.length, 3)
 })
 
 test('BitflyerClient.getClosingExecutionForOrderV2 rounds split execution size totals', async () => {
@@ -1299,8 +1581,8 @@ test('BitflyerClient.getClosingExecutionForOrderV2 rounds split execution size t
                 },
             ],
         },
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     }
 
     const client = new BitflyerClient({
@@ -1351,8 +1633,8 @@ test('BitflyerClient.getClosingExecutionForOrderV2 no-ops when metadata is missi
         status: 'EXECUTED',
         executed_at: new Date('2026-01-01T00:10:00Z'),
         provider_order_ids: ['JRF-parent-legacy'],
-        created_at: new Date('2026-01-01T00:00:00Z'),
-        updated_at: new Date('2026-01-01T00:00:00Z'),
+        created_at: new Date(),
+        updated_at: new Date(),
     })
 
     assert.equal(result.execution, null)
