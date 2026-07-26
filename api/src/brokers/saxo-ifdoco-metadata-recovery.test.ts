@@ -160,6 +160,20 @@ test('IFDOCO recovery: child history 欠落は retryable な履歴不足にす�
     assert.equal('metadata' in result, false)
 })
 
+test('IFDOCO recovery: entry の RelatedOrders 欠落は retryable な履歴不足にする', () => {
+    const evidence = makeEvidence()
+    evidence.entryActivities = evidence.entryActivities.map((item) => ({
+        ...item,
+        RelatedOrders: undefined,
+    }))
+
+    assert.deepEqual(recoverSaxoIfdocoMetadataFromEvidence(candidate, evidence), {
+        kind: 'INSUFFICIENT_HISTORY',
+        retryable: true,
+        reason: 'RELATED_ORDER_IDS_MISSING',
+    })
+})
+
 test('IFDOCO recovery: related order が1件または3件なら要人手確認にする', () => {
     for (const relatedOrders of [
         ['STOP'],

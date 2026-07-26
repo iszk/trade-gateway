@@ -12,6 +12,13 @@ import type { OrderV2 } from '../types/order-v2.js'
 import {
     classifySaxoOrderMetadata,
 } from './saxo-order-metadata.js'
+import {
+    parseSaxoOpenOrderEvidence,
+    recoverSaxoIfdocoMetadataFromEvidence,
+    type SaxoIfdocoMetadataRecoveryResult,
+    type SaxoIfdocoTemporaryFailureReason,
+    type SaxoOpenOrderEvidence,
+} from './saxo-ifdoco-metadata-recovery.js'
 import type { Position } from '../types/position.js'
 import type { Balance } from '../types/balance.js'
 import type {
@@ -366,6 +373,12 @@ const saxoAuditRequestLimiter = new AsyncConcurrencyLimiter(SAXO_RECONCILIATION_
 class SaxoDirectLookupError extends Error {
     constructor(readonly reason: 'budget' | 'rate_limited' | 'failed') {
         super(`Saxo direct audit lookup ${reason}`)
+    }
+}
+
+class SaxoIfdocoRecoveryRequestError extends Error {
+    constructor(readonly reason: SaxoIfdocoTemporaryFailureReason) {
+        super(`Saxo IFDOCO recovery request ${reason}`)
     }
 }
 
@@ -803,6 +816,249 @@ export class SaxoClient {
             status: 'complete',
             resolution: resolveSaxoOrderActivities(matchingActivities, 'COMPLETE_HISTORY'),
         }
+    }
+
+    private async fetchIfdocoRecoveryResponse(
+        url: string,
+        accessToken: string,
+        requestBudget: { used: number },
+    ): Promise<Response> {
+        let retryCount = 0
+        while (true) {
+            if (this.isRateLimited()) {
+                throw new SaxoIfdocoRecoveryRequestError('RATE_LIMITED')
+            }
+            if (requestBudget.used >= SAXO_RECONCILIATION_MAX_DIRECT_REQUESTS) {
+                throw new SaxoIfdocoRecoveryRequestError('REQUEST_BUDGET_EXHAUSTED')
+            }
+
+            requestBudget.used += 1
+            let response: Response
+            try {
+                response = await saxoAuditRequestLimiter.run(() => this.fetchImpl(url, {
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                }))
+            } catch {
+                if (retryCount < SAXO_RECONCILIATION_MAX_RETRIES) {
+                    retryCount += 1
+                    const backoffMs = SAXO_RECONCILIATION_RETRY_BASE_MS * (2 ** (retryCount - 1))
+                    const jitterMs = Math.floor(Math.random() * SAXO_RECONCILIATION_RETRY_JITTER_MS)
+                    await this.sleepImpl(backoffMs + jitterMs)
+                    continue
+                }
+                throw new SaxoIfdocoRecoveryRequestError('NETWORK_ERROR')
+            }
+
+            if (response.status === 429) {
+                this.markRateLimited(response)
+                await cancelResponseBody(response)
+                throw new SaxoIfdocoRecoveryRequestError('RATE_LIMITED')
+            }
+            if (response.status === 401 || response.status === 403) {
+                await cancelResponseBody(response)
+                throw new SaxoIfdocoRecoveryRequestError('AUTH_UNAVAILABLE')
+            }
+            if (
+                response.status >= 500 &&
+                response.status <= 599 &&
+                retryCount < SAXO_RECONCILIATION_MAX_RETRIES
+            ) {
+                retryCount += 1
+                await cancelResponseBody(response)
+                const backoffMs = SAXO_RECONCILIATION_RETRY_BASE_MS * (2 ** (retryCount - 1))
+                const jitterMs = Math.floor(Math.random() * SAXO_RECONCILIATION_RETRY_JITTER_MS)
+                await this.sleepImpl(backoffMs + jitterMs)
+                continue
+            }
+            return response
+        }
+    }
+
+    private async fetchIfdocoRecoveryActivities(
+        orderId: string,
+        accessToken: string,
+        clientKey: string,
+        requestBudget: { used: number },
+    ): Promise<
+        | { kind: 'COMPLETE', activities: SaxoOrderActivity[] }
+        | { kind: 'FAILED', reason: SaxoIfdocoTemporaryFailureReason }
+    > {
+        let requestFailure: SaxoIfdocoTemporaryFailureReason | undefined
+        const result = await fetchSaxoOrderActivitiesPages({
+            initialUrl: this.buildOrderActivitiesDirectUrl(clientKey, orderId),
+            maxPages: SAXO_RECONCILIATION_MAX_DIRECT_PAGES_PER_ORDER,
+            resolveNextUrl: (url) => this.buildSaxoApiUrl(url),
+            fetchPage: async (url) => {
+                try {
+                    return await this.fetchIfdocoRecoveryResponse(url, accessToken, requestBudget)
+                } catch (error) {
+                    requestFailure = error instanceof SaxoIfdocoRecoveryRequestError
+                        ? error.reason
+                        : 'HTTP_ERROR'
+                    throw error
+                }
+            },
+            onHttpError: async (response) => {
+                requestFailure = 'HTTP_ERROR'
+                await cancelResponseBody(response)
+            },
+        })
+
+        if (!result.complete) {
+            return {
+                kind: 'FAILED',
+                reason: requestFailure ??
+                    (result.reason === 'PARSE_ERROR'
+                        ? 'PARSE_ERROR'
+                        : result.reason === 'PAGE_LIMIT' ? 'PAGE_LIMIT' : 'HTTP_ERROR'),
+            }
+        }
+        return {
+            kind: 'COMPLETE',
+            activities: result.activities.filter((activity) => activity.OrderId === orderId),
+        }
+    }
+
+    private async fetchIfdocoOpenOrder(
+        orderId: string,
+        accessToken: string,
+        clientKey: string,
+        requestBudget: { used: number },
+    ): Promise<
+        | { kind: 'COMPLETE', openOrder: SaxoOpenOrderEvidence | null }
+        | { kind: 'FAILED', reason: SaxoIfdocoTemporaryFailureReason }
+    > {
+        const url = `${this.baseUrl}/port/v1/orders/${encodeURIComponent(clientKey)}/${encodeURIComponent(orderId)}`
+        let response: Response
+        try {
+            response = await this.fetchIfdocoRecoveryResponse(url, accessToken, requestBudget)
+        } catch (error) {
+            return {
+                kind: 'FAILED',
+                reason: error instanceof SaxoIfdocoRecoveryRequestError ? error.reason : 'HTTP_ERROR',
+            }
+        }
+
+        if (response.status === 404) {
+            await cancelResponseBody(response)
+            return { kind: 'COMPLETE', openOrder: null }
+        }
+        if (!response.ok) {
+            await cancelResponseBody(response)
+            return { kind: 'FAILED', reason: 'HTTP_ERROR' }
+        }
+
+        let rawOpenOrder: unknown
+        try {
+            rawOpenOrder = await response.json()
+        } catch {
+            return { kind: 'FAILED', reason: 'PARSE_ERROR' }
+        }
+        const openOrder = parseSaxoOpenOrderEvidence(rawOpenOrder)
+        return openOrder
+            ? { kind: 'COMPLETE', openOrder }
+            : { kind: 'FAILED', reason: 'PARSE_ERROR' }
+    }
+
+    async recoverIfdocoOrderMetadata(order: OrderV2): Promise<SaxoIfdocoMetadataRecoveryResult> {
+        const classification = classifySaxoOrderMetadata(order)
+        if (classification.kind !== 'RECOVERABLE_IFDOCO') {
+            return {
+                kind: 'MANUAL_REVIEW',
+                retryable: false,
+                reason: 'UNSUPPORTED_ORDER_SHAPE',
+            }
+        }
+        if (this.isRateLimited()) {
+            return { kind: 'TEMPORARY_FAILURE', retryable: true, reason: 'RATE_LIMITED' }
+        }
+
+        const accessToken = await this.getValidAccessToken()
+        if (!accessToken) {
+            return { kind: 'TEMPORARY_FAILURE', retryable: true, reason: 'AUTH_UNAVAILABLE' }
+        }
+        const auth = await this.getAuth()
+        const clientKey = auth?.accounts?.[0]?.clientKey
+        if (!clientKey) {
+            return { kind: 'TEMPORARY_FAILURE', retryable: true, reason: 'AUTH_UNAVAILABLE' }
+        }
+
+        const requestBudget = { used: 0 }
+        const entryHistory = await this.fetchIfdocoRecoveryActivities(
+            classification.candidate.entryOrderId,
+            accessToken,
+            clientKey,
+            requestBudget,
+        )
+        if (entryHistory.kind === 'FAILED') {
+            return { kind: 'TEMPORARY_FAILURE', retryable: true, reason: entryHistory.reason }
+        }
+
+        const relatedOrderSets = new Map<string, string[]>()
+        for (const activity of entryHistory.activities) {
+            if (activity.RelatedOrders && activity.RelatedOrders.length > 0) {
+                const normalized = activity.RelatedOrders.map((orderId) => orderId.trim()).sort()
+                relatedOrderSets.set(normalized.join('\u0000'), normalized)
+            }
+        }
+        const relatedOrderIds = relatedOrderSets.size === 1
+            ? [...relatedOrderSets.values()][0] ?? []
+            : []
+        if (
+            relatedOrderSets.size !== 1 ||
+            relatedOrderIds.length !== 2 ||
+            new Set(relatedOrderIds).size !== 2
+        ) {
+            return recoverSaxoIfdocoMetadataFromEvidence(classification.candidate, {
+                entryActivities: entryHistory.activities,
+                exitActivities: {},
+                openOrders: [],
+            })
+        }
+
+        const exitHistoryResults = await Promise.all(relatedOrderIds.map(async (orderId) => ({
+            orderId,
+            result: await this.fetchIfdocoRecoveryActivities(orderId, accessToken, clientKey, requestBudget),
+        })))
+        const failedExitHistory = exitHistoryResults.find(({ result }) => result.kind === 'FAILED')
+        if (failedExitHistory?.result.kind === 'FAILED') {
+            return { kind: 'TEMPORARY_FAILURE', retryable: true, reason: failedExitHistory.result.reason }
+        }
+
+        const exitActivities = Object.fromEntries(exitHistoryResults.map(({ orderId, result }) => [
+            orderId,
+            result.kind === 'COMPLETE' ? result.activities : undefined,
+        ]))
+        const allActivities = [
+            { orderId: classification.candidate.entryOrderId, activities: entryHistory.activities },
+            ...exitHistoryResults.map(({ orderId, result }) => ({
+                orderId,
+                activities: result.kind === 'COMPLETE' ? result.activities : [],
+            })),
+        ]
+        const possiblyOpenOrderIds = allActivities
+            .filter(({ activities }) => {
+                const state = resolveSaxoOrderActivities(activities, 'COMPLETE_HISTORY').brokerState
+                return state === 'NON_TERMINAL' || state === 'PARTIALLY_FILLED' || state === 'UNRESOLVED'
+            })
+            .map(({ orderId }) => orderId)
+
+        const openOrderResults = await Promise.all(possiblyOpenOrderIds.map(async (orderId) => ({
+            orderId,
+            result: await this.fetchIfdocoOpenOrder(orderId, accessToken, clientKey, requestBudget),
+        })))
+        const failedOpenOrder = openOrderResults.find(({ result }) => result.kind === 'FAILED')
+        if (failedOpenOrder?.result.kind === 'FAILED') {
+            return { kind: 'TEMPORARY_FAILURE', retryable: true, reason: failedOpenOrder.result.reason }
+        }
+
+        return recoverSaxoIfdocoMetadataFromEvidence(classification.candidate, {
+            entryActivities: entryHistory.activities,
+            exitActivities,
+            openOrders: openOrderResults.flatMap(({ result }) => (
+                result.kind === 'COMPLETE' && result.openOrder ? [result.openOrder] : []
+            )),
+        })
     }
 
     async getExecutionPricesForOrdersV2(

@@ -29,6 +29,47 @@ export type SaxoIfdocoRecoveryEvidence = {
     openOrders: SaxoOpenOrderEvidence[]
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+)
+
+const isNonEmptyString = (value: unknown): value is string => (
+    typeof value === 'string' && value.trim().length > 0
+)
+
+const isFiniteNumber = (value: unknown): value is number => (
+    typeof value === 'number' && Number.isFinite(value)
+)
+
+const isRelatedOpenOrderEvidence = (value: unknown): value is SaxoRelatedOpenOrderEvidence => (
+    isRecord(value) &&
+    isNonEmptyString(value.OrderId) &&
+    isFiniteNumber(value.Amount) &&
+    value.Amount > 0 &&
+    isNonEmptyString(value.OpenOrderType) &&
+    isFiniteNumber(value.OrderPrice)
+)
+
+export const parseSaxoOpenOrderEvidence = (value: unknown): SaxoOpenOrderEvidence | null => {
+    if (!isRecord(value)) return null
+    if (
+        !isNonEmptyString(value.OrderId) ||
+        !isNonEmptyString(value.BuySell) ||
+        !isFiniteNumber(value.Amount) ||
+        value.Amount <= 0 ||
+        !isNonEmptyString(value.AssetType) ||
+        !isFiniteNumber(value.Uic) ||
+        !isNonEmptyString(value.OpenOrderType) ||
+        !(value.Price === undefined || isFiniteNumber(value.Price)) ||
+        !(value.ExternalReference === undefined || isNonEmptyString(value.ExternalReference)) ||
+        !Array.isArray(value.RelatedOpenOrders) ||
+        !value.RelatedOpenOrders.every(isRelatedOpenOrderEvidence)
+    ) {
+        return null
+    }
+    return value as SaxoOpenOrderEvidence
+}
+
 export type SaxoIfdocoTemporaryFailureReason =
     | 'RATE_LIMITED'
     | 'AUTH_UNAVAILABLE'
@@ -275,7 +316,14 @@ export const recoverSaxoIfdocoMetadataFromEvidence = (
         return { kind: 'INSUFFICIENT_HISTORY', retryable: true, reason: 'ENTRY_HISTORY_MISSING' }
     }
     if (entryResult.kind === 'FIELDS_MISSING') {
-        return { kind: 'INSUFFICIENT_HISTORY', retryable: true, reason: 'ORDER_FIELDS_MISSING' }
+        const hasRelatedOrderIds = rawEvidence.entryActivities.some(
+            ({ RelatedOrders }) => RelatedOrders !== undefined && RelatedOrders.length > 0,
+        )
+        return {
+            kind: 'INSUFFICIENT_HISTORY',
+            retryable: true,
+            reason: hasRelatedOrderIds ? 'ORDER_FIELDS_MISSING' : 'RELATED_ORDER_IDS_MISSING',
+        }
     }
     if (entryResult.kind === 'RELATED_CONFLICT') {
         return { kind: 'CONFLICT', retryable: false, reason: 'RELATED_ORDER_SET_MISMATCH' }
