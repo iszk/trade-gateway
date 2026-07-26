@@ -1432,7 +1432,16 @@ test('SaxoClient.getExecutionPriceForOrderV2 uses batched audit activities and f
                 expected: { side: 'BUY', order_type: 'Market', size: 1000 },
                 resolved: { order_id: 'ORD-entry-3' },
             },
-            exits: [],
+            exits: [{
+                expected: {
+                    role: 'TAKE_PROFIT',
+                    side: 'SELL',
+                    order_type: 'Limit',
+                    size: 1000,
+                    price: 110,
+                },
+                resolved: { order_id: 'ORD-entry-3-limit' },
+            }],
         },
     })
 
@@ -2122,7 +2131,16 @@ test('SaxoClient.getExecutionPriceForOrderV2 returns null when batch has no entr
             expected: { side: 'BUY' as const, order_type: 'Market' as const, size: 1000 },
             resolved: { order_id: 'ORD-entry-no-fill' },
         },
-        exits: [],
+        exits: [{
+            expected: {
+                role: 'TAKE_PROFIT' as const,
+                side: 'SELL' as const,
+                order_type: 'Limit' as const,
+                size: 1000,
+                price: 110,
+            },
+            resolved: { order_id: 'ORD-entry-no-fill-limit' },
+        }],
     }
 
     const result = await client.getExecutionPriceForOrderV2({
@@ -2776,4 +2794,321 @@ test('SaxoClient.getClosingExecutionForOrderV2 no-ops when metadata is missing',
     assert.equal(result.execution, null)
     assert.equal(requestedUrls.length, 0)
     assert.ok(warnLogs.some((log) => log.obj.event === 'saxo:orders_v2_metadata_missing'))
+})
+
+const makeRecoverableIfdocoOrder = (): OrderV2 => ({
+    id: 'evt-ifdoco-recovery',
+    strategy: 'test',
+    broker: 'saxo',
+    ticker: 'FxSpot:21',
+    side: 'BUY',
+    order_type: 'IFDOCO',
+    requested_size: 1,
+    executed_size: 0,
+    executed_price: null,
+    status: 'PENDING',
+    provider_order_ids: ['ENTRY'],
+    created_at: new Date('2026-01-01T00:00:00Z'),
+    updated_at: new Date('2026-01-01T00:00:00Z'),
+})
+
+const makeRecoveryAuthDb = () => mockFirestore({
+    'saxo_auth_data/saxo_auth': {
+        accessToken: 'valid-token',
+        refreshToken: 'refresh-token',
+        accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+        refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        accounts: [{
+            accountKey: 'account',
+            clientKey: 'client-key',
+            legalAssetTypes: ['FxSpot'],
+            currency: 'USD',
+            displayName: 'Primary',
+        }],
+    },
+})
+
+const recoveryActivity = (orderId: 'ENTRY' | 'STOP' | 'LIMIT') => ({
+    LogId: `log-${orderId}`,
+    OrderId: orderId,
+    Status: 'Placed',
+    SubStatus: 'Confirmed',
+    BuySell: orderId === 'ENTRY' ? 'Buy' : 'Sell',
+    Amount: 1,
+    AssetType: 'FxSpot',
+    Uic: 21,
+    OrderType: orderId === 'ENTRY'
+        ? 'Market'
+        : orderId === 'STOP' ? 'StopIfTraded' : 'Limit',
+    ...(orderId === 'ENTRY' ? {} : { Price: orderId === 'STOP' ? 98 : 103 }),
+    ExternalReference: 'tg:event-1',
+    RelatedOrders: orderId === 'ENTRY'
+        ? ['STOP', 'LIMIT']
+        : ['ENTRY', orderId === 'STOP' ? 'LIMIT' : 'STOP'],
+})
+
+const recoveryOpenOrder = (orderId: 'ENTRY' | 'STOP' | 'LIMIT') => ({
+    OrderId: orderId,
+    BuySell: orderId === 'ENTRY' ? 'Buy' : 'Sell',
+    Amount: 1,
+    AssetType: 'FxSpot',
+    Uic: 21,
+    OpenOrderType: orderId === 'ENTRY'
+        ? 'Market'
+        : orderId === 'STOP' ? 'StopIfTraded' : 'Limit',
+    ...(orderId === 'ENTRY' ? {} : { Price: orderId === 'STOP' ? 98 : 103 }),
+    ExternalReference: 'tg:event-1',
+    RelatedOpenOrders: orderId === 'ENTRY'
+        ? [
+            { OrderId: 'STOP', Amount: 1, OpenOrderType: 'StopIfTraded', OrderPrice: 98 },
+            { OrderId: 'LIMIT', Amount: 1, OpenOrderType: 'Limit', OrderPrice: 103 },
+        ]
+        : [{
+            OrderId: orderId === 'STOP' ? 'LIMIT' : 'STOP',
+            Amount: 1,
+            OpenOrderType: orderId === 'STOP' ? 'Limit' : 'StopIfTraded',
+            OrderPrice: orderId === 'STOP' ? 103 : 98,
+        }],
+})
+
+test('SaxoClient.getExecutionPriceForOrderV2 は IFDOCO recovery未統合を entry ID付きで警告する', async () => {
+    const { logger, warnLogs } = createCapturingLogger()
+    const client = new SaxoClient({
+        db: mockFirestore(),
+        logger: logger as any,
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(makeRecoverableIfdocoOrder())
+
+    assert.deepEqual(result, { execution: null })
+    assert.ok(warnLogs.some((log) => (
+        log.obj.event === 'saxo:orders_v2_sync_ifdoco_recovery_required' &&
+        log.obj.orderId === 'evt-ifdoco-recovery' &&
+        log.obj.entryOrderId === 'ENTRY'
+    )))
+})
+
+test('SaxoClient.recoverIfdocoOrderMetadata は全 history と open evidence が揃う場合だけ完全 metadata を返す', async () => {
+    const requestedUrls: string[] = []
+    const db = makeRecoveryAuthDb()
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            requestedUrls.push(parsedUrl.toString())
+            if (parsedUrl.pathname.includes('/cs/v1/audit/orderactivities')) {
+                const orderId = parsedUrl.searchParams.get('OrderId') as 'ENTRY' | 'STOP' | 'LIMIT'
+                return Response.json({ Data: [recoveryActivity(orderId)] })
+            }
+            const orderId = parsedUrl.pathname.split('/').at(-1) as 'ENTRY' | 'STOP' | 'LIMIT'
+            return Response.json(recoveryOpenOrder(orderId))
+        },
+    })
+
+    const result = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+
+    assert.equal(result.kind, 'SUCCESS')
+    if (result.kind === 'SUCCESS') {
+        assert.equal(result.metadata.entry.resolved.order_id, 'ENTRY')
+        assert.deepEqual(result.metadata.exits.map((exit) => exit.resolved.order_id), ['STOP', 'LIMIT'])
+        assert.equal(result.metadata.exits.every((exit) => exit.resolved.order_id !== null), true)
+    }
+    assert.equal(requestedUrls.filter((url) => url.includes('/cs/v1/audit/orderactivities')).length, 3)
+    assert.equal(requestedUrls.filter((url) => url.includes('/port/v1/orders/')).length, 3)
+    assert.equal(
+        Object.keys(db._getStoredData()).some((path) => path.startsWith('orders_v2/')),
+        false,
+    )
+})
+
+test('SaxoClient.recoverIfdocoOrderMetadata は open候補の404を retryable failureにする', async () => {
+    const client = new SaxoClient({
+        db: makeRecoveryAuthDb(),
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            if (parsedUrl.pathname.includes('/cs/v1/audit/orderactivities')) {
+                const orderId = parsedUrl.searchParams.get('OrderId') as 'ENTRY' | 'STOP' | 'LIMIT'
+                return Response.json({ Data: [recoveryActivity(orderId)] })
+            }
+            return new Response('Not Found', { status: 404 })
+        },
+    })
+
+    const result = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+
+    assert.deepEqual(result, {
+        kind: 'TEMPORARY_FAILURE',
+        retryable: true,
+        reason: 'OPEN_ORDER_NOT_FOUND',
+    })
+    assert.equal('metadata' in result, false)
+})
+
+test('SaxoClient.recoverIfdocoOrderMetadata は paging 途中失敗で partial evidence を返さない', async () => {
+    let requestCount = 0
+    const client = new SaxoClient({
+        db: makeRecoveryAuthDb(),
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            requestCount += 1
+            return requestCount === 1
+                ? Response.json({
+                    Data: [recoveryActivity('ENTRY')],
+                    __next: 'https://example.com/cs/v1/audit/orderactivities?page=2',
+                })
+                : new Response('failed', { status: 503 })
+        },
+        sleepImpl: async () => { },
+    })
+
+    const result = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+
+    assert.deepEqual(result, {
+        kind: 'TEMPORARY_FAILURE',
+        retryable: true,
+        reason: 'HTTP_ERROR',
+    })
+    assert.equal(requestCount, 3)
+    assert.equal('metadata' in result, false)
+})
+
+test('SaxoClient.recoverIfdocoOrderMetadata は429で cooldownを共有し再試行しない', async () => {
+    let requestCount = 0
+    const client = new SaxoClient({
+        db: makeRecoveryAuthDb(),
+        baseUrl: 'https://example.com',
+        rateLimitCooldownMs: 60_000,
+        fetchImpl: async () => {
+            requestCount += 1
+            return new Response('rate limited', {
+                status: 429,
+                headers: { 'Retry-After': '60' },
+            })
+        },
+    })
+
+    const first = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+    const second = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+
+    assert.deepEqual(first, {
+        kind: 'TEMPORARY_FAILURE',
+        retryable: true,
+        reason: 'RATE_LIMITED',
+    })
+    assert.deepEqual(second, first)
+    assert.equal(requestCount, 1)
+})
+
+test('SaxoClient.recoverIfdocoOrderMetadata は page limit で partial evidence を破棄する', async () => {
+    let requestCount = 0
+    const client = new SaxoClient({
+        db: makeRecoveryAuthDb(),
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            requestCount += 1
+            return Response.json({
+                Data: [recoveryActivity('ENTRY')],
+                __next: `https://example.com/cs/v1/audit/orderactivities?page=${requestCount + 1}`,
+            })
+        },
+    })
+
+    const result = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+
+    assert.deepEqual(result, {
+        kind: 'TEMPORARY_FAILURE',
+        retryable: true,
+        reason: 'PAGE_LIMIT',
+    })
+    assert.equal(requestCount, 5)
+    assert.equal('metadata' in result, false)
+})
+
+test('SaxoClient.recoverIfdocoOrderMetadata は request budget 20 到達で partial evidence を破棄する', async () => {
+    let requestCount = 0
+    const auditAttempts = new Map<string, number>()
+    const client = new SaxoClient({
+        db: makeRecoveryAuthDb(),
+        baseUrl: 'https://example.com',
+        sleepImpl: async () => { },
+        fetchImpl: async (url) => {
+            requestCount += 1
+            const parsedUrl = new URL(String(url))
+            if (parsedUrl.pathname.includes('/cs/v1/audit/orderactivities')) {
+                const orderId = parsedUrl.searchParams.get('OrderId') as 'ENTRY' | 'STOP' | 'LIMIT'
+                const attempt = (auditAttempts.get(orderId) ?? 0) + 1
+                auditAttempts.set(orderId, attempt)
+                if (attempt === 1) return new Response('retry', { status: 503 })
+                const page = attempt - 1
+                return Response.json({
+                    Data: [recoveryActivity(orderId)],
+                    ...(page < 5
+                        ? {
+                            __next: `https://example.com/cs/v1/audit/orderactivities?ClientKey=client-key&OrderId=${orderId}&page=${page + 1}`,
+                        }
+                        : {}),
+                })
+            }
+            const orderId = parsedUrl.pathname.split('/').at(-1) as 'ENTRY' | 'STOP' | 'LIMIT'
+            return Response.json(recoveryOpenOrder(orderId))
+        },
+    })
+
+    const result = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+
+    assert.deepEqual(result, {
+        kind: 'TEMPORARY_FAILURE',
+        retryable: true,
+        reason: 'REQUEST_BUDGET_EXHAUSTED',
+    })
+    assert.equal(requestCount, 20)
+    assert.equal('metadata' in result, false)
+})
+
+test('SaxoClient.recoverIfdocoOrderMetadata は child/open request で共有 concurrency 2を超えない', async () => {
+    let activeRequests = 0
+    let maxActiveRequests = 0
+    const client = new SaxoClient({
+        db: makeRecoveryAuthDb(),
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            activeRequests += 1
+            maxActiveRequests = Math.max(maxActiveRequests, activeRequests)
+            await new Promise((resolve) => setTimeout(resolve, 5))
+            activeRequests -= 1
+
+            const parsedUrl = new URL(String(url))
+            if (parsedUrl.pathname.includes('/cs/v1/audit/orderactivities')) {
+                const orderId = parsedUrl.searchParams.get('OrderId') as 'ENTRY' | 'STOP' | 'LIMIT'
+                return Response.json({ Data: [recoveryActivity(orderId)] })
+            }
+            const orderId = parsedUrl.pathname.split('/').at(-1) as 'ENTRY' | 'STOP' | 'LIMIT'
+            return Response.json(recoveryOpenOrder(orderId))
+        },
+    })
+
+    const result = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+
+    assert.equal(result.kind, 'SUCCESS')
+    assert.equal(maxActiveRequests, 2)
+})
+
+test('SaxoClient.recoverIfdocoOrderMetadata は認証情報欠落を retryable failure にする', async () => {
+    let requestCount = 0
+    const client = new SaxoClient({
+        db: mockFirestore(),
+        fetchImpl: async () => {
+            requestCount += 1
+            return Response.json({})
+        },
+    })
+
+    assert.deepEqual(await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder()), {
+        kind: 'TEMPORARY_FAILURE',
+        retryable: true,
+        reason: 'AUTH_UNAVAILABLE',
+    })
+    assert.equal(requestCount, 0)
 })

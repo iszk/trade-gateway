@@ -160,7 +160,7 @@ session結果は `saxo:orderactivities_reconciliation_summary` へ1件に集約�
 
 ### Legacy MARKET metadata recovery
 
-10分の entry 同期は、Saxo の単体 `MARKET` で `broker_order_metadata` が完全に欠落している legacy order に限り自己修復する。対象は Saxo、非空で `DRY_RUN` ではない先頭 `provider_order_ids`、`BUY` / `SELL` の side、正の `requested_size` を持つ注文である。`MARKET` 以外、特に metadata 欠落 IFDOCO、provider ID 欠落、別 broker、別 kind、malformed data、provider ID・entry ID・side・size・external reference が矛盾する既存 `saxo_order_v1` は補完しない。
+10分の entry 同期は、Saxo の単体 `MARKET` で `broker_order_metadata` が完全に欠落している legacy order に限り自己修復する。対象は Saxo、非空で `DRY_RUN` ではない先頭 `provider_order_ids`、`BUY` / `SELL` の side、正の `requested_size` を持つ注文である。`MARKET` 以外、provider ID 欠落、別 broker、別 kind、malformed data、provider ID・entry ID・side・size・external reference が矛盾する既存 `saxo_order_v1` はこの最小補完を行わない。
 
 生成する値は次の最小 schema だけで、発注時の根拠がない `external_reference` は生成しない。
 
@@ -175,6 +175,26 @@ exits: []
 生成後も status を推測せず、既存 resolver が confirmed fill、cancel/expire、placement rejection を返した場合だけ execution / terminal status を更新する。no-match、未確定、deferred、429、batch/direct failure でも metadata-only result を共通 transaction へ渡すため、次回から通常の entry sync 対象へ復帰する。summary では valid metadata、recoverable / generated metadata、unrecoverable reason 別件数、最大5件の provider OrderId sample を execution recovered counter と分けて記録する。
 
 合成 metadata は transaction 内で未設定時だけ保存する。同一 metadata が先行保存済みなら lifecycle の単調差分を継続し、別 metadata が先行保存済みなら metadata・execution・status を上書きしない。10分同期の batch cursor、direct recovery、single fallback が同じ分類を使い、bulk reject 時も各 order を single fallback へ隔離して渡す。
+
+### IFDOCO metadata recovery
+
+metadata が完全に欠落した Saxo IFDOCO は、非空かつ `DRY_RUN` ではない entry provider order ID、有効な side / requested size、`AssetType:Uic` 形式の ticker を持つ場合だけ `RECOVERABLE_IFDOCO` に分類する。既存 metadata の部分補完、1-exit IFD の推測、別 kind や malformed metadata の上書きは行わない。既存 IFDOCO metadata の `exits: []` は完全な追跡情報ではないため valid とみなさない。
+
+`recoverIfdocoOrderMetadata` は entry の OrderActivities を `ClientKey`、`OrderId`、`EntryType=All`、`$top=500` で全ページ取得し、entry の `RelatedOrders` から一意な2 child IDを確定する。その後、各 child の全履歴と、履歴上 non-terminal / partially-filled / unresolved の注文について open order の `RelatedOpenOrders` を取得する。entry は local order の ID、side、size、AssetType/Uic、Market type と照合し、exit は逆 side、同一 size / instrument、正の price、`Limit` 1件と `StopIfTraded` 1件、related graph の一致を必須とする。open 候補の API が404を返した場合は履歴取得後に terminal 化した可能性を含むため、証拠なしで成功せず `OPEN_ORDER_NOT_FOUND` の一時失敗として再試行に委ねる。取得できた open evidence は history と一致しなければならない。`ExternalReference` は観測値が一貫する場合だけ転記し、生成しない。
+
+成功時だけ entry、TAKE_PROFIT、STOP_LOSS の全 ID が非 null の完全な `saxo_order_v1` を返す。entry-only、`exits: []`、1件または3件以上の related order、role 重複、不足・矛盾・曖昧な evidence から metadata を生成しない。result は次の機械判定可能な分類を持つ。
+
+| `kind` | `retryable` | 用途 |
+|---|---:|---|
+| `SUCCESS` | `false` | 完全 metadata を利用可能 |
+| `TEMPORARY_FAILURE` | `true` | 429、認証・通信・HTTP・parse、page limit、request budget |
+| `INSUFFICIENT_HISTORY` | `true` | entry/related/child history または必要 field の不足 |
+| `CONFLICT` | `false` | local/history/open evidence の矛盾 |
+| `MANUAL_REVIEW` | `false` | related order や exit role が曖昧、未対応 shape |
+
+1 recovery graph は entry と2 child の activity を各最大5ページ、paging/retry/open lookup 合計20 HTTP requestに制限する。全 request は既存の audit 共有 concurrency limiter（2）を通し、network/5xx は budget 内で1回 retryする。429 は `Retry-After` または既存 cooldown を設定して同一 recovery 内で再試行しない。途中失敗、parse failure、page/budget limit では取得済みの partial evidence を破棄し、非 SUCCESS result に metadata を含めない。
+
+この recovery API は Firestore write、orders_v2 lifecycle 更新、cron の retry/backoff を行わない。10分 cron からの候補選択・result 適用・永続化は後続の cron 統合で行うため、現時点の通常 entry/exit 同期は metadata 欠落 IFDOCO を自動保存しない。
 
 ### Hourly range reconciliation
 

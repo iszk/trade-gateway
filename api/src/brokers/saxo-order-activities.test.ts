@@ -220,6 +220,33 @@ test('fetchSaxoOrderActivitiesPages は不正 payload を parse failure にす�
     assert.deepEqual(result, { complete: false, reason: 'PARSE_ERROR' })
 })
 
+test('fetchSaxoOrderActivitiesPages は recovery evidence fields を検証して保持する', async () => {
+    const extendedActivity = fill({
+        BuySell: 'Sell',
+        AssetType: 'CfdOnIndex',
+        Uic: 4912,
+        OrderType: 'Limit',
+        Price: 103,
+        OrderRelation: 'Oco',
+        RelatedOrders: ['ENTRY', 'STOP'],
+    })
+    const result = await fetchSaxoOrderActivitiesPages({
+        initialUrl: 'https://example.com/page-1',
+        fetchPage: async () => Response.json({ Data: [extendedActivity] }),
+    })
+
+    assert.deepEqual(result, { complete: true, activities: [extendedActivity], nextPollUrl: undefined })
+})
+
+test('fetchSaxoOrderActivitiesPages は空の RelatedOrders ID を parse failure にする', async () => {
+    const result = await fetchSaxoOrderActivitiesPages({
+        initialUrl: 'https://example.com/page-1',
+        fetchPage: async () => Response.json({ Data: [fill({ RelatedOrders: [''] })] }),
+    })
+
+    assert.deepEqual(result, { complete: false, reason: 'PARSE_ERROR' })
+})
+
 test('fetchSaxoOrderActivitiesPages は page cap 到達時に partial activities を返さない', async () => {
     const result = await fetchSaxoOrderActivitiesPages({
         initialUrl: 'https://example.com/page-1',

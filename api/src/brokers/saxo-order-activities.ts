@@ -4,9 +4,16 @@ export type SaxoOrderActivity = {
     Status: string
     SubStatus?: string
     ExternalReference?: string
+    BuySell?: string
     Amount?: number
     FillAmount?: number
     FilledAmount?: number
+    AssetType?: string
+    Uic?: number
+    OrderType?: string
+    Price?: number
+    OrderRelation?: string
+    RelatedOrders?: string[]
     ExecutionPrice?: number
     AveragePrice?: number
     ActivityTime?: string
@@ -53,6 +60,10 @@ export const SAXO_ORDER_ACTIVITIES_MAX_PAGES = 20
 
 const isOptionalString = (value: unknown): boolean => value === undefined || typeof value === 'string'
 const isOptionalNumber = (value: unknown): boolean => value === undefined || typeof value === 'number'
+const isOptionalRelatedOrders = (value: unknown): boolean => (
+    value === undefined ||
+    Array.isArray(value) && value.every((orderId) => typeof orderId === 'string' && orderId.trim().length > 0)
+)
 
 const isSaxoOrderActivity = (value: unknown): value is SaxoOrderActivity => {
     if (!value || typeof value !== 'object') return false
@@ -62,9 +73,16 @@ const isSaxoOrderActivity = (value: unknown): value is SaxoOrderActivity => {
         typeof activity.Status === 'string' &&
         isOptionalString(activity.SubStatus) &&
         isOptionalString(activity.ExternalReference) &&
+        isOptionalString(activity.BuySell) &&
         isOptionalNumber(activity.Amount) &&
         isOptionalNumber(activity.FillAmount) &&
         isOptionalNumber(activity.FilledAmount) &&
+        isOptionalString(activity.AssetType) &&
+        isOptionalNumber(activity.Uic) &&
+        isOptionalString(activity.OrderType) &&
+        isOptionalNumber(activity.Price) &&
+        isOptionalString(activity.OrderRelation) &&
+        isOptionalRelatedOrders(activity.RelatedOrders) &&
         isOptionalNumber(activity.ExecutionPrice) &&
         isOptionalNumber(activity.AveragePrice) &&
         isOptionalString(activity.ActivityTime) &&

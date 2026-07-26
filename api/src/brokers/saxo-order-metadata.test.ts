@@ -8,6 +8,7 @@ import {
 
 const makeOrder = (overrides: Record<string, unknown> = {}) => ({
     broker: 'saxo',
+    ticker: 'FxSpot:21',
     order_type: 'MARKET',
     side: 'BUY',
     requested_size: 1,
@@ -70,9 +71,41 @@ test('Saxo metadata classifier: IFDOCO の valid metadata は自動補完対象�
     assert.equal(result.kind, 'VALID')
 })
 
+test('Saxo metadata classifier: metadata 欠落 IFDOCO は正規化済み recovery candidate にする', () => {
+    const result = classifySaxoOrderMetadata(makeOrder({
+        ticker: ' CfdOnIndex:4912 ',
+        order_type: 'IFDOCO',
+        provider_order_ids: [' ORD-entry '],
+        side: 'SELL',
+        requested_size: 2,
+    }))
+
+    assert.deepEqual(result, {
+        kind: 'RECOVERABLE_IFDOCO',
+        candidate: {
+            entryOrderId: 'ORD-entry',
+            side: 'SELL',
+            size: 2,
+            assetType: 'CfdOnIndex',
+            uic: 4912,
+        },
+    })
+})
+
+test('Saxo metadata classifier: IFDOCO の空 exits metadata は完全な metadata とみなさない', () => {
+    assert.deepEqual(classifySaxoOrderMetadata(makeOrder({
+        order_type: 'IFDOCO',
+        broker_order_metadata: validMetadata,
+    })), {
+        kind: 'UNRECOVERABLE',
+        reason: 'METADATA_CONFLICT',
+    })
+})
+
 const unrecoverableCases: Array<[string, Record<string, unknown>, string]> = [
     ['broker mismatch', { broker: 'bitflyer' }, 'BROKER_MISMATCH'],
-    ['unsupported order type', { order_type: 'IFDOCO' }, 'ORDER_TYPE_UNSUPPORTED'],
+    ['unsupported order type', { order_type: 'LIMIT' }, 'ORDER_TYPE_UNSUPPORTED'],
+    ['invalid IFDOCO ticker', { order_type: 'IFDOCO', ticker: 'FxSpot:not-a-uic' }, 'TICKER_INVALID'],
     ['provider id missing', { provider_order_ids: [] }, 'PROVIDER_ORDER_ID_MISSING'],
     ['provider id blank', { provider_order_ids: ['  '] }, 'PROVIDER_ORDER_ID_MISSING'],
     ['dry run', { provider_order_ids: ['DRY_RUN'] }, 'DRY_RUN'],
