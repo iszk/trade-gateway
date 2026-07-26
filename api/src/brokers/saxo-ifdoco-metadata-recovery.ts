@@ -75,6 +75,7 @@ export type SaxoIfdocoTemporaryFailureReason =
     | 'AUTH_UNAVAILABLE'
     | 'NETWORK_ERROR'
     | 'HTTP_ERROR'
+    | 'OPEN_ORDER_NOT_FOUND'
     | 'PARSE_ERROR'
     | 'PAGE_LIMIT'
     | 'REQUEST_BUDGET_EXHAUSTED'

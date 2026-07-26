@@ -180,7 +180,7 @@ exits: []
 
 metadata が完全に欠落した Saxo IFDOCO は、非空かつ `DRY_RUN` ではない entry provider order ID、有効な side / requested size、`AssetType:Uic` 形式の ticker を持つ場合だけ `RECOVERABLE_IFDOCO` に分類する。既存 metadata の部分補完、1-exit IFD の推測、別 kind や malformed metadata の上書きは行わない。既存 IFDOCO metadata の `exits: []` は完全な追跡情報ではないため valid とみなさない。
 
-`recoverIfdocoOrderMetadata` は entry の OrderActivities を `ClientKey`、`OrderId`、`EntryType=All`、`$top=500` で全ページ取得し、entry の `RelatedOrders` から一意な2 child IDを確定する。その後、各 child の全履歴と、履歴上 non-terminal / partially-filled / unresolved で利用可能な open order の `RelatedOpenOrders` を取得する。entry は local order の ID、side、size、AssetType/Uic、Market type と照合し、exit は逆 side、同一 size / instrument、正の price、`Limit` 1件と `StopIfTraded` 1件、related graph の一致を必須とする。open order が404で存在しない terminal order は完全な activity history だけで検証できるが、取得できた open evidence は history と一致しなければならない。`ExternalReference` は観測値が一貫する場合だけ転記し、生成しない。
+`recoverIfdocoOrderMetadata` は entry の OrderActivities を `ClientKey`、`OrderId`、`EntryType=All`、`$top=500` で全ページ取得し、entry の `RelatedOrders` から一意な2 child IDを確定する。その後、各 child の全履歴と、履歴上 non-terminal / partially-filled / unresolved の注文について open order の `RelatedOpenOrders` を取得する。entry は local order の ID、side、size、AssetType/Uic、Market type と照合し、exit は逆 side、同一 size / instrument、正の price、`Limit` 1件と `StopIfTraded` 1件、related graph の一致を必須とする。open 候補の API が404を返した場合は履歴取得後に terminal 化した可能性を含むため、証拠なしで成功せず `OPEN_ORDER_NOT_FOUND` の一時失敗として再試行に委ねる。取得できた open evidence は history と一致しなければならない。`ExternalReference` は観測値が一貫する場合だけ転記し、生成しない。
 
 成功時だけ entry、TAKE_PROFIT、STOP_LOSS の全 ID が非 null の完全な `saxo_order_v1` を返す。entry-only、`exits: []`、1件または3件以上の related order、role 重複、不足・矛盾・曖昧な evidence から metadata を生成しない。result は次の機械判定可能な分類を持つ。
 

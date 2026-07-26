@@ -941,7 +941,7 @@ export class SaxoClient {
 
         if (response.status === 404) {
             await cancelResponseBody(response)
-            return { kind: 'COMPLETE', openOrder: null }
+            return { kind: 'FAILED', reason: 'OPEN_ORDER_NOT_FOUND' }
         }
         if (!response.ok) {
             await cancelResponseBody(response)
@@ -2440,6 +2440,14 @@ export class SaxoClient {
             return { execution: null }
         }
         if (classification.kind === 'RECOVERABLE_IFDOCO') {
+            this.logger.warn(
+                {
+                    event: 'saxo:orders_v2_sync_ifdoco_recovery_required',
+                    orderId: order.id,
+                    entryOrderId: classification.candidate.entryOrderId,
+                },
+                'orders_v2 execution sync skipped: Saxo IFDOCO metadata recovery is not integrated',
+            )
             return { execution: null }
         }
 

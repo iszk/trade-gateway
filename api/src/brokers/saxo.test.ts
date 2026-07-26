@@ -2871,6 +2871,23 @@ const recoveryOpenOrder = (orderId: 'ENTRY' | 'STOP' | 'LIMIT') => ({
         }],
 })
 
+test('SaxoClient.getExecutionPriceForOrderV2 は IFDOCO recovery未統合を entry ID付きで警告する', async () => {
+    const { logger, warnLogs } = createCapturingLogger()
+    const client = new SaxoClient({
+        db: mockFirestore(),
+        logger: logger as any,
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(makeRecoverableIfdocoOrder())
+
+    assert.deepEqual(result, { execution: null })
+    assert.ok(warnLogs.some((log) => (
+        log.obj.event === 'saxo:orders_v2_sync_ifdoco_recovery_required' &&
+        log.obj.orderId === 'evt-ifdoco-recovery' &&
+        log.obj.entryOrderId === 'ENTRY'
+    )))
+})
+
 test('SaxoClient.recoverIfdocoOrderMetadata は全 history と open evidence が揃う場合だけ完全 metadata を返す', async () => {
     const requestedUrls: string[] = []
     const db = makeRecoveryAuthDb()
@@ -2903,6 +2920,30 @@ test('SaxoClient.recoverIfdocoOrderMetadata は全 history と open evidence が
         Object.keys(db._getStoredData()).some((path) => path.startsWith('orders_v2/')),
         false,
     )
+})
+
+test('SaxoClient.recoverIfdocoOrderMetadata は open候補の404を retryable failureにする', async () => {
+    const client = new SaxoClient({
+        db: makeRecoveryAuthDb(),
+        baseUrl: 'https://example.com',
+        fetchImpl: async (url) => {
+            const parsedUrl = new URL(String(url))
+            if (parsedUrl.pathname.includes('/cs/v1/audit/orderactivities')) {
+                const orderId = parsedUrl.searchParams.get('OrderId') as 'ENTRY' | 'STOP' | 'LIMIT'
+                return Response.json({ Data: [recoveryActivity(orderId)] })
+            }
+            return new Response('Not Found', { status: 404 })
+        },
+    })
+
+    const result = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+
+    assert.deepEqual(result, {
+        kind: 'TEMPORARY_FAILURE',
+        retryable: true,
+        reason: 'OPEN_ORDER_NOT_FOUND',
+    })
+    assert.equal('metadata' in result, false)
 })
 
 test('SaxoClient.recoverIfdocoOrderMetadata は paging 途中失敗で partial evidence を返さない', async () => {
