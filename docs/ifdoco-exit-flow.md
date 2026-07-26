@@ -85,7 +85,11 @@ exit 同期では、`cs/v1/audit/orderactivities` を時間範囲または poll 
 片側の related order だけが約定している場合は、その約定だけを exit レコードへ反映する。もう片側が未約定またはキャンセル済みで audit activity がない場合は無視する。Saxo の発注レスポンスで related order id が返らず `resolved.order_id === null` の場合、誤同期を避けるため exit 同期は no-op になる。
 `broker_order_metadata.kind !== 'saxo_order_v1'` の場合も warn ログを出して no-op にし、entry order id だけを使った旧探索へはフォールバックしない。
 
-Saxo metadata の自己修復は、exits が空の単体 `MARKET` entry に限定される。metadata 欠落 IFDOCO や related order の復元、既存 IFDOCO の exit metadata 補完には適用しない。自己修復で保存された metadata は entry の batch / direct / range 同期へ復帰させるが、exit 同期の対象を推測して追加することはない。
+Saxo の単体 `MARKET` は、限定された安全条件で `exits: []` の最小 metadata を10分 cronが自己修復する。metadata 欠落 IFDOCO は同じ方法で補完せず、専用の `recoverIfdocoOrderMetadata` が broker evidence を検証する。entry の OrderActivities `RelatedOrders` が一意な2 child IDを示し、各 child history と利用可能な open order の `RelatedOpenOrders` から、逆 side、同一 size/instrument、`StopIfTraded` / `Limit`、price、related graph がすべて一致する場合だけ、全 exit ID が非 null の完全な `saxo_order_v1` を返す。
+
+IFDOCO recovery は open、filled、canceled、片側 exit 約定のいずれでも、terminal child を含む完全な履歴があれば復元できる。一方、entry-only、`exits: []`、1件または3件以上の related order、履歴不足、partial response、矛盾、曖昧な role は成功にしない。結果は `SUCCESS` / `TEMPORARY_FAILURE` / `INSUFFICIENT_HISTORY` / `CONFLICT` / `MANUAL_REVIEW` と retry 可否・reason を持ち、非 SUCCESS result は metadata を持たない。
+
+この recovery API は Firestore や lifecycle status を変更しない。cron の候補選択、retry/backoff、result の保存は後続統合の責務であるため、現時点では metadata 欠落 IFDOCO の通常 entry/exit 同期は no-op のままである。既存 IFDOCO metadata の部分補完にも適用しない。
 
 ### 5. バリデーション
 
@@ -169,7 +173,7 @@ bitflyer では IFDOCO の exit 注文（STOP / LIMIT）が部分約定する可
 
 ## 注意事項
 
-- Saxo の単体 MARKET で provider order ID などの安全条件を満たす metadata 欠落 entry は、10分同期で最小 metadata を自己修復します。IFDOCO、related order、別 broker、`DRY_RUN`、provider ID 欠落、malformed / 矛盾 metadata は従来どおり安全側で no-op となり、手動 backfill が必要です
+- Saxo の単体 MARKET で provider order ID などの安全条件を満たす metadata 欠落 entry は、10分同期で最小 metadata を自己修復します。metadata 欠落 IFDOCO は専用 recovery API が完全な broker evidence を検証しますが、cron からの適用・保存はまだ行わないため通常同期では no-op です。別 broker、`DRY_RUN`、provider ID 欠落、malformed / 矛盾 metadata は recovery candidate にしません
 - bitflyer API のレート制限により、大量の IFDOCO 注文を同時に処理する場合は遅延が発生する可能性があります
 - Saxo の related order id が発注レスポンスに含まれない場合、exit 同期は安全側で no-op になります
 - Saxo の部分約定数量は audit activity だけでは確定できないため、正確な fill amount の取得元が確認できたら同期数量の算出を見直す必要があります
