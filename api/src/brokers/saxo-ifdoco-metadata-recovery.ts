@@ -4,7 +4,7 @@ import type { SaxoOrderActivity } from './saxo-order-activities.js'
 
 const EPSILON = 0.00000001
 
-export type SaxoRelatedOpenOrderEvidence = {
+type SaxoRelatedOpenOrderEvidence = {
     OrderId: string
     Amount: number
     OpenOrderType: string

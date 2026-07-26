@@ -1432,7 +1432,16 @@ test('SaxoClient.getExecutionPriceForOrderV2 uses batched audit activities and f
                 expected: { side: 'BUY', order_type: 'Market', size: 1000 },
                 resolved: { order_id: 'ORD-entry-3' },
             },
-            exits: [],
+            exits: [{
+                expected: {
+                    role: 'TAKE_PROFIT',
+                    side: 'SELL',
+                    order_type: 'Limit',
+                    size: 1000,
+                    price: 110,
+                },
+                resolved: { order_id: 'ORD-entry-3-limit' },
+            }],
         },
     })
 
@@ -2122,7 +2131,16 @@ test('SaxoClient.getExecutionPriceForOrderV2 returns null when batch has no entr
             expected: { side: 'BUY' as const, order_type: 'Market' as const, size: 1000 },
             resolved: { order_id: 'ORD-entry-no-fill' },
         },
-        exits: [],
+        exits: [{
+            expected: {
+                role: 'TAKE_PROFIT' as const,
+                side: 'SELL' as const,
+                order_type: 'Limit' as const,
+                size: 1000,
+                price: 110,
+            },
+            resolved: { order_id: 'ORD-entry-no-fill-limit' },
+        }],
     }
 
     const result = await client.getExecutionPriceForOrderV2({
