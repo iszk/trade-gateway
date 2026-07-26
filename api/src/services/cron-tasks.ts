@@ -285,17 +285,26 @@ const recoverSaxoIfdocoMetadata = async (ctx: {
     summary.eligible = eligible.length
     summary.deferred += Math.max(0, eligible.length - SAXO_IFDOCO_RECOVERY_MAX_ORDERS_PER_RUN)
 
+    const attemptedOrderCount = Math.min(eligible.length, SAXO_IFDOCO_RECOVERY_MAX_ORDERS_PER_RUN)
+    if (!ctx.fetcher?.recoverIfdocoOrderMetadata) {
+        if (attemptedOrderCount > 0) {
+            ctx.logger.warn(
+                {
+                    event: 'cron:saxo_ifdoco_metadata_recovery_unavailable',
+                    count: attemptedOrderCount,
+                    reason: 'RECOVERY_FETCHER_MISSING',
+                },
+                'Saxo IFDOCO metadata recovery fetcher is unavailable; skipping this run',
+            )
+        }
+        return { readyOrders, synchronizedOrderIds }
+    }
+
     for (const order of eligible.slice(0, SAXO_IFDOCO_RECOVERY_MAX_ORDERS_PER_RUN)) {
         summary.attempted += 1
         let result: SaxoIfdocoMetadataRecoveryResult
         try {
-            result = ctx.fetcher?.recoverIfdocoOrderMetadata
-                ? await ctx.fetcher.recoverIfdocoOrderMetadata(order)
-                : {
-                    kind: 'TEMPORARY_FAILURE',
-                    retryable: true,
-                    reason: 'HTTP_ERROR',
-                }
+            result = await ctx.fetcher.recoverIfdocoOrderMetadata(order)
         } catch {
             result = {
                 kind: 'TEMPORARY_FAILURE',

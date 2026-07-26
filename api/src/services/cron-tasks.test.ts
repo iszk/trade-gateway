@@ -122,6 +122,29 @@ test('executeTenMinutelyTask: 完全復元した Saxo IFDOCO を保存して同�
     assert.equal(stored.saxo_ifdoco_recovery.attempt_count, 1)
 })
 
+test('executeTenMinutelyTask: 復旧 fetcher 不在時は retry 状態を消費せず当該 run をスキップする', async () => {
+    const order = makeLegacySaxoIfdoco('missing-recovery-fetcher')
+    const atomic = makeAtomicState([order])
+    const { logger, logs } = makeLogger()
+
+    await executeTenMinutelyTask(makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async () => {},
+        updateOrderV2Atomically: atomic.updateOrderV2Atomically as any,
+        executionPriceFetchers: {},
+    }))
+
+    assert.equal(order.status, 'PENDING')
+    assert.equal(order.saxo_ifdoco_recovery, undefined)
+    assert.deepEqual(logs.find((log) => log.event === 'cron:saxo_ifdoco_metadata_recovery_unavailable'), {
+        event: 'cron:saxo_ifdoco_metadata_recovery_unavailable',
+        count: 1,
+        reason: 'RECOVERY_FETCHER_MISSING',
+        message: 'Saxo IFDOCO metadata recovery fetcher is unavailable; skipping this run',
+    })
+})
+
 test('executeTenMinutelyTask: retry backoff を永続化し、5回目で PENDING の手動確認へ固定する', async () => {
     const order = makeLegacySaxoIfdoco('retry-limit')
     const atomic = makeAtomicState([order])
