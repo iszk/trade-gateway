@@ -843,6 +843,72 @@ test('BitflyerClient.getExecutionPriceForOrderV2 does not return partial data wh
     assert.equal(warnLogs[0]?.obj.reason, 'missing_execution_ids')
 })
 
+test('BitflyerClient.getExecutionPriceForOrderV2 does not return partial data when direct pagination cursor does not advance', async () => {
+    const order: OrderV2 = {
+        id: 'v2-entry-direct-cursor-stuck',
+        strategy: 'MA',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'IFDOCO',
+        requested_size: 0.01,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['JRF-parent-direct-cursor-stuck'],
+        broker_order_metadata: {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-parent-direct-cursor-stuck',
+            order_method: 'IFDOCO',
+            entry: {
+                expected: { role: 'ENTRY', side: 'BUY', condition_type: 'MARKET', size: 0.01 },
+                resolved: { acceptance_id: 'JRF-child-direct-cursor-stuck' },
+            },
+            exits: [],
+        },
+        created_at: new Date(),
+        updated_at: new Date(),
+    }
+
+    const { logger, warnLogs } = createCapturingLogger()
+    const requestedUrls: string[] = []
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        logger: logger as any,
+        fetchImpl: async (url) => {
+            const urlStr = String(url)
+            requestedUrls.push(urlStr)
+            const params = new URL(urlStr).searchParams
+            if (params.get('child_order_acceptance_id') === null) {
+                return new Response(
+                    JSON.stringify([{ id: 1000, child_order_acceptance_id: 'JRF-other-direct-cursor-stuck', price: 9600000, size: 0.01 }]),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                )
+            }
+
+            return new Response(
+                JSON.stringify(Array.from({ length: 100 }, (_, index) => ({
+                    id: 100 - index,
+                    child_order_acceptance_id: 'JRF-child-direct-cursor-stuck',
+                    price: 9700000,
+                    size: index === 0 ? 0.004 : 0,
+                }))),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            )
+        },
+    })
+
+    const result = await client.getExecutionPriceForOrderV2(order)
+
+    assert.equal(result.execution, null)
+    assert.equal(requestedUrls.length, 3)
+    assert.equal(new URL(requestedUrls[2] ?? '').searchParams.get('before'), '1')
+    assert.equal(warnLogs[0]?.obj.event, 'bitflyer:executions_direct_lookup_incomplete')
+    assert.equal(warnLogs[0]?.obj.reason, 'cursor_not_advanced')
+})
+
 test('BitflyerClient.getExecutionPriceForOrderV2 falls back to direct lookup when one-page batch is insufficient', async () => {
     const order: OrderV2 = {
         id: 'v2-entry-page-limit',

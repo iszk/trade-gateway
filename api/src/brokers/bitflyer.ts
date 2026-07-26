@@ -668,6 +668,7 @@ export class BitflyerClient {
         expectedSize: number,
     ): Promise<BitflyerExecutionInfo | null> {
         const productCode = resolveProductCode(ticker)
+        const expectedExecutionSize = roundExecutionSize(expectedSize)
         const executions: BitflyerExecutionEntry[] = []
         let before: number | undefined
 
@@ -686,7 +687,7 @@ export class BitflyerClient {
             executions.push(...pageExecutions)
 
             const aggregate = aggregateExecutionInfo(executions)
-            if (aggregate && aggregate.size >= expectedSize - 0.00000001) {
+            if (aggregate && (aggregate.size > expectedExecutionSize || areSameNumber(aggregate.size, expectedExecutionSize))) {
                 return aggregate
             }
 
@@ -757,14 +758,17 @@ export class BitflyerClient {
         const batch = await this.fetchExecutionsByProductCode(productCode)
         const childExecs = batch.executionsByAcceptanceId.get(childAcceptanceId) ?? []
         const batchExecution = aggregateExecutionInfo(childExecs)
+        const expectedExecutionSize = roundExecutionSize(expectedSize)
 
-        if (!batchExecution || Math.abs(batchExecution.size - expectedSize) >= 0.00000001) {
+        if (!batchExecution || !areSameNumber(batchExecution.size, expectedExecutionSize)) {
             this.logger.info(
                 {
                     event: 'bitflyer:executions_direct_lookup',
                     productCode,
                     childAcceptanceId,
-                    reason: batchExecution ? batchExecution.size > expectedSize ? 'batch_overfill' : 'batch_quantity_incomplete' : 'batch_target_missing',
+                    reason: batchExecution
+                        ? batchExecution.size > expectedExecutionSize ? 'batch_overfill' : 'batch_quantity_incomplete'
+                        : 'batch_target_missing',
                     batchMatchCount: childExecs.length,
                 },
                 'bitFlyer execution batch is insufficient; using direct child order lookup',
