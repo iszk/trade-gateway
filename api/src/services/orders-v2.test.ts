@@ -37,6 +37,15 @@ const toFirestoreOrder = (order: OrderV2) => ({
     created_at: toTimestamp(order.created_at),
     updated_at: toTimestamp(order.updated_at),
     executed_at: order.executed_at ? toTimestamp(order.executed_at) : undefined,
+    saxo_ifdoco_recovery: order.saxo_ifdoco_recovery
+        ? {
+            ...order.saxo_ifdoco_recovery,
+            last_attempt_at: toTimestamp(order.saxo_ifdoco_recovery.last_attempt_at),
+            next_attempt_at: order.saxo_ifdoco_recovery.next_attempt_at
+                ? toTimestamp(order.saxo_ifdoco_recovery.next_attempt_at)
+                : undefined,
+        }
+        : undefined,
 })
 
 const createDbStub = (orders: OrderV2[]) => {
@@ -155,6 +164,14 @@ test('createUpdateOrderV2AtomicallyFn: transaction内の最新orderを正規化�
         id: 'atomic-order',
         updated_at: new Date('2026-01-02T00:00:00Z'),
         executed_at: new Date('2026-01-01T01:00:00Z'),
+        saxo_ifdoco_recovery: {
+            status: 'RETRY_PENDING',
+            attempt_count: 1,
+            last_attempt_at: new Date('2026-01-01T02:00:00Z'),
+            next_attempt_at: new Date('2026-01-01T02:10:00Z'),
+            result_kind: 'TEMPORARY_FAILURE',
+            reason: 'RATE_LIMITED',
+        },
     })
     const { db, state } = createTransactionDbStub(current)
     const updateOrderV2Atomically = createUpdateOrderV2AtomicallyFn(db as any)
@@ -163,6 +180,8 @@ test('createUpdateOrderV2AtomicallyFn: transaction内の最新orderを正規化�
         assert.ok(latest.created_at instanceof Date)
         assert.ok(latest.updated_at instanceof Date)
         assert.ok(latest.executed_at instanceof Date)
+        assert.ok(latest.saxo_ifdoco_recovery?.last_attempt_at instanceof Date)
+        assert.ok(latest.saxo_ifdoco_recovery?.next_attempt_at instanceof Date)
         return { status: 'CANCELED', executed_at: undefined }
     })
 
@@ -283,6 +302,13 @@ test('createListOrderUpdatesFn: 外部 DTO の null、fill、commission を正�
             execution_costs: undefined,
             exit_sync_status: undefined,
             broker_order_metadata: { broker: 'bitflyer', kind: 'MARKET', product_code: 'FX_BTC_JPY', entry: { acceptance_id: 'secret' } },
+            saxo_ifdoco_recovery: {
+                status: 'MANUAL_REVIEW',
+                attempt_count: 5,
+                last_attempt_at: new Date('2026-02-02T00:00:00Z'),
+                result_kind: 'CONFLICT',
+                reason: 'ENTRY_MISMATCH',
+            },
         } as any),
         makeOrder({
             ...common,
@@ -352,4 +378,6 @@ test('createListOrderUpdatesFn: 外部 DTO の null、fill、commission を正�
     )
     assert.equal(JSON.stringify(result).includes('broker_order_metadata'), false)
     assert.equal(JSON.stringify(result).includes('acceptance_id'), false)
+    assert.equal(JSON.stringify(result).includes('saxo_ifdoco_recovery'), false)
+    assert.equal(JSON.stringify(result).includes('ENTRY_MISMATCH'), false)
 })

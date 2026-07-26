@@ -12,6 +12,16 @@ type OrderV2ExecutionCosts = {
     commission?: number
 }
 
+export type SaxoIfdocoRecoveryState = {
+    /** cron 内部だけで使う復旧状態。注文 lifecycle の status とは独立して管理する */
+    status: 'RETRY_PENDING' | 'MANUAL_REVIEW' | 'COMPLETED'
+    attempt_count: number
+    last_attempt_at: Date
+    next_attempt_at?: Date
+    result_kind: string
+    reason?: string
+}
+
 type BaseOrderV2 = {
     /** 注文のユニークID（WebhookのeventIdなど） */
     id: string
@@ -37,6 +47,8 @@ type BaseOrderV2 = {
     provider_order_ids: string[]
     /** Broker固有の注文追跡メタデータ */
     broker_order_metadata?: BrokerOrderMetadata
+    /** metadata 欠落 Saxo IFDOCO の内部復旧状態。外部 API へは公開しない */
+    saxo_ifdoco_recovery?: SaxoIfdocoRecoveryState
     /** レコード作成日時 (Webhook受付時刻など) */
     created_at: Date
     /** 最終更新日時 */

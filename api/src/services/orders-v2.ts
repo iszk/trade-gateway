@@ -12,12 +12,22 @@ const fromFirestoreDate = (value: FirestoreDate): Date =>
     value instanceof Date ? value : value.toDate()
 
 const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => {
+    const recovery = data.saxo_ifdoco_recovery
     const normalized = {
         ...data,
         created_at: fromFirestoreDate(data.created_at as FirestoreDate),
         updated_at: fromFirestoreDate(data.updated_at as FirestoreDate),
         executed_at: data.executed_at
             ? fromFirestoreDate(data.executed_at as FirestoreDate)
+            : undefined,
+        saxo_ifdoco_recovery: recovery
+            ? {
+                ...recovery,
+                last_attempt_at: fromFirestoreDate(recovery.last_attempt_at as FirestoreDate),
+                next_attempt_at: recovery.next_attempt_at
+                    ? fromFirestoreDate(recovery.next_attempt_at as FirestoreDate)
+                    : undefined,
+            }
             : undefined,
     }
 

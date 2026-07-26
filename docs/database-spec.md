@@ -88,6 +88,13 @@ webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証�
 - `broker_order_metadata` (map, optional)
   - `bitflyer_parent_order_v1`: parent acceptance id、entry 子注文、TP/SL 子注文の expected/resolved acceptance id を保持する
   - `saxo_order_v1`: entry order id、`ExternalReference`、Saxo related orders の expected/resolved order id を保持する。related order を持たない Saxo MARKET 注文でも entry 同期のため保存する。Saxo の発注レスポンスで related order id が返らない場合、resolved order id は `null` のままとし、exit 同期は安全に no-op する。現状は Saxo 1アカウント前提のため account/client は保存していない。複数アカウント対応時は [saxo.md](./saxo.md) を参照して metadata と polling 状態を account/client ごとに分離する
+- `saxo_ifdoco_recovery` (map, optional, internal only)
+  - `status` (string, required) — `RETRY_PENDING` | `MANUAL_REVIEW` | `COMPLETED`
+  - `attempt_count` (number, required) — broker evidence recovery の累積試行回数
+  - `last_attempt_at` (timestamp, required)
+  - `next_attempt_at` (timestamp, optional) — `RETRY_PENDING` の次回試行可能時刻
+  - `result_kind` (string, required) — 最終 recovery result または内部判定
+  - `reason` (string, optional) — 集約監視・手動確認用の失敗理由
 - `created_at` (timestamp, required)
 - `updated_at` (timestamp, required)
 
@@ -101,7 +108,10 @@ webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証�
 - 一覧・統計・トレード再構成の日時基準は `executed_at` とする。`status=EXECUTED` で `executed_at` が欠落している既存データは集計対象外とし、`created_at` へはフォールバックしない
 - cron による `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。ただし Saxo の `broker=saxo`、`order_type=MARKET`、metadata 欠落、非空かつ `DRY_RUN` ではない先頭 `provider_order_ids`、有効な side / requested_size をすべて満たす単体 MARKET だけは、先頭 provider order ID を entry `OrderId` とする最小 `saxo_order_v1` metadata（`exits: []`、`external_reference` なし）を10分同期で自己修復する。metadata を生成しただけでは status や execution を変更しない。confirmed fill、cancel/expire、placement rejection は Saxo OrderActivities resolver の結果だけを適用する。no-match、deferred、rate limit、API failure でも metadata-only result は transaction で保存する。provider ID 欠落 / `DRY_RUN`、別 broker、別 kind、malformed または order/provider と矛盾する既存 metadata は API を呼ばず no-op とする
 - metadata 欠落 Saxo IFDOCO は、有効な entry provider ID、side、requested size、`AssetType:Uic` ticker を持つ場合だけ broker evidence recovery candidate に分類する。recovery API は entry/2 child の完全な OrderActivities と、利用可能な open order の `RelatedOpenOrders` を照合し、entry と TAKE_PROFIT / STOP_LOSS の全 ID、side、size、type、price、instrument が一意に一致する場合だけ、全 exit ID が非 null の完全な `saxo_order_v1` を返す。entry-only、`exits: []`、partial response、履歴不足、矛盾、曖昧な related order では metadata を返さない
-- IFDOCO recovery result は `SUCCESS`、retryable な `TEMPORARY_FAILURE` / `INSUFFICIENT_HISTORY`、非 retryable な `CONFLICT` / `MANUAL_REVIEW` を `reason` とともに返す。この recovery API 自体は Firestore write、orders_v2 lifecycle 更新、cron retry/backoff を行わず、10分 cron からの適用・永続化は後続の cron 統合まで行わない
+- IFDOCO recovery result は `SUCCESS`、retryable な `TEMPORARY_FAILURE` / `INSUFFICIENT_HISTORY`、非 retryable な `CONFLICT` / `MANUAL_REVIEW` を `reason` とともに返す。10分 cron は recovery state が未設定または試行時刻到来済みの候補を `next_attempt_at`、最終試行、作成時刻、ID の順で公平に選び、1 run 最大2件を処理する
+- retryable result は最大5回、10分を基準とする指数 backoff（10、20、40、80分）で再試行する。5回目、非 retryable result、runtime validation に通らない SUCCESS metadata は注文の `status=PENDING` を維持して `MANUAL_REVIEW` へ移す。以後は broker API を再呼び出さない
+- SUCCESS metadata は entry と2 exit の ID が全て解決済みであることを再検証し、その metadata を使った通常 entry 照会結果とともに transaction へ渡す。最新 document が PENDING、metadata 未設定、recovery state 非更新の場合だけ `broker_order_metadata`、`COMPLETED` state、確認済み execution / terminal 差分を原子的に保存する。競合 metadata、終端状態、先行 recovery 更新は上書きしない。途中失敗時も後続 cron の通常 entry / exit 同期へ戻す
+- `saxo_ifdoco_recovery` は内部運用情報であり、注文更新 DTO と orders API response から除外する。cron は個別注文ごとの反復 warn を出さず、recovered、retry、manual review、deferred、reason を run 単位で集約ログに記録する
 - 合成 metadata の同期結果は `SET_IF_UNSET` guard 付きで transaction 内に適用する。最新 metadata が未設定なら metadata と lifecycle 差分を同時に保存し、同一 metadata が先に保存済みなら lifecycle の単調差分だけを適用する。別 metadata が先行保存済みなら metadata・execution・status をすべて保持する。通常の broker metadata merge は従来どおりとする
 - `execution_costs` と `execution_costs.commission` は optional とする。Firestore 上で `execution_costs` またはその `commission` field が未設定の場合は、legacy order、broker 未対応、約定情報の欠落などで値が unknown であることを表し、`0` とは区別する。注文更新 API の DTO では DB 上の未設定を `execution_costs: { commission: null }` に正規化して公開する（[注文更新 API OpenAPI](./openapi/order-updates.openapi.yaml)、[API 利用仕様](./api-spec.md#order-updates-api)）。
 - commission は broker execution の明示手数料だけを保存する。spread、funding、slippage、売買価格差などの実質コストはこの field に含めず、現行 schema では保存しない。
@@ -236,7 +246,7 @@ Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_au
 1. `webhook_events` のドキュメント ID は `{broker}:{symbol}:{event_id}` とし、同一 broker / symbol / event の重複を拒否する
 2. `order_dispatch_logs.event_id` は webhook の `event_id` と同じ値を保存する
 3. `orders_v2` は webhook dispatch 成功時のみ作成する
-4. `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。限定された Saxo 単体 MARKET の metadata 欠落だけは runtime validation と transaction guard を通る場合に10分 cronで自己修復する。Saxo IFDOCO の metadata 欠落は完全な broker evidence recovery result を取得できるが、この段階では Firestore に適用せず、通常 cron 同期では安全側で no-op にする
+4. `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。限定された Saxo 単体 MARKET は最小 metadata を自己修復し、Saxo IFDOCO は完全な broker evidence recovery に成功した場合だけ metadata を transaction 保存して通常同期へ戻す。不完全・矛盾・上限到達は PENDING の手動確認状態とする
 5. `cron_metadata/task_status` の更新は Firestore transaction で行う
 6. `saxo_auth_data/saxo_auth.refreshingUntil` の更新は Firestore transaction で行う
 

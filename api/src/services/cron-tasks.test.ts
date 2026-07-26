@@ -25,6 +25,305 @@ const makeBaseCtx = (overrides: Partial<CronContext> = {}): CronContext => ({
     ...overrides,
 })
 
+const makeLegacySaxoIfdoco = (
+    id: string,
+    overrides: Record<string, unknown> = {},
+): any => ({
+    id,
+    strategy: 'legacy-ifdoco',
+    broker: 'saxo',
+    ticker: 'FxSpot:21',
+    side: 'BUY',
+    order_type: 'IFDOCO',
+    status: 'PENDING',
+    exit_sync_status: 'MONITORING',
+    provider_order_ids: [`ENTRY-${id}`],
+    requested_size: 1,
+    executed_size: 0,
+    executed_price: null,
+    created_at: new Date('2026-01-01T00:00:00Z'),
+    updated_at: new Date('2026-01-01T00:00:00Z'),
+    ...overrides,
+})
+
+const makeRecoveredSaxoIfdocoMetadata = (id: string): any => ({
+    kind: 'saxo_order_v1',
+    order_id: `ENTRY-${id}`,
+    entry: {
+        expected: { side: 'BUY', order_type: 'Market', size: 1 },
+        resolved: { order_id: `ENTRY-${id}` },
+    },
+    exits: [
+        {
+            expected: { role: 'STOP_LOSS', side: 'SELL', order_type: 'StopIfTraded', size: 1, price: 98 },
+            resolved: { order_id: `STOP-${id}` },
+        },
+        {
+            expected: { role: 'TAKE_PROFIT', side: 'SELL', order_type: 'Limit', size: 1, price: 103 },
+            resolved: { order_id: `LIMIT-${id}` },
+        },
+    ],
+})
+
+const makeAtomicState = (orders: any[]) => {
+    const state = new Map(orders.map((order) => [order.id, order]))
+    return {
+        state,
+        updateOrderV2Atomically: async (
+            id: string,
+            mutate: (current: any) => Record<string, unknown> | null,
+        ) => {
+            const current = state.get(id)
+            if (!current) return false
+            const updates = mutate(current)
+            if (!updates || Object.keys(updates).length === 0) return false
+            Object.assign(current, updates, { updated_at: new Date() })
+            return true
+        },
+    }
+}
+
+test('executeTenMinutelyTask: 完全復元した Saxo IFDOCO を保存して同一 cron の通常同期へ戻す', async () => {
+    const order = makeLegacySaxoIfdoco('recover-success')
+    const atomic = makeAtomicState([order])
+    let executionSyncCalls = 0
+    let atomicCalls = 0
+
+    await executeTenMinutelyTask(makeBaseCtx({
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async () => {},
+        updateOrderV2Atomically: (async (...args: Parameters<typeof atomic.updateOrderV2Atomically>) => {
+            atomicCalls += 1
+            return atomic.updateOrderV2Atomically(...args)
+        }) as any,
+        executionPriceFetchers: {
+            saxo: {
+                recoverIfdocoOrderMetadata: async () => ({
+                    kind: 'SUCCESS',
+                    retryable: false,
+                    metadata: makeRecoveredSaxoIfdocoMetadata(order.id),
+                }),
+                getExecutionPriceForOrderV2: async (syncOrder) => {
+                    executionSyncCalls += 1
+                    assert.equal(syncOrder.broker_order_metadata?.kind, 'saxo_order_v1')
+                    return { execution: { price: 101, size: 1 } }
+                },
+            },
+        },
+    }))
+
+    const stored = atomic.state.get(order.id)
+    assert.equal(executionSyncCalls, 1)
+    assert.equal(atomicCalls, 1)
+    assert.equal(stored.status, 'EXECUTED')
+    assert.equal(stored.executed_price, 101)
+    assert.equal(stored.broker_order_metadata.exits.length, 2)
+    assert.equal(stored.saxo_ifdoco_recovery.status, 'COMPLETED')
+    assert.equal(stored.saxo_ifdoco_recovery.attempt_count, 1)
+})
+
+test('executeTenMinutelyTask: retry backoff を永続化し、5回目で PENDING の手動確認へ固定する', async () => {
+    const order = makeLegacySaxoIfdoco('retry-limit')
+    const atomic = makeAtomicState([order])
+    let recoveryCalls = 0
+    const { logger, logs } = makeLogger()
+    const ctx = makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async () => {},
+        updateOrderV2Atomically: atomic.updateOrderV2Atomically as any,
+        executionPriceFetchers: {
+            saxo: {
+                recoverIfdocoOrderMetadata: async () => {
+                    recoveryCalls += 1
+                    return {
+                        kind: 'INSUFFICIENT_HISTORY' as const,
+                        retryable: true as const,
+                        reason: 'EXIT_HISTORY_MISSING' as const,
+                    }
+                },
+                getExecutionPriceForOrderV2: async () => ({ execution: null }),
+            },
+        },
+    })
+
+    const firstStartedAt = Date.now()
+    await executeTenMinutelyTask(ctx)
+    assert.equal(recoveryCalls, 1)
+    assert.equal(order.status, 'PENDING')
+    assert.equal(order.saxo_ifdoco_recovery.status, 'RETRY_PENDING')
+    assert.equal(order.saxo_ifdoco_recovery.attempt_count, 1)
+    assert.ok(order.saxo_ifdoco_recovery.next_attempt_at.getTime() >= firstStartedAt + 10 * 60 * 1000)
+
+    await executeTenMinutelyTask(ctx)
+    assert.equal(recoveryCalls, 1)
+
+    order.saxo_ifdoco_recovery = {
+        ...order.saxo_ifdoco_recovery,
+        attempt_count: 4,
+        next_attempt_at: new Date(0),
+    }
+    await executeTenMinutelyTask(ctx)
+    assert.equal(recoveryCalls, 2)
+    assert.equal(order.status, 'PENDING')
+    assert.equal(order.saxo_ifdoco_recovery.status, 'MANUAL_REVIEW')
+    assert.equal(order.saxo_ifdoco_recovery.attempt_count, 5)
+    assert.equal(order.saxo_ifdoco_recovery.next_attempt_at, undefined)
+
+    await executeTenMinutelyTask(ctx)
+    assert.equal(recoveryCalls, 2)
+    const summaries = logs.filter((log) => log.event === 'cron:saxo_ifdoco_metadata_recovery_summary')
+    assert.ok(summaries.some((log) => log.manualReviewTransitions === 1))
+})
+
+test('executeTenMinutelyTask: 復旧対象を永続時刻順に公平選択し run 上限を守る', async () => {
+    const orders = [
+        makeLegacySaxoIfdoco('fair-later', {
+            saxo_ifdoco_recovery: {
+                status: 'RETRY_PENDING',
+                attempt_count: 1,
+                last_attempt_at: new Date('2026-01-01T01:00:00Z'),
+                next_attempt_at: new Date('2026-01-01T02:00:00Z'),
+                result_kind: 'INSUFFICIENT_HISTORY',
+                reason: 'EXIT_HISTORY_MISSING',
+            },
+        }),
+        makeLegacySaxoIfdoco('fair-first', {
+            saxo_ifdoco_recovery: {
+                status: 'RETRY_PENDING',
+                attempt_count: 1,
+                last_attempt_at: new Date('2026-01-01T00:00:00Z'),
+                next_attempt_at: new Date('2026-01-01T00:30:00Z'),
+                result_kind: 'INSUFFICIENT_HISTORY',
+                reason: 'EXIT_HISTORY_MISSING',
+            },
+        }),
+        makeLegacySaxoIfdoco('fair-second', {
+            saxo_ifdoco_recovery: {
+                status: 'RETRY_PENDING',
+                attempt_count: 1,
+                last_attempt_at: new Date('2026-01-01T00:30:00Z'),
+                next_attempt_at: new Date('2026-01-01T01:00:00Z'),
+                result_kind: 'INSUFFICIENT_HISTORY',
+                reason: 'EXIT_HISTORY_MISSING',
+            },
+        }),
+    ]
+    const atomic = makeAtomicState(orders)
+    const attemptedIds: string[] = []
+    const { logger, logs } = makeLogger()
+
+    await executeTenMinutelyTask(makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => orders,
+        updateOrderV2: async () => {},
+        updateOrderV2Atomically: atomic.updateOrderV2Atomically as any,
+        executionPriceFetchers: {
+            saxo: {
+                recoverIfdocoOrderMetadata: async (candidate) => {
+                    attemptedIds.push(candidate.id)
+                    return {
+                        kind: 'TEMPORARY_FAILURE',
+                        retryable: true,
+                        reason: 'RATE_LIMITED',
+                    }
+                },
+                getExecutionPriceForOrderV2: async () => ({ execution: null }),
+            },
+        },
+    }))
+
+    assert.deepEqual(attemptedIds, ['fair-first', 'fair-second'])
+    assert.equal(orders[0]?.saxo_ifdoco_recovery.attempt_count, 1)
+    const summary = logs.find((log) => log.event === 'cron:saxo_ifdoco_metadata_recovery_summary')
+    assert.equal(summary?.eligible, 3)
+    assert.equal(summary?.deferred, 1)
+})
+
+test('executeTenMinutelyTask: 不完全な SUCCESS metadata は保存せず手動確認へ移す', async () => {
+    const order = makeLegacySaxoIfdoco('incomplete-success')
+    const atomic = makeAtomicState([order])
+
+    await executeTenMinutelyTask(makeBaseCtx({
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async () => {},
+        updateOrderV2Atomically: atomic.updateOrderV2Atomically as any,
+        executionPriceFetchers: {
+            saxo: {
+                recoverIfdocoOrderMetadata: async () => ({
+                    kind: 'SUCCESS',
+                    retryable: false,
+                    metadata: {
+                        ...makeRecoveredSaxoIfdocoMetadata(order.id),
+                        exits: [],
+                    },
+                }),
+                getExecutionPriceForOrderV2: async () => {
+                    assert.fail('incomplete metadata must not enter normal sync')
+                },
+            },
+        },
+    }))
+
+    assert.equal(order.broker_order_metadata, undefined)
+    assert.equal(order.status, 'PENDING')
+    assert.equal(order.saxo_ifdoco_recovery.status, 'MANUAL_REVIEW')
+    assert.equal(order.saxo_ifdoco_recovery.reason, 'INCOMPLETE_SUCCESS_METADATA')
+})
+
+test('executeTenMinutelyTask: 復旧中の metadata 競合と終端更新を上書きしない', async () => {
+    for (const concurrentUpdate of ['metadata', 'terminal'] as const) {
+        const order = makeLegacySaxoIfdoco(`concurrent-${concurrentUpdate}`)
+        const recovered = makeRecoveredSaxoIfdocoMetadata(order.id)
+        const concurrentMetadata = {
+            ...makeRecoveredSaxoIfdocoMetadata(order.id),
+            exits: makeRecoveredSaxoIfdocoMetadata(order.id).exits.map((exit: any, index: number) => ({
+                ...exit,
+                resolved: { order_id: `${index === 0 ? 'OTHER-STOP' : 'OTHER-LIMIT'}-${order.id}` },
+            })),
+        }
+        let atomicCall = 0
+        const updateOrderV2Atomically = async (
+            _id: string,
+            mutate: (current: any) => Record<string, unknown> | null,
+        ) => {
+            atomicCall += 1
+            if (atomicCall === 1) {
+                if (concurrentUpdate === 'metadata') order.broker_order_metadata = concurrentMetadata
+                if (concurrentUpdate === 'terminal') order.status = 'CANCELED'
+            }
+            const updates = mutate(order)
+            if (!updates) return false
+            Object.assign(order, updates)
+            return true
+        }
+
+        await executeTenMinutelyTask(makeBaseCtx({
+            getPendingOrdersV2: async () => [order],
+            updateOrderV2: async () => {},
+            updateOrderV2Atomically: updateOrderV2Atomically as any,
+            executionPriceFetchers: {
+                saxo: {
+                    recoverIfdocoOrderMetadata: async () => ({
+                        kind: 'SUCCESS',
+                        retryable: false,
+                        metadata: recovered,
+                    }),
+                    getExecutionPriceForOrderV2: async () => ({ execution: null }),
+                },
+            },
+        }))
+
+        if (concurrentUpdate === 'metadata') {
+            assert.deepEqual(order.broker_order_metadata, concurrentMetadata)
+        } else {
+            assert.equal(order.status, 'CANCELED')
+            assert.equal(order.broker_order_metadata, undefined)
+        }
+        assert.equal(order.saxo_ifdoco_recovery, undefined)
+    }
+})
+
 test('executeHourlyTask: Saxo reconciliation の fresh 48時間 window と結果適用を行う', async () => {
     const startedAt = Date.now()
     const order: any = {
