@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import type { SaxoIfdocoMetadataRecoveryCandidate } from './saxo-order-metadata.js'
 import {
+    parseSaxoOpenOrderEnvelope,
     parseSaxoOpenOrderEvidence,
     recoverSaxoIfdocoMetadataFromEvidence,
     type SaxoIfdocoRecoveryEvidence,
@@ -132,6 +133,28 @@ const expectedMetadata = {
 test('IFDOCO recovery: RelatedOpenOrders が空の open evidence を拒否する', () => {
     assert.equal(parseSaxoOpenOrderEvidence(openOrder({ RelatedOpenOrders: [] })), null)
 })
+
+test('IFDOCO recovery: open-order envelope は対象OrderIdのsingletonだけを採用する', () => {
+    const evidence = openOrder({})
+
+    assert.deepEqual(parseSaxoOpenOrderEnvelope({ Data: [evidence] }, 'ENTRY'), {
+        kind: 'FOUND',
+        openOrder: evidence,
+    })
+})
+
+for (const [name, payload, expected] of [
+    ['空Data', { Data: [] }, { kind: 'NOT_FOUND' }],
+    ['Data欠落', {}, { kind: 'INVALID' }],
+    ['Data非配列', { Data: {} }, { kind: 'INVALID' }],
+    ['複数候補', { Data: [openOrder({}), openOrder({ OrderId: 'OTHER' })] }, { kind: 'INVALID' }],
+    ['対象OrderId不一致', { Data: [openOrder({ OrderId: 'OTHER' })] }, { kind: 'INVALID' }],
+    ['不正OrderResponse', { Data: [{ OrderId: 'ENTRY' }] }, { kind: 'INVALID' }],
+] as const) {
+    test(`IFDOCO recovery: open-order envelope の${name}をfail-closedにする`, () => {
+        assert.deepEqual(parseSaxoOpenOrderEnvelope(payload, 'ENTRY'), expected)
+    })
+}
 
 for (const scenario of [
     { name: 'open', evidence: makeEvidence() },

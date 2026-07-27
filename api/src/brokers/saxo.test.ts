@@ -2902,7 +2902,7 @@ test('SaxoClient.recoverIfdocoOrderMetadata は全 history と open evidence が
                 return Response.json({ Data: [recoveryActivity(orderId)] })
             }
             const orderId = parsedUrl.pathname.split('/').at(-1) as 'ENTRY' | 'STOP' | 'LIMIT'
-            return Response.json(recoveryOpenOrder(orderId))
+            return Response.json({ Data: [recoveryOpenOrder(orderId)] })
         },
     })
 
@@ -2945,6 +2945,58 @@ test('SaxoClient.recoverIfdocoOrderMetadata は open候補の404を retryable fa
     })
     assert.equal('metadata' in result, false)
 })
+
+for (const [name, buildPayload, reason] of [
+    [
+        '空Data',
+        () => ({ Data: [] }),
+        'OPEN_ORDER_NOT_FOUND',
+    ],
+    [
+        '複数候補',
+        (orderId: 'ENTRY' | 'STOP' | 'LIMIT') => ({
+            Data: [recoveryOpenOrder(orderId), recoveryOpenOrder(orderId)],
+        }),
+        'PARSE_ERROR',
+    ],
+    [
+        '対象OrderId不一致',
+        (orderId: 'ENTRY' | 'STOP' | 'LIMIT') => ({
+            Data: [{ ...recoveryOpenOrder(orderId), OrderId: `OTHER-${orderId}` }],
+        }),
+        'PARSE_ERROR',
+    ],
+    [
+        '不正payload',
+        () => ({ Data: 'not-an-array' }),
+        'PARSE_ERROR',
+    ],
+] as const) {
+    test(`SaxoClient.recoverIfdocoOrderMetadata は open候補の${name}を fail-closedにする`, async () => {
+        const client = new SaxoClient({
+            db: makeRecoveryAuthDb(),
+            baseUrl: 'https://example.com',
+            fetchImpl: async (url) => {
+                const parsedUrl = new URL(String(url))
+                if (parsedUrl.pathname.includes('/cs/v1/audit/orderactivities')) {
+                    const orderId = parsedUrl.searchParams.get('OrderId') as 'ENTRY' | 'STOP' | 'LIMIT'
+                    return Response.json({ Data: [recoveryActivity(orderId)] })
+                }
+                const orderId = parsedUrl.pathname.split('/').at(-1) as 'ENTRY' | 'STOP' | 'LIMIT'
+                return Response.json(buildPayload(orderId))
+            },
+        })
+
+        const result = await client.recoverIfdocoOrderMetadata(makeRecoverableIfdocoOrder())
+
+        assert.deepEqual(result, {
+            kind: 'TEMPORARY_FAILURE',
+            retryable: true,
+            reason,
+        })
+        assert.equal('metadata' in result, false)
+    })
+}
 
 test('SaxoClient.recoverIfdocoOrderMetadata は paging 途中失敗で partial evidence を返さない', async () => {
     let requestCount = 0
@@ -3052,7 +3104,7 @@ test('SaxoClient.recoverIfdocoOrderMetadata は request budget 20 到達で part
                 })
             }
             const orderId = parsedUrl.pathname.split('/').at(-1) as 'ENTRY' | 'STOP' | 'LIMIT'
-            return Response.json(recoveryOpenOrder(orderId))
+            return Response.json({ Data: [recoveryOpenOrder(orderId)] })
         },
     })
 
@@ -3085,7 +3137,7 @@ test('SaxoClient.recoverIfdocoOrderMetadata は child/open request で共有 con
                 return Response.json({ Data: [recoveryActivity(orderId)] })
             }
             const orderId = parsedUrl.pathname.split('/').at(-1) as 'ENTRY' | 'STOP' | 'LIMIT'
-            return Response.json(recoveryOpenOrder(orderId))
+            return Response.json({ Data: [recoveryOpenOrder(orderId)] })
         },
     })
 

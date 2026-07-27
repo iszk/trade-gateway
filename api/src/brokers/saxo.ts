@@ -13,7 +13,7 @@ import {
     classifySaxoOrderMetadata,
 } from './saxo-order-metadata.js'
 import {
-    parseSaxoOpenOrderEvidence,
+    parseSaxoOpenOrderEnvelope,
     recoverSaxoIfdocoMetadataFromEvidence,
     type SaxoIfdocoMetadataRecoveryResult,
     type SaxoIfdocoTemporaryFailureReason,
@@ -954,9 +954,12 @@ export class SaxoClient {
         } catch {
             return { kind: 'FAILED', reason: 'PARSE_ERROR' }
         }
-        const openOrder = parseSaxoOpenOrderEvidence(rawOpenOrder)
-        return openOrder
-            ? { kind: 'COMPLETE', openOrder }
+        const parsed = parseSaxoOpenOrderEnvelope(rawOpenOrder, orderId)
+        if (parsed.kind === 'NOT_FOUND') {
+            return { kind: 'FAILED', reason: 'OPEN_ORDER_NOT_FOUND' }
+        }
+        return parsed.kind === 'FOUND'
+            ? { kind: 'COMPLETE', openOrder: parsed.openOrder }
             : { kind: 'FAILED', reason: 'PARSE_ERROR' }
     }
 
