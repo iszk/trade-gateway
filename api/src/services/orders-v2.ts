@@ -1,7 +1,7 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient, setFirestoreDocument, updateFirestoreDocument } from '../firestore.js'
 import { omitUndefinedFields } from '../omit-undefined-fields.js'
-import type { OrderV2 } from '../types/order-v2.js'
+import type { OrderV2, SaxoIfdocoRecoveryState } from '../types/order-v2.js'
 
 const COLLECTION_NAME = 'orders_v2'
 const FILL_EPSILON = 1e-8
@@ -11,6 +11,66 @@ type FirestoreDate = Date | { toDate(): Date }
 const fromFirestoreDate = (value: FirestoreDate): Date =>
     value instanceof Date ? value : value.toDate()
 
+const tryFromFirestoreDate = (value: unknown): Date | undefined => {
+    try {
+        const date = value instanceof Date
+            ? value
+            : typeof value === 'object' && value !== null && 'toDate' in value && typeof value.toDate === 'function'
+                ? value.toDate()
+                : undefined
+        return date instanceof Date && !Number.isNaN(date.getTime()) ? date : undefined
+    } catch {
+        return undefined
+    }
+}
+
+const isNonEmptyString = (value: unknown): value is string => (
+    typeof value === 'string' && value.trim().length > 0
+)
+
+const isSaxoIfdocoRecoveryStatus = (
+    value: unknown,
+): value is SaxoIfdocoRecoveryState['status'] => (
+    value === 'RETRY_PENDING' || value === 'MANUAL_REVIEW' || value === 'COMPLETED'
+)
+
+const isRecoveryAttemptCount = (value: unknown): value is number => (
+    typeof value === 'number' && Number.isInteger(value) && value >= 0
+)
+
+const normalizeSaxoIfdocoRecovery = (
+    recovery: unknown,
+): OrderV2['saxo_ifdoco_recovery'] => {
+    if (typeof recovery !== 'object' || recovery === null || Array.isArray(recovery)) return undefined
+    const recoveryRecord = recovery as Record<string, unknown>
+    const lastAttemptAt = tryFromFirestoreDate(recoveryRecord.last_attempt_at)
+    const resultKind = recoveryRecord.result_kind
+    if (
+        !lastAttemptAt ||
+        !isSaxoIfdocoRecoveryStatus(recoveryRecord.status) ||
+        !isRecoveryAttemptCount(recoveryRecord.attempt_count) ||
+        !isNonEmptyString(resultKind)
+    ) {
+        return undefined
+    }
+    const nextAttemptAt = recoveryRecord.next_attempt_at === undefined
+        ? undefined
+        : tryFromFirestoreDate(recoveryRecord.next_attempt_at)
+    const reason = recoveryRecord.reason === undefined
+        ? undefined
+        : isNonEmptyString(recoveryRecord.reason)
+            ? recoveryRecord.reason.trim()
+            : undefined
+    return {
+        status: recoveryRecord.status,
+        attempt_count: recoveryRecord.attempt_count,
+        last_attempt_at: lastAttemptAt,
+        next_attempt_at: nextAttemptAt,
+        result_kind: resultKind.trim(),
+        reason,
+    }
+}
+
 const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => {
     const normalized = {
         ...data,
@@ -19,6 +79,7 @@ const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => {
         executed_at: data.executed_at
             ? fromFirestoreDate(data.executed_at as FirestoreDate)
             : undefined,
+        saxo_ifdoco_recovery: normalizeSaxoIfdocoRecovery(data.saxo_ifdoco_recovery),
     }
 
     return normalized as OrderV2

@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 
 import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, UpdateOrderV2AtomicallyFn, AddOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
-import type { OrderV2 } from '../types/order-v2.js'
+import type { OrderV2, SaxoIfdocoRecoveryState } from '../types/order-v2.js'
 import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
 import type {
     BulkExecutionPriceFetcherLike,
@@ -12,6 +12,7 @@ import type {
     OrderExecutionSyncResult,
 } from '../types/execution-sync.js'
 import { classifySaxoOrderMetadata } from '../brokers/saxo-order-metadata.js'
+import type { SaxoIfdocoMetadataRecoveryResult } from '../brokers/saxo-ifdoco-metadata-recovery.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -23,9 +24,13 @@ type PositionFetcherLike = {
 }
 
 const EPSILON = 0.00000001
+const SAXO_IFDOCO_RECOVERY_MAX_ATTEMPTS = 5
+const SAXO_IFDOCO_RECOVERY_MAX_ORDERS_PER_RUN = 2
+const SAXO_IFDOCO_RECOVERY_BACKOFF_BASE_MS = 10 * 60 * 1000
 
 export type ExecutionPriceFetcherLike = BulkExecutionPriceFetcherLike & {
     getExecutionPriceForOrderV2(order: OrderV2): Promise<OrderExecutionSyncResult>
+    recoverIfdocoOrderMetadata?(order: OrderV2): Promise<SaxoIfdocoMetadataRecoveryResult>
 }
 
 export type ClosingExecutionFetcherLike = {
@@ -73,6 +78,389 @@ const areSameBrokerOrderMetadata = (
     left: BrokerOrderMetadata | undefined,
     right: BrokerOrderMetadata | undefined,
 ): boolean => isDeepStrictEqual(left, right)
+
+const isSameRecoveryState = (
+    left: SaxoIfdocoRecoveryState | undefined,
+    right: SaxoIfdocoRecoveryState | undefined,
+): boolean => {
+    if (left === undefined || right === undefined) return left === right
+    return left.status === right.status &&
+        left.attempt_count === right.attempt_count &&
+        left.last_attempt_at.getTime() === right.last_attempt_at.getTime() &&
+        (left.next_attempt_at?.getTime() ?? null) === (right.next_attempt_at?.getTime() ?? null) &&
+        left.result_kind === right.result_kind &&
+        left.reason === right.reason
+}
+
+const isCompleteRecoveredIfdocoMetadata = (order: OrderV2, metadata: BrokerOrderMetadata): boolean => {
+    const classification = classifySaxoOrderMetadata({
+        ...order,
+        broker_order_metadata: metadata,
+    })
+    const exitRoles = classification.kind === 'VALID'
+        ? classification.metadata.exits.map(({ expected }) => expected.role)
+        : []
+    return classification.kind === 'VALID' &&
+        classification.metadata.exits.length === 2 &&
+        exitRoles.filter((role) => role === 'STOP_LOSS').length === 1 &&
+        exitRoles.filter((role) => role === 'TAKE_PROFIT').length === 1 &&
+        classification.metadata.exits.every(({ resolved }) => resolved.order_id !== null)
+}
+
+const recoverySortTime = (order: OrderV2): number => (
+    order.saxo_ifdoco_recovery?.next_attempt_at?.getTime()
+    ?? order.saxo_ifdoco_recovery?.last_attempt_at.getTime()
+    ?? order.created_at.getTime()
+)
+
+const recoveryLastAttemptTime = (order: OrderV2): number => (
+    order.saxo_ifdoco_recovery?.last_attempt_at.getTime()
+    ?? order.created_at.getTime()
+)
+
+type SaxoIfdocoRecoverySummary = {
+    candidates: number
+    eligible: number
+    attempted: number
+    recovered: number
+    retries: number
+    manualReviewTransitions: number
+    deferred: number
+    skippedConcurrentUpdates: number
+    reasons: Record<string, number>
+}
+
+const incrementReason = (summary: SaxoIfdocoRecoverySummary, reason: string): void => {
+    summary.reasons[reason] = (summary.reasons[reason] ?? 0) + 1
+}
+
+const getRecoveryAttemptCount = (order: OrderV2): number => (
+    order.saxo_ifdoco_recovery?.attempt_count ?? 0
+)
+
+const buildFailedRecoveryState = (
+    order: OrderV2,
+    result: Exclude<SaxoIfdocoMetadataRecoveryResult, { kind: 'SUCCESS' }>,
+    now: Date,
+): SaxoIfdocoRecoveryState => {
+    const attemptCount = getRecoveryAttemptCount(order) + 1
+    const manualReview = !result.retryable || attemptCount >= SAXO_IFDOCO_RECOVERY_MAX_ATTEMPTS
+    return {
+        status: manualReview ? 'MANUAL_REVIEW' : 'RETRY_PENDING',
+        attempt_count: attemptCount,
+        last_attempt_at: now,
+        ...(!manualReview
+            ? {
+                next_attempt_at: new Date(
+                    now.getTime() +
+                    SAXO_IFDOCO_RECOVERY_BACKOFF_BASE_MS * (2 ** (attemptCount - 1)),
+                ),
+            }
+            : {}),
+        result_kind: result.kind,
+        reason: result.reason,
+    }
+}
+
+const markUnrecoverableIfdocoForManualReview = async (
+    order: OrderV2,
+    reason: string,
+    now: Date,
+    updateOrderV2Atomically: UpdateOrderV2AtomicallyFn,
+): Promise<boolean> => updateOrderV2Atomically(order.id, (current) => {
+    if (
+        current.status !== 'PENDING' ||
+        current.broker !== 'saxo' ||
+        current.order_type !== 'IFDOCO' ||
+        current.saxo_ifdoco_recovery?.status === 'MANUAL_REVIEW'
+    ) {
+        return null
+    }
+    const classification = classifySaxoOrderMetadata(current)
+    if (classification.kind !== 'UNRECOVERABLE') return null
+    return {
+        saxo_ifdoco_recovery: {
+            status: 'MANUAL_REVIEW',
+            attempt_count: getRecoveryAttemptCount(current),
+            last_attempt_at: now,
+            result_kind: 'UNRECOVERABLE',
+            reason,
+        },
+    }
+})
+
+const recoverSaxoIfdocoMetadata = async (ctx: {
+    logger: Logger
+    pendingOrders: OrderV2[]
+    fetcher?: ExecutionPriceFetcherLike
+    updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
+    now: Date
+}): Promise<{ readyOrders: OrderV2[], synchronizedOrderIds: Set<string> }> => {
+    const summary: SaxoIfdocoRecoverySummary = {
+        candidates: 0,
+        eligible: 0,
+        attempted: 0,
+        recovered: 0,
+        retries: 0,
+        manualReviewTransitions: 0,
+        deferred: 0,
+        skippedConcurrentUpdates: 0,
+        reasons: {},
+    }
+    const readyOrders: OrderV2[] = []
+    const synchronizedOrderIds = new Set<string>()
+    const ifdocoOrders = ctx.pendingOrders.filter((order) => (
+        order.broker === 'saxo' && order.order_type === 'IFDOCO'
+    ))
+    summary.candidates = ifdocoOrders.length
+
+    if (!ctx.updateOrderV2Atomically) {
+        if (summary.candidates > 0) {
+            ctx.logger.warn(
+                {
+                    event: 'cron:saxo_ifdoco_metadata_recovery_unavailable',
+                    count: summary.candidates,
+                },
+                'Saxo IFDOCO metadata recovery requires an atomic order updater',
+            )
+        }
+        return { readyOrders, synchronizedOrderIds }
+    }
+
+    const eligible: OrderV2[] = []
+    for (const order of ifdocoOrders) {
+        const state = order.saxo_ifdoco_recovery
+        if (state?.status === 'MANUAL_REVIEW') continue
+
+        const classification = classifySaxoOrderMetadata(order)
+        if (classification.kind === 'VALID') {
+            readyOrders.push(order)
+            continue
+        }
+        if (classification.kind === 'UNRECOVERABLE') {
+            const reason = `CLASSIFICATION_${classification.reason}`
+            const transitioned = await markUnrecoverableIfdocoForManualReview(
+                order,
+                reason,
+                ctx.now,
+                ctx.updateOrderV2Atomically,
+            )
+            if (transitioned) {
+                summary.manualReviewTransitions += 1
+                incrementReason(summary, reason)
+            } else {
+                summary.skippedConcurrentUpdates += 1
+            }
+            continue
+        }
+        if (state?.status === 'COMPLETED') {
+            const transitioned = await ctx.updateOrderV2Atomically(order.id, (current) => {
+                if (
+                    current.status !== 'PENDING' ||
+                    !isSameRecoveryState(current.saxo_ifdoco_recovery, state) ||
+                    classifySaxoOrderMetadata(current).kind !== 'RECOVERABLE_IFDOCO'
+                ) {
+                    return null
+                }
+                return {
+                    saxo_ifdoco_recovery: {
+                        status: 'MANUAL_REVIEW',
+                        attempt_count: getRecoveryAttemptCount(current),
+                        last_attempt_at: ctx.now,
+                        result_kind: 'STATE_CONFLICT',
+                        reason: 'COMPLETED_WITHOUT_VALID_METADATA',
+                    },
+                }
+            })
+            if (transitioned) {
+                summary.manualReviewTransitions += 1
+                incrementReason(summary, 'COMPLETED_WITHOUT_VALID_METADATA')
+            } else {
+                summary.skippedConcurrentUpdates += 1
+            }
+            continue
+        }
+        if (state?.next_attempt_at && state.next_attempt_at.getTime() > ctx.now.getTime()) {
+            summary.deferred += 1
+            continue
+        }
+        eligible.push(order)
+    }
+
+    eligible.sort((left, right) => (
+        recoverySortTime(left) - recoverySortTime(right) ||
+        recoveryLastAttemptTime(left) - recoveryLastAttemptTime(right) ||
+        left.created_at.getTime() - right.created_at.getTime() ||
+        left.id.localeCompare(right.id)
+    ))
+    summary.eligible = eligible.length
+    summary.deferred += Math.max(0, eligible.length - SAXO_IFDOCO_RECOVERY_MAX_ORDERS_PER_RUN)
+
+    const attemptedOrderCount = Math.min(eligible.length, SAXO_IFDOCO_RECOVERY_MAX_ORDERS_PER_RUN)
+    if (!ctx.fetcher?.recoverIfdocoOrderMetadata) {
+        if (attemptedOrderCount > 0) {
+            ctx.logger.warn(
+                {
+                    event: 'cron:saxo_ifdoco_metadata_recovery_unavailable',
+                    count: attemptedOrderCount,
+                    reason: 'RECOVERY_FETCHER_MISSING',
+                },
+                'Saxo IFDOCO metadata recovery fetcher is unavailable; skipping this run',
+            )
+        }
+        return { readyOrders, synchronizedOrderIds }
+    }
+
+    for (const order of eligible.slice(0, SAXO_IFDOCO_RECOVERY_MAX_ORDERS_PER_RUN)) {
+        summary.attempted += 1
+        let result: SaxoIfdocoMetadataRecoveryResult
+        try {
+            result = await ctx.fetcher.recoverIfdocoOrderMetadata(order)
+        } catch {
+            result = {
+                kind: 'TEMPORARY_FAILURE',
+                retryable: true,
+                reason: 'HTTP_ERROR',
+            }
+        }
+
+        let recoveredExecutionResult: OrderExecutionSyncResult | null = null
+        if (
+            result.kind === 'SUCCESS' &&
+            isCompleteRecoveredIfdocoMetadata(order, result.metadata)
+        ) {
+            try {
+                recoveredExecutionResult = ctx.fetcher
+                    ? await ctx.fetcher.getExecutionPriceForOrderV2({
+                        ...order,
+                        broker_order_metadata: result.metadata,
+                    })
+                    : { execution: null }
+            } catch {
+                recoveredExecutionResult = { execution: null }
+            }
+        }
+
+        const expectedState = order.saxo_ifdoco_recovery
+        let latestReadyOrder: OrderV2 | null = null
+        let transitionedToManualReview = false
+        let scheduledRetry = false
+        let savedRecoveredMetadata = false
+        const updated = await ctx.updateOrderV2Atomically(order.id, (current) => {
+            latestReadyOrder = null
+            transitionedToManualReview = false
+            scheduledRetry = false
+            savedRecoveredMetadata = false
+
+            if (
+                current.status !== 'PENDING' ||
+                current.broker !== 'saxo' ||
+                current.order_type !== 'IFDOCO' ||
+                !isSameRecoveryState(current.saxo_ifdoco_recovery, expectedState)
+            ) {
+                return null
+            }
+
+            const currentClassification = classifySaxoOrderMetadata(current)
+            if (currentClassification.kind === 'VALID') {
+                latestReadyOrder = current
+                return null
+            }
+            if (currentClassification.kind !== 'RECOVERABLE_IFDOCO') return null
+
+            if (result.kind === 'SUCCESS') {
+                if (!isCompleteRecoveredIfdocoMetadata(current, result.metadata)) {
+                    transitionedToManualReview = true
+                    return {
+                        saxo_ifdoco_recovery: {
+                            status: 'MANUAL_REVIEW',
+                            attempt_count: getRecoveryAttemptCount(current) + 1,
+                            last_attempt_at: ctx.now,
+                            result_kind: 'INVALID_SUCCESS',
+                            reason: 'INCOMPLETE_SUCCESS_METADATA',
+                        },
+                    }
+                }
+                const recoveryState: SaxoIfdocoRecoveryState = {
+                    status: 'COMPLETED',
+                    attempt_count: getRecoveryAttemptCount(current) + 1,
+                    last_attempt_at: ctx.now,
+                    result_kind: 'SUCCESS',
+                }
+                const confirmedResult = recoveredExecutionResult ?? { execution: null }
+                const guardedResult: OrderExecutionSyncResult = (
+                    confirmedResult.execution !== null &&
+                    confirmedResult.execution.size > current.requested_size + EPSILON
+                )
+                    ? {
+                        execution: null,
+                        brokerOrderMetadata: result.metadata,
+                        brokerOrderMetadataPolicy: 'SET_IF_UNSET',
+                    }
+                    : {
+                        ...confirmedResult,
+                        brokerOrderMetadata: result.metadata,
+                        brokerOrderMetadataPolicy: 'SET_IF_UNSET',
+                    }
+                const executionUpdates = buildOrderExecutionSyncUpdates(current, guardedResult, ctx.logger) ?? {}
+                const updates: Partial<OrderV2> = {
+                    ...executionUpdates,
+                    broker_order_metadata: result.metadata,
+                    saxo_ifdoco_recovery: recoveryState,
+                }
+                savedRecoveredMetadata = true
+                latestReadyOrder = { ...current, ...updates } as OrderV2
+                return updates
+            }
+
+            const recoveryState = buildFailedRecoveryState(current, result, ctx.now)
+            transitionedToManualReview = recoveryState.status === 'MANUAL_REVIEW'
+            scheduledRetry = recoveryState.status === 'RETRY_PENDING'
+            return { saxo_ifdoco_recovery: recoveryState }
+        })
+
+        const reason = result.kind === 'SUCCESS' ? 'SUCCESS' : result.reason
+        if (updated && result.kind === 'SUCCESS' && savedRecoveredMetadata) {
+            summary.recovered += 1
+            incrementReason(summary, 'SUCCESS')
+            synchronizedOrderIds.add(order.id)
+        } else if (updated && transitionedToManualReview) {
+            summary.manualReviewTransitions += 1
+            incrementReason(
+                summary,
+                result.kind === 'SUCCESS' ? 'INCOMPLETE_SUCCESS_METADATA' : reason,
+            )
+        } else if (updated && scheduledRetry) {
+            summary.retries += 1
+            incrementReason(summary, reason)
+        } else {
+            if (latestReadyOrder) {
+                readyOrders.push(latestReadyOrder)
+            } else {
+                summary.skippedConcurrentUpdates += 1
+            }
+        }
+    }
+
+    if (
+        summary.attempted > 0 ||
+        summary.manualReviewTransitions > 0 ||
+        summary.deferred > 0 ||
+        summary.skippedConcurrentUpdates > 0
+    ) {
+        const details = {
+            event: 'cron:saxo_ifdoco_metadata_recovery_summary',
+            ...summary,
+        }
+        if (summary.retries > 0 || summary.manualReviewTransitions > 0) {
+            ctx.logger.warn(details, 'Saxo IFDOCO metadata recovery run summarized')
+        } else {
+            ctx.logger.info(details, 'Saxo IFDOCO metadata recovery run summarized')
+        }
+    }
+
+    return { readyOrders, synchronizedOrderIds }
+}
 
 const resolveOrderStatus = (
     currentStatus: OrderV2['status'],
@@ -433,8 +821,31 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
         'syncing pending orders_v2',
     )
 
+    const recovery = await recoverSaxoIfdocoMetadata({
+        logger: ctx.logger,
+        pendingOrders,
+        fetcher: ctx.executionPriceFetchers.saxo,
+        updateOrderV2Atomically: ctx.updateOrderV2Atomically,
+        now: new Date(ctx.nowMs),
+    })
+    const syncableOrders = pendingOrders.filter((order) => (
+        !recovery.synchronizedOrderIds.has(order.id) &&
+        (
+            order.broker !== 'saxo' ||
+            order.order_type !== 'IFDOCO' ||
+            classifySaxoOrderMetadata(order).kind === 'VALID'
+        )
+    ))
+    const syncableOrderIds = new Set(syncableOrders.map(({ id }) => id))
+    for (const order of recovery.readyOrders) {
+        if (!syncableOrderIds.has(order.id)) {
+            syncableOrders.push(order)
+            syncableOrderIds.add(order.id)
+        }
+    }
+
     const ordersByBroker = new Map<string, OrderV2[]>()
-    for (const order of pendingOrders) {
+    for (const order of syncableOrders) {
         const orders = ordersByBroker.get(order.broker) ?? []
         orders.push(order)
         ordersByBroker.set(order.broker, orders)

@@ -194,7 +194,11 @@ metadata が完全に欠落した Saxo IFDOCO は、非空かつ `DRY_RUN` で�
 
 1 recovery graph は entry と2 child の activity を各最大5ページ、paging/retry/open lookup 合計20 HTTP requestに制限する。全 request は既存の audit 共有 concurrency limiter（2）を通し、network/5xx は budget 内で1回 retryする。429 は `Retry-After` または既存 cooldown を設定して同一 recovery 内で再試行しない。途中失敗、parse failure、page/budget limit では取得済みの partial evidence を破棄し、非 SUCCESS result に metadata を含めない。
 
-この recovery API は Firestore write、orders_v2 lifecycle 更新、cron の retry/backoff を行わない。10分 cron からの候補選択・result 適用・永続化は後続の cron 統合で行うため、現時点の通常 entry/exit 同期は metadata 欠落 IFDOCO を自動保存しない。
+recovery API 自体は Firestore write や lifecycle 更新を行わない。10分 cron が `orders_v2.saxo_ifdoco_recovery` を基準に、試行可能時刻が古い順で1 run最大2件を選ぶ。retryable result は最大5回、10分を基準に10、20、40、80分の指数 backoffを永続化する。非 retryable result、5回目の失敗、不完全な SUCCESS metadata は `status=PENDING` のまま `MANUAL_REVIEW` に固定し、以後の broker API 呼び出しを止める。
+
+SUCCESS は entry と2 exit の resolved order ID が全て揃うことを cron 側でも再検証し、その metadata を使って通常 entry 照会を行う。書き込み直前に transaction で最新注文を読み、PENDING、metadata 未設定、recovery state 非更新の場合だけ完全 metadata、`COMPLETED` state、確認済み execution / terminal 差分を原子的に保存する。競合 metadata、終端状態、並行 recovery は上書きしない。途中失敗時も後続 cron で通常同期を再開できる。復旧 state は内部情報として外部注文 API には公開しない。
+
+観測ログは `cron:saxo_ifdoco_metadata_recovery_summary` に run 単位で集約し、候補、試行、復旧、retry、手動確認移行、deferred、並行更新 skip と reason 別件数を記録する。`MANUAL_REVIEW` 移行後は同じ注文の API 呼び出しと個別 warning を反復しない。
 
 ### Hourly range reconciliation
 

@@ -615,6 +615,36 @@ test('GET /api/v2/orders/stats includes pending orders in open_orders', async ()
     )
 })
 
+test('GET /api/v2/orders は Saxo IFDOCO の内部復旧状態を公開しない', async () => {
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        listOrdersV2ByDateRange: async () => [
+            makeOrderV2({
+                id: 'recovered-ifdoco',
+                broker: 'saxo',
+                ticker: 'FxSpot:21',
+                order_type: 'IFDOCO',
+                saxo_ifdoco_recovery: {
+                    status: 'COMPLETED',
+                    attempt_count: 2,
+                    last_attempt_at: new Date('2026-01-01T00:10:00Z'),
+                    result_kind: 'SUCCESS',
+                },
+            }),
+        ],
+    })
+
+    const res = await app.request('/api/v2/orders?from=2026-01-01&to=2026-01-02', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.equal(body.orders.length, 1)
+    assert.equal('saxo_ifdoco_recovery' in body.orders[0], false)
+    assert.equal(JSON.stringify(body).includes('result_kind'), false)
+})
+
 test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
     const { createWebhookEvent } = createWebhookEventStub()

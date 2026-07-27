@@ -37,6 +37,15 @@ const toFirestoreOrder = (order: OrderV2) => ({
     created_at: toTimestamp(order.created_at),
     updated_at: toTimestamp(order.updated_at),
     executed_at: order.executed_at ? toTimestamp(order.executed_at) : undefined,
+    saxo_ifdoco_recovery: order.saxo_ifdoco_recovery
+        ? {
+            ...order.saxo_ifdoco_recovery,
+            last_attempt_at: toTimestamp(order.saxo_ifdoco_recovery.last_attempt_at),
+            next_attempt_at: order.saxo_ifdoco_recovery.next_attempt_at
+                ? toTimestamp(order.saxo_ifdoco_recovery.next_attempt_at)
+                : undefined,
+        }
+        : undefined,
 })
 
 const createDbStub = (orders: OrderV2[]) => {
@@ -96,7 +105,10 @@ const createWriteDbStub = () => {
     }
 }
 
-const createTransactionDbStub = (order: OrderV2 | null) => {
+const createTransactionDbStub = (
+    order: OrderV2 | null,
+    rawOrder: unknown = order ? toFirestoreOrder(order) : undefined,
+) => {
     const state: { updatePayload?: Record<string, unknown>, reads: number } = { reads: 0 }
     const docRef = {}
     const db = {
@@ -106,7 +118,7 @@ const createTransactionDbStub = (order: OrderV2 | null) => {
                 state.reads += 1
                 return {
                     exists: order !== null,
-                    data: () => order ? toFirestoreOrder(order) : undefined,
+                    data: () => rawOrder,
                 }
             },
             update: (_ref: unknown, payload: Record<string, unknown>) => {
@@ -155,6 +167,14 @@ test('createUpdateOrderV2AtomicallyFn: transaction内の最新orderを正規化�
         id: 'atomic-order',
         updated_at: new Date('2026-01-02T00:00:00Z'),
         executed_at: new Date('2026-01-01T01:00:00Z'),
+        saxo_ifdoco_recovery: {
+            status: 'RETRY_PENDING',
+            attempt_count: 1,
+            last_attempt_at: new Date('2026-01-01T02:00:00Z'),
+            next_attempt_at: new Date('2026-01-01T02:10:00Z'),
+            result_kind: 'TEMPORARY_FAILURE',
+            reason: 'RATE_LIMITED',
+        },
     })
     const { db, state } = createTransactionDbStub(current)
     const updateOrderV2Atomically = createUpdateOrderV2AtomicallyFn(db as any)
@@ -163,6 +183,8 @@ test('createUpdateOrderV2AtomicallyFn: transaction内の最新orderを正規化�
         assert.ok(latest.created_at instanceof Date)
         assert.ok(latest.updated_at instanceof Date)
         assert.ok(latest.executed_at instanceof Date)
+        assert.ok(latest.saxo_ifdoco_recovery?.last_attempt_at instanceof Date)
+        assert.ok(latest.saxo_ifdoco_recovery?.next_attempt_at instanceof Date)
         return { status: 'CANCELED', executed_at: undefined }
     })
 
@@ -171,6 +193,54 @@ test('createUpdateOrderV2AtomicallyFn: transaction内の最新orderを正規化�
     assert.equal(state.updatePayload?.status, 'CANCELED')
     assert.equal('executed_at' in (state.updatePayload ?? {}), false)
     assert.ok(state.updatePayload?.updated_at instanceof Date)
+})
+
+test('createUpdateOrderV2AtomicallyFn: 不正な復旧日時は状態全体を未設定として扱う', async () => {
+    const current = makeOrder({ id: 'atomic-malformed-recovery' })
+    const rawOrder = {
+        ...toFirestoreOrder(current),
+        saxo_ifdoco_recovery: {
+            status: 'RETRY_PENDING',
+            attempt_count: 2,
+            last_attempt_at: null,
+            next_attempt_at: { invalid: true },
+            result_kind: 'TEMPORARY_FAILURE',
+            reason: 'HTTP_ERROR',
+        },
+    }
+    const { db } = createTransactionDbStub(current, rawOrder)
+    const updateOrderV2Atomically = createUpdateOrderV2AtomicallyFn(db as any)
+
+    const updated = await updateOrderV2Atomically('atomic-malformed-recovery', (latest) => {
+        assert.equal(latest.saxo_ifdoco_recovery, undefined)
+        return { status: 'CANCELED' }
+    })
+
+    assert.equal(updated, true)
+})
+
+test('createUpdateOrderV2AtomicallyFn: 不正な復旧フィールドは状態全体を未設定として扱う', async () => {
+    const current = makeOrder({ id: 'atomic-malformed-recovery-fields' })
+    const rawOrder = {
+        ...toFirestoreOrder(current),
+        saxo_ifdoco_recovery: {
+            status: 'RETRY_PENDING',
+            attempt_count: '2',
+            last_attempt_at: toTimestamp(new Date('2026-01-01T02:00:00Z')),
+            next_attempt_at: toTimestamp(new Date('2026-01-01T02:10:00Z')),
+            result_kind: 'TEMPORARY_FAILURE',
+            reason: 'HTTP_ERROR',
+        },
+    }
+    const { db } = createTransactionDbStub(current, rawOrder)
+    const updateOrderV2Atomically = createUpdateOrderV2AtomicallyFn(db as any)
+
+    const updated = await updateOrderV2Atomically('atomic-malformed-recovery-fields', (latest) => {
+        assert.equal(latest.saxo_ifdoco_recovery, undefined)
+        return { status: 'CANCELED' }
+    })
+
+    assert.equal(updated, true)
 })
 
 test('createUpdateOrderV2AtomicallyFn: documentなしと空diffではwriteしない', async () => {
@@ -283,6 +353,13 @@ test('createListOrderUpdatesFn: 外部 DTO の null、fill、commission を正�
             execution_costs: undefined,
             exit_sync_status: undefined,
             broker_order_metadata: { broker: 'bitflyer', kind: 'MARKET', product_code: 'FX_BTC_JPY', entry: { acceptance_id: 'secret' } },
+            saxo_ifdoco_recovery: {
+                status: 'MANUAL_REVIEW',
+                attempt_count: 5,
+                last_attempt_at: new Date('2026-02-02T00:00:00Z'),
+                result_kind: 'CONFLICT',
+                reason: 'ENTRY_MISMATCH',
+            },
         } as any),
         makeOrder({
             ...common,
@@ -352,4 +429,6 @@ test('createListOrderUpdatesFn: 外部 DTO の null、fill、commission を正�
     )
     assert.equal(JSON.stringify(result).includes('broker_order_metadata'), false)
     assert.equal(JSON.stringify(result).includes('acceptance_id'), false)
+    assert.equal(JSON.stringify(result).includes('saxo_ifdoco_recovery'), false)
+    assert.equal(JSON.stringify(result).includes('ENTRY_MISMATCH'), false)
 })

@@ -89,7 +89,9 @@ Saxo の単体 `MARKET` は、限定された安全条件で `exits: []` の最�
 
 IFDOCO recovery は open、filled、canceled、片側 exit 約定のいずれでも、terminal child を含む完全な履歴があれば復元できる。一方、entry-only、`exits: []`、1件または3件以上の related order、履歴不足、partial response、矛盾、曖昧な role は成功にしない。結果は `SUCCESS` / `TEMPORARY_FAILURE` / `INSUFFICIENT_HISTORY` / `CONFLICT` / `MANUAL_REVIEW` と retry 可否・reason を持ち、非 SUCCESS result は metadata を持たない。
 
-この recovery API は Firestore や lifecycle status を変更しない。cron の候補選択、retry/backoff、result の保存は後続統合の責務であるため、現時点では metadata 欠落 IFDOCO の通常 entry/exit 同期は no-op のままである。既存 IFDOCO metadata の部分補完にも適用しない。
+recovery API 自体は Firestore や lifecycle status を変更しない。10分 cron が永続 recovery state を基準に、試行可能時刻が古い候補から1 run最大2件を選ぶ。retryable result は最大5回、10、20、40、80分の backoff で再試行し、非 retryable result、5回目、不完全な SUCCESS は PENDING のまま `MANUAL_REVIEW` に固定する。既存 IFDOCO metadata の部分補完には適用しない。
+
+SUCCESS metadata は cron 側でも entry と2 exit の resolved ID を再検証し、その metadata を使った通常 entry 照会結果とともに transaction へ渡す。最新注文が PENDING、metadata 未設定、recovery state 非更新の場合だけ metadata、`COMPLETED` state、確認済み execution / terminal 差分を原子的に保存する。競合 metadata、終端状態、並行更新は保持する。entry が EXECUTED になれば既存の exit 監視フローへ入る。復旧 state は外部 API から除外し、観測は個別 warning ではなく run 単位の復旧・retry・手動確認・reason 集約ログで行う。
 
 ### 5. バリデーション
 
@@ -173,7 +175,7 @@ bitflyer では IFDOCO の exit 注文（STOP / LIMIT）が部分約定する可
 
 ## 注意事項
 
-- Saxo の単体 MARKET で provider order ID などの安全条件を満たす metadata 欠落 entry は、10分同期で最小 metadata を自己修復します。metadata 欠落 IFDOCO は専用 recovery API が完全な broker evidence を検証しますが、cron からの適用・保存はまだ行わないため通常同期では no-op です。別 broker、`DRY_RUN`、provider ID 欠落、malformed / 矛盾 metadata は recovery candidate にしません
+- Saxo の単体 MARKET で provider order ID などの安全条件を満たす metadata 欠落 entry は、10分同期で最小 metadata を自己修復します。metadata 欠落 IFDOCO は専用 recovery API の完全な broker evidence だけを transaction 保存して通常同期へ戻し、有限 retry 上限後は PENDING の手動確認状態にします。別 broker、`DRY_RUN`、provider ID 欠落、malformed / 矛盾 metadata は broker recovery API の候補にしません
 - bitflyer API のレート制限により、大量の IFDOCO 注文を同時に処理する場合は遅延が発生する可能性があります
 - Saxo の related order id が発注レスポンスに含まれない場合、exit 同期は安全側で no-op になります
 - Saxo の部分約定数量は audit activity だけでは確定できないため、正確な fill amount の取得元が確認できたら同期数量の算出を見直す必要があります

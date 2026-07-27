@@ -111,6 +111,11 @@ const brokerNames = ['bitflyer', 'dummy', 'saxo'] as const
 const isBrokerName = (value: string): value is BrokerName =>
     brokerNames.includes(value as BrokerName)
 
+const toPublicOrderV2 = (order: OrderV2): Omit<OrderV2, 'saxo_ifdoco_recovery'> => {
+    const { saxo_ifdoco_recovery: _internalRecovery, ...publicOrder } = order
+    return publicOrder
+}
+
 const extractSourceIp = (headers: Headers): string | null => {
     const xForwardedFor = headers.get('x-forwarded-for')
     if (xForwardedFor) {
@@ -1036,7 +1041,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             const total = filtered.length
             const total_pages = Math.max(1, Math.ceil(total / limit))
             const offset = (page - 1) * limit
-            const orders = filtered.slice(offset, offset + limit)
+            const orders = filtered.slice(offset, offset + limit).map(toPublicOrderV2)
 
             return c.json({
                 orders,
