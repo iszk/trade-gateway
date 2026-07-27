@@ -84,12 +84,14 @@ const makeAtomicState = (orders: any[]) => {
 }
 
 test('executeTenMinutelyTask: 完全復元した Saxo IFDOCO を保存して同一 cron の通常同期へ戻す', async () => {
-    const order = makeLegacySaxoIfdoco('recover-success')
+    const order = makeLegacySaxoIfdoco('recover-success', { broker_order_metadata: null })
     const atomic = makeAtomicState([order])
+    const { logger, logs } = makeLogger()
+    let recoveryCalls = 0
     let executionSyncCalls = 0
     let atomicCalls = 0
-
-    await executeTenMinutelyTask(makeBaseCtx({
+    const ctx = makeBaseCtx({
+        logger,
         getPendingOrdersV2: async () => [order],
         updateOrderV2: async () => {},
         updateOrderV2Atomically: (async (...args: Parameters<typeof atomic.updateOrderV2Atomically>) => {
@@ -98,11 +100,14 @@ test('executeTenMinutelyTask: 完全復元した Saxo IFDOCO を保存して同�
         }) as any,
         executionPriceFetchers: {
             saxo: {
-                recoverIfdocoOrderMetadata: async () => ({
-                    kind: 'SUCCESS',
-                    retryable: false,
-                    metadata: makeRecoveredSaxoIfdocoMetadata(order.id),
-                }),
+                recoverIfdocoOrderMetadata: async () => {
+                    recoveryCalls += 1
+                    return {
+                        kind: 'SUCCESS' as const,
+                        retryable: false as const,
+                        metadata: makeRecoveredSaxoIfdocoMetadata(order.id),
+                    }
+                },
                 getExecutionPriceForOrderV2: async (syncOrder) => {
                     executionSyncCalls += 1
                     assert.equal(syncOrder.broker_order_metadata?.kind, 'saxo_order_v1')
@@ -110,16 +115,21 @@ test('executeTenMinutelyTask: 完全復元した Saxo IFDOCO を保存して同�
                 },
             },
         },
-    }))
+    })
+
+    await executeTenMinutelyTask(ctx)
+    await executeTenMinutelyTask(ctx)
 
     const stored = atomic.state.get(order.id)
-    assert.equal(executionSyncCalls, 1)
-    assert.equal(atomicCalls, 1)
+    assert.equal(recoveryCalls, 1)
+    assert.equal(executionSyncCalls, 2)
+    assert.equal(atomicCalls, 2)
     assert.equal(stored.status, 'EXECUTED')
     assert.equal(stored.executed_price, 101)
     assert.equal(stored.broker_order_metadata.exits.length, 2)
     assert.equal(stored.saxo_ifdoco_recovery.status, 'COMPLETED')
     assert.equal(stored.saxo_ifdoco_recovery.attempt_count, 1)
+    assert.equal(logs.filter((log) => log.event === 'cron:saxo_ifdoco_metadata_recovery_summary').length, 1)
 })
 
 test('executeTenMinutelyTask: 復旧 fetcher 不在時は retry 状態を消費せず当該 run をスキップする', async () => {
@@ -339,8 +349,10 @@ test('executeTenMinutelyTask: 重複した exit role の SUCCESS metadata は保
 })
 
 test('executeTenMinutelyTask: 復旧中の metadata 競合と終端更新を上書きしない', async () => {
-    for (const concurrentUpdate of ['metadata', 'terminal'] as const) {
-        const order = makeLegacySaxoIfdoco(`concurrent-${concurrentUpdate}`)
+    for (const concurrentUpdate of ['metadata', 'different-kind', 'terminal'] as const) {
+        const order = makeLegacySaxoIfdoco(`concurrent-${concurrentUpdate}`, {
+            broker_order_metadata: null,
+        })
         const recovered = makeRecoveredSaxoIfdocoMetadata(order.id)
         const concurrentMetadata = {
             ...makeRecoveredSaxoIfdocoMetadata(order.id),
@@ -358,6 +370,12 @@ test('executeTenMinutelyTask: 復旧中の metadata 競合と終端更新を上�
             atomicCall += 1
             if (atomicCall === 1) {
                 if (concurrentUpdate === 'metadata') order.broker_order_metadata = concurrentMetadata
+                if (concurrentUpdate === 'different-kind') {
+                    order.broker_order_metadata = {
+                        kind: 'bitflyer_parent_order_v1',
+                        parent_order_acceptance_id: 'JRF-concurrent',
+                    }
+                }
                 if (concurrentUpdate === 'terminal') order.status = 'CANCELED'
             }
             const updates = mutate(order)
@@ -383,15 +401,23 @@ test('executeTenMinutelyTask: 復旧中の metadata 競合と終端更新を上�
             },
         }))
 
-        if (concurrentUpdate === 'metadata') {
-            assert.deepEqual(order.broker_order_metadata, concurrentMetadata)
+        if (concurrentUpdate === 'metadata' || concurrentUpdate === 'different-kind') {
+            assert.deepEqual(
+                order.broker_order_metadata,
+                concurrentUpdate === 'metadata'
+                    ? concurrentMetadata
+                    : {
+                        kind: 'bitflyer_parent_order_v1',
+                        parent_order_acceptance_id: 'JRF-concurrent',
+                    },
+            )
             assert.equal(
                 logs.find((log) => log.event === 'cron:saxo_ifdoco_metadata_recovery_summary')?.skippedConcurrentUpdates,
-                0,
+                concurrentUpdate === 'metadata' ? 0 : 1,
             )
         } else {
             assert.equal(order.status, 'CANCELED')
-            assert.equal(order.broker_order_metadata, undefined)
+            assert.equal(order.broker_order_metadata, null)
             assert.equal(
                 logs.find((log) => log.event === 'cron:saxo_ifdoco_metadata_recovery_summary')?.skippedConcurrentUpdates,
                 1,
@@ -971,8 +997,8 @@ test('applyOrderExecutionSyncResult: stale な PENDING 引数を使っても tra
     assert.equal(atomicUpdates.length, 1)
 })
 
-test('applyOrderExecutionSyncResult: Saxo legacy metadata-only result は PENDING のまま atomic 保存する', async () => {
-    const current = makeApplyOrder()
+test('applyOrderExecutionSyncResult: null の Saxo legacy metadata-only result は PENDING のまま atomic 保存する', async () => {
+    const current = makeApplyOrder({ broker_order_metadata: null })
     const updates: any[] = []
     const metadata: any = {
         kind: 'saxo_order_v1',
@@ -1050,8 +1076,56 @@ test('executeTenMinutelyTask: metadata recovery の no-op は recovery attempted
     assert.equal(recoveryLog?.message, 'orders_v2 Saxo legacy metadata recovery attempted without confirmed execution')
 })
 
+test('executeTenMinutelyTask: null MARKET の metadata recovery は保存後の cron で反復しない', async () => {
+    const { logger, logs } = makeLogger()
+    const metadata: any = {
+        kind: 'saxo_order_v1',
+        order_id: 'ORD-null-market',
+        entry: {
+            expected: { side: 'BUY', order_type: 'Market', size: 1 },
+            resolved: { order_id: 'ORD-null-market' },
+        },
+        exits: [],
+    }
+    const order = makeApplyOrder({
+        id: 'null-market',
+        provider_order_ids: ['ORD-null-market'],
+        broker_order_metadata: null,
+    })
+    const atomic = makeAtomicState([order])
+    let recoveryResults = 0
+    const ctx = makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async () => {},
+        updateOrderV2Atomically: atomic.updateOrderV2Atomically as any,
+        executionPriceFetchers: {
+            saxo: {
+                getExecutionPriceForOrderV2: async (current) => {
+                    if (current.broker_order_metadata === null) {
+                        recoveryResults += 1
+                        return {
+                            execution: null,
+                            brokerOrderMetadata: metadata,
+                            brokerOrderMetadataPolicy: 'SET_IF_UNSET' as const,
+                        }
+                    }
+                    return { execution: null, brokerOrderMetadata: metadata }
+                },
+            },
+        },
+    })
+
+    await executeTenMinutelyTask(ctx)
+    await executeTenMinutelyTask(ctx)
+
+    assert.equal(recoveryResults, 1)
+    assert.deepEqual(order.broker_order_metadata, metadata)
+    assert.equal(logs.filter((log) => log.event === 'cron:orders_v2_metadata_recovered').length, 1)
+})
+
 test('applyOrderExecutionSyncResult: 合成 metadata と confirmed fill を同一 atomic update で適用する', async () => {
-    const current = makeApplyOrder()
+    const current = makeApplyOrder({ broker_order_metadata: null })
     const metadata: any = {
         kind: 'saxo_order_v1',
         order_id: 'ORD-apply-order',
@@ -1082,9 +1156,10 @@ test('applyOrderExecutionSyncResult: 合成 metadata と confirmed fill を同�
     assert.deepEqual(current.broker_order_metadata, metadata)
 })
 
-test('applyOrderExecutionSyncResult: 競合 metadata が先行保存済みなら execution/status も no-op にする', async () => {
-    const current = makeApplyOrder({
-        broker_order_metadata: {
+for (const [name, concurrentMetadata] of [
+    [
+        '異なるSaxo metadata',
+        {
             kind: 'saxo_order_v1',
             order_id: 'ORD-other',
             entry: {
@@ -1093,7 +1168,49 @@ test('applyOrderExecutionSyncResult: 競合 metadata が先行保存済みなら
             },
             exits: [],
         },
+    ],
+    [
+        '異なるkind',
+        {
+            kind: 'bitflyer_parent_order_v1',
+            parent_order_acceptance_id: 'JRF-other',
+        },
+    ],
+] as const) {
+    test(`applyOrderExecutionSyncResult: ${name} が先行保存済みなら execution/status も no-op にする`, async () => {
+        const current = makeApplyOrder({ broker_order_metadata: concurrentMetadata })
+        const incomingMetadata: any = {
+            kind: 'saxo_order_v1',
+            order_id: 'ORD-apply-order',
+            entry: {
+                expected: { side: 'BUY', order_type: 'Market', size: 1 },
+                resolved: { order_id: 'ORD-apply-order' },
+            },
+            exits: [],
+        }
+        const warnings: unknown[] = []
+
+        const outcome = await applyOrderExecutionSyncResult(
+            makeApplyOrder(),
+            {
+                execution: { price: 101, size: 1 },
+                brokerOrderMetadata: incomingMetadata,
+                brokerOrderMetadataPolicy: 'SET_IF_UNSET',
+            },
+            async (_id, mutate) => mutate(current) !== null,
+            { warn: (obj) => warnings.push(obj), info: () => {} },
+        )
+
+        assert.equal(outcome.updated, false)
+        assert.equal(outcome.noOpReason, 'METADATA_CONFLICT')
+        assert.equal(current.status, 'PENDING')
+        assert.equal(current.executed_size, 0)
+        assert.strictEqual(current.broker_order_metadata, concurrentMetadata)
+        assert.equal(warnings.length, 1)
     })
+}
+
+test('applyOrderExecutionSyncResult: 同一 metadata が先行保存済みなら lifecycle の単調更新を継続する', async () => {
     const incomingMetadata: any = {
         kind: 'saxo_order_v1',
         order_id: 'ORD-apply-order',
@@ -1103,7 +1220,7 @@ test('applyOrderExecutionSyncResult: 競合 metadata が先行保存済みなら
         },
         exits: [],
     }
-    const warnings: unknown[] = []
+    const current = makeApplyOrder({ broker_order_metadata: incomingMetadata })
 
     const outcome = await applyOrderExecutionSyncResult(
         makeApplyOrder(),
@@ -1112,15 +1229,17 @@ test('applyOrderExecutionSyncResult: 競合 metadata が先行保存済みなら
             brokerOrderMetadata: incomingMetadata,
             brokerOrderMetadataPolicy: 'SET_IF_UNSET',
         },
-        async (_id, mutate) => mutate(current) !== null,
-        { warn: (obj) => warnings.push(obj), info: () => {} },
+        async (_id, mutate) => {
+            const updates = mutate(current)
+            if (updates) Object.assign(current, updates)
+            return updates !== null
+        },
     )
 
-    assert.equal(outcome.updated, false)
-    assert.equal(outcome.noOpReason, 'METADATA_CONFLICT')
-    assert.equal(current.status, 'PENDING')
-    assert.equal(current.executed_size, 0)
-    assert.equal(warnings.length, 1)
+    assert.equal(outcome.updated, true)
+    assert.equal(current.status, 'EXECUTED')
+    assert.equal(current.executed_size, 1)
+    assert.strictEqual(current.broker_order_metadata, incomingMetadata)
 })
 
 test('applyOrderExecutionSyncResult: 同値snapshotは未設定fieldだけ補完し、既存値を訂正しない', async () => {
