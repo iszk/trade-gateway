@@ -108,6 +108,11 @@ const recoverySortTime = (order: OrderV2): number => (
     ?? order.created_at.getTime()
 )
 
+const recoveryLastAttemptTime = (order: OrderV2): number => (
+    order.saxo_ifdoco_recovery?.last_attempt_at.getTime()
+    ?? order.created_at.getTime()
+)
+
 type SaxoIfdocoRecoverySummary = {
     candidates: number
     eligible: number
@@ -279,6 +284,7 @@ const recoverSaxoIfdocoMetadata = async (ctx: {
 
     eligible.sort((left, right) => (
         recoverySortTime(left) - recoverySortTime(right) ||
+        recoveryLastAttemptTime(left) - recoveryLastAttemptTime(right) ||
         left.created_at.getTime() - right.created_at.getTime() ||
         left.id.localeCompare(right.id)
     ))

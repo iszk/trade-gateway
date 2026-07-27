@@ -231,6 +231,16 @@ test('executeTenMinutelyTask: 復旧対象を永続時刻順に公平選択し r
                 reason: 'EXIT_HISTORY_MISSING',
             },
         }),
+        makeLegacySaxoIfdoco('fair-same-next-older-last', {
+            saxo_ifdoco_recovery: {
+                status: 'RETRY_PENDING',
+                attempt_count: 1,
+                last_attempt_at: new Date('2026-01-01T00:15:00Z'),
+                next_attempt_at: new Date('2026-01-01T01:00:00Z'),
+                result_kind: 'INSUFFICIENT_HISTORY',
+                reason: 'EXIT_HISTORY_MISSING',
+            },
+        }),
     ]
     const atomic = makeAtomicState(orders)
     const attemptedIds: string[] = []
@@ -256,11 +266,12 @@ test('executeTenMinutelyTask: 復旧対象を永続時刻順に公平選択し r
         },
     }))
 
-    assert.deepEqual(attemptedIds, ['fair-first', 'fair-second'])
+    assert.deepEqual(attemptedIds, ['fair-first', 'fair-same-next-older-last'])
     assert.equal(orders[0]?.saxo_ifdoco_recovery.attempt_count, 1)
+    assert.equal(orders.find((order) => order.id === 'fair-second')?.saxo_ifdoco_recovery.attempt_count, 1)
     const summary = logs.find((log) => log.event === 'cron:saxo_ifdoco_metadata_recovery_summary')
-    assert.equal(summary?.eligible, 3)
-    assert.equal(summary?.deferred, 1)
+    assert.equal(summary?.eligible, 4)
+    assert.equal(summary?.deferred, 2)
 })
 
 test('executeTenMinutelyTask: 不完全な SUCCESS metadata は保存せず手動確認へ移す', async () => {
