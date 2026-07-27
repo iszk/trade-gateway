@@ -71,6 +71,28 @@ export const parseSaxoOpenOrderEvidence = (value: unknown): SaxoOpenOrderEvidenc
     return value as SaxoOpenOrderEvidence
 }
 
+export type SaxoOpenOrderEnvelopeParseResult =
+    | { kind: 'FOUND', openOrder: SaxoOpenOrderEvidence }
+    | { kind: 'NOT_FOUND' }
+    | { kind: 'INVALID' }
+
+/**
+ * single open-order endpoint の feed envelope を検証する。
+ * 複数件や要求 ID 以外の応答は、曖昧な証拠として採用しない。
+ */
+export const parseSaxoOpenOrderEnvelope = (
+    value: unknown,
+    expectedOrderId: string,
+): SaxoOpenOrderEnvelopeParseResult => {
+    if (!isRecord(value) || !Array.isArray(value.Data)) return { kind: 'INVALID' }
+    if (value.Data.length === 0) return { kind: 'NOT_FOUND' }
+    if (value.Data.length !== 1) return { kind: 'INVALID' }
+
+    const openOrder = parseSaxoOpenOrderEvidence(value.Data[0])
+    if (!openOrder || openOrder.OrderId !== expectedOrderId) return { kind: 'INVALID' }
+    return { kind: 'FOUND', openOrder }
+}
+
 export type SaxoIfdocoTemporaryFailureReason =
     | 'RATE_LIMITED'
     | 'AUTH_UNAVAILABLE'

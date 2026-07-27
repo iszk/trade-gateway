@@ -85,13 +85,13 @@ exit 同期では、`cs/v1/audit/orderactivities` を時間範囲または poll 
 片側の related order だけが約定している場合は、その約定だけを exit レコードへ反映する。もう片側が未約定またはキャンセル済みで audit activity がない場合は無視する。Saxo の発注レスポンスで related order id が返らず `resolved.order_id === null` の場合、誤同期を避けるため exit 同期は no-op になる。
 `broker_order_metadata.kind !== 'saxo_order_v1'` の場合も warn ログを出して no-op にし、entry order id だけを使った旧探索へはフォールバックしない。
 
-Saxo の単体 `MARKET` は、限定された安全条件で `exits: []` の最小 metadata を10分 cronが自己修復する。metadata 欠落 IFDOCO は同じ方法で補完せず、専用の `recoverIfdocoOrderMetadata` が broker evidence を検証する。entry の OrderActivities `RelatedOrders` が一意な2 child IDを示し、各 child history と利用可能な open order の `RelatedOpenOrders` から、逆 side、同一 size/instrument、`StopIfTraded` / `Limit`、price、related graph がすべて一致する場合だけ、全 exit ID が非 null の完全な `saxo_order_v1` を返す。
+Saxo の単体 `MARKET` は、トップレベル metadata が field 欠落または `null` であるなど限定された安全条件で、`exits: []` の最小 metadata を10分 cronが自己修復する。metadata 未設定 IFDOCO は同じ方法で補完せず、専用の `recoverIfdocoOrderMetadata` が broker evidence を検証する。entry の OrderActivities `RelatedOrders` が一意な2 child IDを示し、各 child history と利用可能な open order の `RelatedOpenOrders` から、逆 side、同一 size/instrument、`StopIfTraded` / `Limit`、price、related graph がすべて一致する場合だけ、全 exit ID が非 null の完全な `saxo_order_v1` を返す。open-order response は公式の `{ Data: OrderResponse[] }` envelope を検証し、厳密な singleton かつ要求 `OrderId` 一致の場合だけ採用する。空・複数・対象不一致・不正 payload から metadata を保存しない。
 
 IFDOCO recovery は open、filled、canceled、片側 exit 約定のいずれでも、terminal child を含む完全な履歴があれば復元できる。一方、entry-only、`exits: []`、1件または3件以上の related order、履歴不足、partial response、矛盾、曖昧な role は成功にしない。結果は `SUCCESS` / `TEMPORARY_FAILURE` / `INSUFFICIENT_HISTORY` / `CONFLICT` / `MANUAL_REVIEW` と retry 可否・reason を持ち、非 SUCCESS result は metadata を持たない。
 
 recovery API 自体は Firestore や lifecycle status を変更しない。10分 cron が永続 recovery state を基準に、試行可能時刻が古い候補から1 run最大2件を選ぶ。retryable result は最大5回、10、20、40、80分の backoff で再試行し、非 retryable result、5回目、不完全な SUCCESS は PENDING のまま `MANUAL_REVIEW` に固定する。既存 IFDOCO metadata の部分補完には適用しない。
 
-SUCCESS metadata は cron 側でも entry と2 exit の resolved ID を再検証し、その metadata を使った通常 entry 照会結果とともに transaction へ渡す。最新注文が PENDING、metadata 未設定、recovery state 非更新の場合だけ metadata、`COMPLETED` state、確認済み execution / terminal 差分を原子的に保存する。競合 metadata、終端状態、並行更新は保持する。entry が EXECUTED になれば既存の exit 監視フローへ入る。復旧 state は外部 API から除外し、観測は個別 warning ではなく run 単位の復旧・retry・手動確認・reason 集約ログで行う。
+SUCCESS metadata は cron 側でも entry と2 exit の resolved ID を再検証し、その metadata を使った通常 entry 照会結果とともに transaction へ渡す。最新注文が PENDING、トップレベル metadata が field 欠落または `null`、recovery state 非更新の場合だけ metadata、`COMPLETED` state、確認済み execution / terminal 差分を原子的に保存する。競合 metadata、異なる kind、終端状態、並行更新は保持する。保存後は通常同期へ戻るため、専用 recovery API と同一 warning/state transition を次回 cron で反復しない。entry が EXECUTED になれば既存の exit 監視フローへ入る。復旧 state は外部 API から除外し、観測は個別 warning ではなく run 単位の復旧・retry・手動確認・reason 集約ログで行う。
 
 ### 5. バリデーション
 

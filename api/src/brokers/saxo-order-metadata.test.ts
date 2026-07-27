@@ -38,6 +38,16 @@ test('Saxo metadata classifier: metadata 欠落の単体 MARKET は最小 metada
     assert.deepEqual(result.metadata.exits, [])
 })
 
+test('Saxo metadata classifier: null metadata の単体 MARKET は未設定として最小 metadata を合成する', () => {
+    assert.deepEqual(
+        classifySaxoOrderMetadata(makeOrder({ broker_order_metadata: null })),
+        {
+            kind: 'RECOVERABLE_MARKET',
+            metadata: buildSaxoLegacyMarketMetadata({ side: 'BUY', requested_size: 1 }, 'ORD-1'),
+        },
+    )
+})
+
 test('Saxo metadata classifier: provider ID は trim して metadata に保存する', () => {
     const result = classifySaxoOrderMetadata(makeOrder({ provider_order_ids: [' ORD-1 '] }))
 
@@ -90,6 +100,13 @@ test('Saxo metadata classifier: metadata 欠落 IFDOCO は正規化済み recove
             uic: 4912,
         },
     })
+})
+
+test('Saxo metadata classifier: null metadata の IFDOCO は未設定として recovery candidate にする', () => {
+    assert.equal(classifySaxoOrderMetadata(makeOrder({
+        order_type: 'IFDOCO',
+        broker_order_metadata: null,
+    })).kind, 'RECOVERABLE_IFDOCO')
 })
 
 test('Saxo metadata classifier: IFDOCO の空 exits metadata は完全な metadata とみなさない', () => {

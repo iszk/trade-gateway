@@ -79,6 +79,10 @@ const areSameBrokerOrderMetadata = (
     right: BrokerOrderMetadata | undefined,
 ): boolean => isDeepStrictEqual(left, right)
 
+const isBrokerOrderMetadataUnset = (
+    value: BrokerOrderMetadata | null | undefined,
+): value is null | undefined => value === undefined || value === null
+
 const isSameRecoveryState = (
     left: SaxoIfdocoRecoveryState | undefined,
     right: SaxoIfdocoRecoveryState | undefined,
@@ -518,7 +522,7 @@ const buildOrderExecutionSyncUpdates = (
         const incomingMetadata = result.brokerOrderMetadata
         if (incomingMetadata === undefined) return null
         if (
-            current.broker_order_metadata !== undefined &&
+            !isBrokerOrderMetadataUnset(current.broker_order_metadata) &&
             !areSameBrokerOrderMetadata(current.broker_order_metadata, incomingMetadata)
         ) {
             logger?.warn(
@@ -595,7 +599,7 @@ export const applyOrderExecutionSyncResult = async (
             (order.executed_at !== undefined && info.executed_at !== undefined && !areSameDate(order.executed_at, info.executed_at)) ||
             (order.execution_costs?.commission !== undefined && info.commission !== undefined &&
                 !areSameNumber(order.execution_costs.commission, info.commission)) ||
-            (order.broker_order_metadata !== undefined && result.brokerOrderMetadata !== undefined &&
+            (!isBrokerOrderMetadataUnset(order.broker_order_metadata) && result.brokerOrderMetadata !== undefined &&
                 !areSameBrokerOrderMetadata(order.broker_order_metadata, result.brokerOrderMetadata)))
     ) {
         logger?.warn(
@@ -614,7 +618,7 @@ export const applyOrderExecutionSyncResult = async (
         order.id,
         (current) => {
             metadataConflict = result.brokerOrderMetadataPolicy === 'SET_IF_UNSET' &&
-                current.broker_order_metadata !== undefined &&
+                !isBrokerOrderMetadataUnset(current.broker_order_metadata) &&
                 result.brokerOrderMetadata !== undefined &&
                 !areSameBrokerOrderMetadata(current.broker_order_metadata, result.brokerOrderMetadata)
             transactionUpdates = buildOrderExecutionSyncUpdates(current, result, logger)
