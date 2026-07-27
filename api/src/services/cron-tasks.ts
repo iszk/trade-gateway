@@ -79,7 +79,9 @@ const areSameBrokerOrderMetadata = (
     right: BrokerOrderMetadata | undefined,
 ): boolean => isDeepStrictEqual(left, right)
 
-const isBrokerOrderMetadataUnset = (value: unknown): boolean => value === undefined || value === null
+const isBrokerOrderMetadataUnset = (
+    value: BrokerOrderMetadata | null | undefined,
+): value is null | undefined => value === undefined || value === null
 
 const isSameRecoveryState = (
     left: SaxoIfdocoRecoveryState | undefined,
