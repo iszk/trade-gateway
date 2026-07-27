@@ -347,6 +347,11 @@ const recoverSaxoIfdocoMetadata = async (ctx: {
         let scheduledRetry = false
         let savedRecoveredMetadata = false
         const updated = await ctx.updateOrderV2Atomically(order.id, (current) => {
+            latestReadyOrder = null
+            transitionedToManualReview = false
+            scheduledRetry = false
+            savedRecoveredMetadata = false
+
             if (
                 current.status !== 'PENDING' ||
                 current.broker !== 'saxo' ||

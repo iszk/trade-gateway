@@ -401,6 +401,56 @@ test('executeTenMinutelyTask: 復旧中の metadata 競合と終端更新を上�
     }
 })
 
+test('executeTenMinutelyTask: transaction retry は前回 callback の復旧結果を引き継がない', async () => {
+    const order = makeLegacySaxoIfdoco('transaction-retry-state')
+    const recovered = makeRecoveredSaxoIfdocoMetadata(order.id)
+    let executionSyncCalls = 0
+    let transactionCalls = 0
+    let mutateCalls = 0
+    const updateOrderV2Atomically = async (
+        _id: string,
+        mutate: (current: any) => Record<string, unknown> | null,
+    ) => {
+        transactionCalls += 1
+        const runMutate = (current: any) => {
+            mutateCalls += 1
+            return mutate(current)
+        }
+        if (transactionCalls === 1) {
+            const firstUpdates = runMutate({ ...order })
+            assert.ok(firstUpdates)
+            const retriedCurrent = { ...order, status: 'CANCELED' }
+            assert.equal(runMutate(retriedCurrent), null)
+            return false
+        }
+        return false
+    }
+
+    await executeTenMinutelyTask(makeBaseCtx({
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async () => {},
+        updateOrderV2Atomically: updateOrderV2Atomically as any,
+        executionPriceFetchers: {
+            saxo: {
+                recoverIfdocoOrderMetadata: async () => ({
+                    kind: 'SUCCESS',
+                    retryable: false,
+                    metadata: recovered,
+                }),
+                getExecutionPriceForOrderV2: async () => {
+                    executionSyncCalls += 1
+                    return { execution: { price: 101, size: 1 } }
+                },
+            },
+        },
+    }))
+
+    assert.equal(transactionCalls, 1)
+    assert.equal(mutateCalls, 2)
+    assert.equal(executionSyncCalls, 1)
+    assert.equal(order.broker_order_metadata, undefined)
+})
+
 test('executeHourlyTask: Saxo reconciliation の fresh 48時間 window と結果適用を行う', async () => {
     const startedAt = Date.now()
     const order: any = {
