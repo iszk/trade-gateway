@@ -219,6 +219,30 @@ test('createUpdateOrderV2AtomicallyFn: 不正な復旧日時は状態全体を�
     assert.equal(updated, true)
 })
 
+test('createUpdateOrderV2AtomicallyFn: 不正な復旧フィールドは状態全体を未設定として扱う', async () => {
+    const current = makeOrder({ id: 'atomic-malformed-recovery-fields' })
+    const rawOrder = {
+        ...toFirestoreOrder(current),
+        saxo_ifdoco_recovery: {
+            status: 'RETRY_PENDING',
+            attempt_count: '2',
+            last_attempt_at: toTimestamp(new Date('2026-01-01T02:00:00Z')),
+            next_attempt_at: toTimestamp(new Date('2026-01-01T02:10:00Z')),
+            result_kind: 'TEMPORARY_FAILURE',
+            reason: 'HTTP_ERROR',
+        },
+    }
+    const { db } = createTransactionDbStub(current, rawOrder)
+    const updateOrderV2Atomically = createUpdateOrderV2AtomicallyFn(db as any)
+
+    const updated = await updateOrderV2Atomically('atomic-malformed-recovery-fields', (latest) => {
+        assert.equal(latest.saxo_ifdoco_recovery, undefined)
+        return { status: 'CANCELED' }
+    })
+
+    assert.equal(updated, true)
+})
+
 test('createUpdateOrderV2AtomicallyFn: documentなしと空diffではwriteしない', async () => {
     for (const [order, mutate] of [
         [null, () => null],

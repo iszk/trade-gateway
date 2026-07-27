@@ -1,7 +1,7 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient, setFirestoreDocument, updateFirestoreDocument } from '../firestore.js'
 import { omitUndefinedFields } from '../omit-undefined-fields.js'
-import type { OrderV2 } from '../types/order-v2.js'
+import type { OrderV2, SaxoIfdocoRecoveryState } from '../types/order-v2.js'
 
 const COLLECTION_NAME = 'orders_v2'
 const FILL_EPSILON = 1e-8
@@ -24,18 +24,50 @@ const tryFromFirestoreDate = (value: unknown): Date | undefined => {
     }
 }
 
+const isNonEmptyString = (value: unknown): value is string => (
+    typeof value === 'string' && value.trim().length > 0
+)
+
+const isSaxoIfdocoRecoveryStatus = (
+    value: unknown,
+): value is SaxoIfdocoRecoveryState['status'] => (
+    value === 'RETRY_PENDING' || value === 'MANUAL_REVIEW' || value === 'COMPLETED'
+)
+
+const isRecoveryAttemptCount = (value: unknown): value is number => (
+    typeof value === 'number' && Number.isInteger(value) && value >= 0
+)
+
 const normalizeSaxoIfdocoRecovery = (
-    recovery: OrderV2['saxo_ifdoco_recovery'],
+    recovery: unknown,
 ): OrderV2['saxo_ifdoco_recovery'] => {
-    if (!recovery) return undefined
-    const lastAttemptAt = tryFromFirestoreDate(recovery.last_attempt_at)
-    if (!lastAttemptAt) return undefined
+    if (typeof recovery !== 'object' || recovery === null || Array.isArray(recovery)) return undefined
+    const recoveryRecord = recovery as Record<string, unknown>
+    const lastAttemptAt = tryFromFirestoreDate(recoveryRecord.last_attempt_at)
+    const resultKind = recoveryRecord.result_kind
+    if (
+        !lastAttemptAt ||
+        !isSaxoIfdocoRecoveryStatus(recoveryRecord.status) ||
+        !isRecoveryAttemptCount(recoveryRecord.attempt_count) ||
+        !isNonEmptyString(resultKind)
+    ) {
+        return undefined
+    }
+    const nextAttemptAt = recoveryRecord.next_attempt_at === undefined
+        ? undefined
+        : tryFromFirestoreDate(recoveryRecord.next_attempt_at)
+    const reason = recoveryRecord.reason === undefined
+        ? undefined
+        : isNonEmptyString(recoveryRecord.reason)
+            ? recoveryRecord.reason.trim()
+            : undefined
     return {
-        ...recovery,
+        status: recoveryRecord.status,
+        attempt_count: recoveryRecord.attempt_count,
         last_attempt_at: lastAttemptAt,
-        next_attempt_at: recovery.next_attempt_at === undefined
-            ? undefined
-            : tryFromFirestoreDate(recovery.next_attempt_at),
+        next_attempt_at: nextAttemptAt,
+        result_kind: resultKind.trim(),
+        reason,
     }
 }
 
