@@ -305,6 +305,39 @@ test('executeTenMinutelyTask: 不完全な SUCCESS metadata は保存せず手�
     assert.equal(order.saxo_ifdoco_recovery.reason, 'INCOMPLETE_SUCCESS_METADATA')
 })
 
+test('executeTenMinutelyTask: 重複した exit role の SUCCESS metadata は保存しない', async () => {
+    const order = makeLegacySaxoIfdoco('duplicate-exit-role')
+    const atomic = makeAtomicState([order])
+    const metadata = makeRecoveredSaxoIfdocoMetadata(order.id)
+    metadata.exits[1] = {
+        ...metadata.exits[1],
+        expected: { ...metadata.exits[1].expected, role: 'STOP_LOSS' },
+    }
+
+    await executeTenMinutelyTask(makeBaseCtx({
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async () => {},
+        updateOrderV2Atomically: atomic.updateOrderV2Atomically as any,
+        executionPriceFetchers: {
+            saxo: {
+                recoverIfdocoOrderMetadata: async () => ({
+                    kind: 'SUCCESS',
+                    retryable: false,
+                    metadata,
+                }),
+                getExecutionPriceForOrderV2: async () => {
+                    assert.fail('duplicate exit roles must not enter normal sync')
+                },
+            },
+        },
+    }))
+
+    assert.equal(order.broker_order_metadata, undefined)
+    assert.equal(order.status, 'PENDING')
+    assert.equal(order.saxo_ifdoco_recovery.status, 'MANUAL_REVIEW')
+    assert.equal(order.saxo_ifdoco_recovery.reason, 'INCOMPLETE_SUCCESS_METADATA')
+})
+
 test('executeTenMinutelyTask: 復旧中の metadata 競合と終端更新を上書きしない', async () => {
     for (const concurrentUpdate of ['metadata', 'terminal'] as const) {
         const order = makeLegacySaxoIfdoco(`concurrent-${concurrentUpdate}`)

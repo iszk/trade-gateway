@@ -97,8 +97,13 @@ const isCompleteRecoveredIfdocoMetadata = (order: OrderV2, metadata: BrokerOrder
         ...order,
         broker_order_metadata: metadata,
     })
+    const exitRoles = classification.kind === 'VALID'
+        ? classification.metadata.exits.map(({ expected }) => expected.role)
+        : []
     return classification.kind === 'VALID' &&
         classification.metadata.exits.length === 2 &&
+        exitRoles.filter((role) => role === 'STOP_LOSS').length === 1 &&
+        exitRoles.filter((role) => role === 'TAKE_PROFIT').length === 1 &&
         classification.metadata.exits.every(({ resolved }) => resolved.order_id !== null)
 }
 
