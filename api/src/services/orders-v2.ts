@@ -11,8 +11,35 @@ type FirestoreDate = Date | { toDate(): Date }
 const fromFirestoreDate = (value: FirestoreDate): Date =>
     value instanceof Date ? value : value.toDate()
 
+const tryFromFirestoreDate = (value: unknown): Date | undefined => {
+    try {
+        const date = value instanceof Date
+            ? value
+            : typeof value === 'object' && value !== null && 'toDate' in value && typeof value.toDate === 'function'
+                ? value.toDate()
+                : undefined
+        return date instanceof Date && !Number.isNaN(date.getTime()) ? date : undefined
+    } catch {
+        return undefined
+    }
+}
+
+const normalizeSaxoIfdocoRecovery = (
+    recovery: OrderV2['saxo_ifdoco_recovery'],
+): OrderV2['saxo_ifdoco_recovery'] => {
+    if (!recovery) return undefined
+    const lastAttemptAt = tryFromFirestoreDate(recovery.last_attempt_at)
+    if (!lastAttemptAt) return undefined
+    return {
+        ...recovery,
+        last_attempt_at: lastAttemptAt,
+        next_attempt_at: recovery.next_attempt_at === undefined
+            ? undefined
+            : tryFromFirestoreDate(recovery.next_attempt_at),
+    }
+}
+
 const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => {
-    const recovery = data.saxo_ifdoco_recovery
     const normalized = {
         ...data,
         created_at: fromFirestoreDate(data.created_at as FirestoreDate),
@@ -20,15 +47,7 @@ const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => {
         executed_at: data.executed_at
             ? fromFirestoreDate(data.executed_at as FirestoreDate)
             : undefined,
-        saxo_ifdoco_recovery: recovery
-            ? {
-                ...recovery,
-                last_attempt_at: fromFirestoreDate(recovery.last_attempt_at as FirestoreDate),
-                next_attempt_at: recovery.next_attempt_at
-                    ? fromFirestoreDate(recovery.next_attempt_at as FirestoreDate)
-                    : undefined,
-            }
-            : undefined,
+        saxo_ifdoco_recovery: normalizeSaxoIfdocoRecovery(data.saxo_ifdoco_recovery),
     }
 
     return normalized as OrderV2

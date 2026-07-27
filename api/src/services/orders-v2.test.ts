@@ -105,7 +105,10 @@ const createWriteDbStub = () => {
     }
 }
 
-const createTransactionDbStub = (order: OrderV2 | null) => {
+const createTransactionDbStub = (
+    order: OrderV2 | null,
+    rawOrder: unknown = order ? toFirestoreOrder(order) : undefined,
+) => {
     const state: { updatePayload?: Record<string, unknown>, reads: number } = { reads: 0 }
     const docRef = {}
     const db = {
@@ -115,7 +118,7 @@ const createTransactionDbStub = (order: OrderV2 | null) => {
                 state.reads += 1
                 return {
                     exists: order !== null,
-                    data: () => order ? toFirestoreOrder(order) : undefined,
+                    data: () => rawOrder,
                 }
             },
             update: (_ref: unknown, payload: Record<string, unknown>) => {
@@ -190,6 +193,30 @@ test('createUpdateOrderV2AtomicallyFn: transaction内の最新orderを正規化�
     assert.equal(state.updatePayload?.status, 'CANCELED')
     assert.equal('executed_at' in (state.updatePayload ?? {}), false)
     assert.ok(state.updatePayload?.updated_at instanceof Date)
+})
+
+test('createUpdateOrderV2AtomicallyFn: 不正な復旧日時は状態全体を未設定として扱う', async () => {
+    const current = makeOrder({ id: 'atomic-malformed-recovery' })
+    const rawOrder = {
+        ...toFirestoreOrder(current),
+        saxo_ifdoco_recovery: {
+            status: 'RETRY_PENDING',
+            attempt_count: 2,
+            last_attempt_at: null,
+            next_attempt_at: { invalid: true },
+            result_kind: 'TEMPORARY_FAILURE',
+            reason: 'HTTP_ERROR',
+        },
+    }
+    const { db } = createTransactionDbStub(current, rawOrder)
+    const updateOrderV2Atomically = createUpdateOrderV2AtomicallyFn(db as any)
+
+    const updated = await updateOrderV2Atomically('atomic-malformed-recovery', (latest) => {
+        assert.equal(latest.saxo_ifdoco_recovery, undefined)
+        return { status: 'CANCELED' }
+    })
+
+    assert.equal(updated, true)
 })
 
 test('createUpdateOrderV2AtomicallyFn: documentなしと空diffではwriteしない', async () => {
