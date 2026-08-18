@@ -387,6 +387,50 @@ test('GET /api/symbols returns tradable symbols', async () => {
     assert.equal(body.symbols[0].id, 'bitflyer:BTC_JPY')
 })
 
+test('GET /api/symbols returns configured order constraints unchanged', async () => {
+    const orderConstraints = {
+        quantity_step: 0.001,
+        min_order_size: 0.1,
+        max_order_size: 0.25,
+    }
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        listTradableSymbols: async () => [makeTradableSymbol({ order_constraints: orderConstraints })],
+    })
+
+    const res = await app.request('/api/symbols', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+        },
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.deepEqual(body.symbols[0].order_constraints, orderConstraints)
+})
+
+test('GET /api/symbols/:symbol_id returns configured order constraints unchanged', async () => {
+    const orderConstraints = {
+        quantity_step: 0.001,
+        min_order_size: 0.1,
+        max_order_size: 0.25,
+    }
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        getTradableSymbol: async () => makeTradableSymbol({ order_constraints: orderConstraints }),
+    })
+
+    const res = await app.request('/api/symbols/bitflyer%3ABTC_JPY', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+        },
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.deepEqual(body.symbol.order_constraints, orderConstraints)
+})
+
 test('PUT /api/symbols/:symbol_id upserts symbol metadata', async () => {
     const upserts: unknown[] = []
     const app = createAppForTests({
@@ -428,6 +472,108 @@ test('PUT /api/symbols/:symbol_id upserts symbol metadata', async () => {
         note: 'cfd',
     })
     assert.equal(body.symbol.display_name, 'NASDAQ 100')
+})
+
+test('PUT /api/symbols/:symbol_id accepts and returns order constraints', async () => {
+    const orderConstraints = {
+        quantity_step: 0.001,
+        min_order_size: 0.1,
+        max_order_size: 0.25,
+    }
+    const upserts: unknown[] = []
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        upsertTradableSymbol: async (input) => {
+            upserts.push(input)
+            return makeTradableSymbol({
+                id: input.id,
+                broker: input.broker,
+                ticker: input.ticker,
+                currency: input.currency,
+                order_constraints: input.order_constraints,
+            })
+        },
+    })
+
+    const res = await app.request('/api/symbols/bitflyer%3ABTC_JPY', {
+        method: 'PUT',
+        headers: {
+            Authorization: 'Bearer test-secret',
+            'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+            currency: 'jpy',
+            order_constraints: orderConstraints,
+        }),
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 200)
+    assert.deepEqual((upserts[0] as { order_constraints?: unknown }).order_constraints, orderConstraints)
+    assert.deepEqual(body.symbol.order_constraints, orderConstraints)
+})
+
+test('PUT /api/symbols/:symbol_id accepts order constraints without max and with equal bounds', async () => {
+    const calls: unknown[] = []
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        upsertTradableSymbol: async (input) => {
+            calls.push(input)
+            return makeTradableSymbol({ order_constraints: input.order_constraints })
+        },
+    })
+
+    for (const order_constraints of [
+        { quantity_step: 0.25, min_order_size: 2 },
+        { quantity_step: 0.1, min_order_size: 1, max_order_size: 1 },
+    ]) {
+        const res = await app.request('/api/symbols/bitflyer%3ABTC_JPY', {
+            method: 'PUT',
+            headers: {
+                Authorization: 'Bearer test-secret',
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ currency: 'JPY', order_constraints }),
+        })
+
+        assert.equal(res.status, 200)
+    }
+    assert.equal(calls.length, 2)
+})
+
+test('PUT /api/symbols/:symbol_id rejects invalid order constraints without calling service', async () => {
+    const invalidBodies = [
+        { quantity_step: 0, min_order_size: 0.1 },
+        { quantity_step: -0.001, min_order_size: 0.1 },
+        { quantity_step: 0.001, min_order_size: 0 },
+        { quantity_step: 0.001, min_order_size: -0.1 },
+        { quantity_step: 0.001, min_order_size: 0.1, max_order_size: 0.01 },
+        { quantity_step: 0.001, min_order_size: 0.1, max_order_size: null },
+    ]
+    let upsertCalls = 0
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        upsertTradableSymbol: async (input) => {
+            upsertCalls += 1
+            return makeTradableSymbol({ order_constraints: input.order_constraints })
+        },
+    })
+
+    for (const order_constraints of invalidBodies) {
+        const res = await app.request('/api/symbols/bitflyer%3ABTC_JPY', {
+            method: 'PUT',
+            headers: {
+                Authorization: 'Bearer test-secret',
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ currency: 'JPY', order_constraints }),
+        })
+        const body = await res.json()
+
+        assert.equal(res.status, 400)
+        assert.equal(body.error.code, 'INVALID_REQUEST')
+    }
+    assert.equal(upsertCalls, 0)
 })
 
 test('PATCH /api/symbols/:symbol_id/trade-control updates status and logs info', async () => {

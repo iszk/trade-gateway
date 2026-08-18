@@ -1,7 +1,7 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { createFirestoreDocument, getFirestoreClient, setFirestoreDocument } from '../firestore.js'
 import type { BrokerName } from '../types/order.js'
-import type { TradableSymbol, TradeControlStatus } from '../types/tradable-symbol.js'
+import type { OrderConstraints, TradableSymbol, TradeControlStatus } from '../types/tradable-symbol.js'
 
 const COLLECTION_NAME = 'tradable_symbols'
 const DEFAULT_CURRENCY = 'JPY'
@@ -30,15 +30,42 @@ const toDate = (value: unknown): Date => {
     return new Date(String(value))
 }
 
-const fromFirestoreTradableSymbol = (data: TradableSymbol): TradableSymbol => ({
-    ...data,
-    trade_control: {
-        ...data.trade_control,
-        updated_at: toDate(data.trade_control.updated_at),
-    },
-    created_at: toDate(data.created_at),
-    updated_at: toDate(data.updated_at),
-})
+const isFinitePositiveNumber = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isFinite(value) && value > 0
+
+const assertValidOrderConstraints = (value: unknown): void => {
+    if (value === undefined) return
+
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('invalid order_constraints')
+    }
+
+    const constraints = value as Record<string, unknown>
+    if (!isFinitePositiveNumber(constraints.quantity_step)) {
+        throw new Error('invalid order_constraints.quantity_step')
+    }
+    if (!isFinitePositiveNumber(constraints.min_order_size)) {
+        throw new Error('invalid order_constraints.min_order_size')
+    }
+    if (constraints.max_order_size !== undefined &&
+        (!isFinitePositiveNumber(constraints.max_order_size) || constraints.max_order_size < constraints.min_order_size)) {
+        throw new Error('invalid order_constraints.max_order_size')
+    }
+}
+
+const fromFirestoreTradableSymbol = (data: TradableSymbol): TradableSymbol => {
+    assertValidOrderConstraints(data.order_constraints)
+
+    return {
+        ...data,
+        trade_control: {
+            ...data.trade_control,
+            updated_at: toDate(data.trade_control.updated_at),
+        },
+        created_at: toDate(data.created_at),
+        updated_at: toDate(data.updated_at),
+    }
+}
 
 const isAlreadyExistsError = (error: unknown): boolean =>
     typeof error === 'object' &&
@@ -56,6 +83,7 @@ type UpsertTradableSymbolInput = {
     display_name?: string
     currency: string
     note?: string
+    order_constraints?: OrderConstraints
     trade_control?: {
         status?: TradeControlStatus
         reason?: string
@@ -116,10 +144,13 @@ export const createListTradableSymbolsFn = (db: Firestore = getFirestoreClient()
 
 export const createUpsertTradableSymbolFn = (db: Firestore = getFirestoreClient()): UpsertTradableSymbolFn => {
     return async (input) => {
+        assertValidOrderConstraints(input.order_constraints)
+
         const now = new Date()
         const docRef = db.collection(COLLECTION_NAME).doc(input.id)
         const current = await docRef.get()
         const currentData = current.exists ? fromFirestoreTradableSymbol(current.data() as TradableSymbol) : null
+        const orderConstraints = input.order_constraints ?? currentData?.order_constraints
         const tradeControl = {
             status: input.trade_control?.status ?? currentData?.trade_control.status ?? 'active',
             reason: input.trade_control?.reason ?? currentData?.trade_control.reason,
@@ -135,6 +166,7 @@ export const createUpsertTradableSymbolFn = (db: Firestore = getFirestoreClient(
             display_name: input.display_name,
             currency: input.currency,
             note: input.note,
+            ...(orderConstraints === undefined ? {} : { order_constraints: orderConstraints }),
             trade_control: tradeControl,
             created_at: currentData?.created_at ?? now,
             updated_at: now,
@@ -166,6 +198,7 @@ export const createUpdateTradeControlFn = (db: Firestore = getFirestoreClient())
             display_name: currentData?.display_name,
             currency: currentData?.currency ?? DEFAULT_CURRENCY,
             note: currentData?.note,
+            ...(currentData?.order_constraints === undefined ? {} : { order_constraints: currentData.order_constraints }),
             trade_control: {
                 status: input.status,
                 reason: input.reason,
