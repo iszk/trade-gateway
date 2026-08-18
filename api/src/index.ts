@@ -405,6 +405,19 @@ export const createApp = (options: CreateAppOptions = {}) => {
         display_name: z.string().trim().optional(),
         currency: z.string().trim().min(1).transform((value) => value.toUpperCase()),
         note: z.string().trim().optional(),
+        order_constraints: z.object({
+            quantity_step: z.number().refine(Number.isFinite, { message: 'must be finite' }).positive(),
+            min_order_size: z.number().refine(Number.isFinite, { message: 'must be finite' }).positive(),
+            max_order_size: z.number().refine(Number.isFinite, { message: 'must be finite' }).optional(),
+        }).superRefine((constraints, ctx) => {
+            if (constraints.max_order_size !== undefined && constraints.max_order_size < constraints.min_order_size) {
+                ctx.addIssue({
+                    code: 'custom',
+                    path: ['max_order_size'],
+                    message: 'must be greater than or equal to min_order_size',
+                })
+            }
+        }).optional(),
         trade_control: z.object({
             status: z.enum(['active', 'paused']).optional(),
             reason: z.string().trim().optional(),
@@ -1181,7 +1194,7 @@ export type { PortfolioSnapshotV1 } from './types/portfolio-snapshot.js'
 export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, TradeRecordsResponse } from './services/trade-records-v2.js'
 export type { OrderV2 } from './types/order-v2.js'
 export type { StatsV2 } from './services/stats-v2.js'
-export type { TradableSymbol } from './types/tradable-symbol.js'
+export type { OrderConstraints, TradableSymbol } from './types/tradable-symbol.js'
 
 export type OrdersV2StatsResponse = {
     stats: StatsV2[]

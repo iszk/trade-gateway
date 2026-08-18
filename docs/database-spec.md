@@ -133,6 +133,10 @@ broker + ticker のメタデータと、symbol 単位の売買停止状態を保
 - `display_name` (string, optional)
 - `currency` (string, required) — 例: `JPY`, `USD`
 - `note` (string, optional)
+- `order_constraints` (map, optional) — broker × ticker 固有の注文数量制約
+  - `quantity_step` (number, required) — 有限の正数
+  - `min_order_size` (number, required) — 有限の正数
+  - `max_order_size` (number, optional) — 有限数かつ `min_order_size` 以上
 - `trade_control` (map, required)
   - `status` (string, required) — `active` | `paused`
   - `reason` (string, optional)
@@ -145,6 +149,8 @@ broker + ticker のメタデータと、symbol 単位の売買停止状態を保
 - ドキュメントが存在しない symbol は `active` として扱う
 - Webhook で未知の symbol を受けた場合、売買処理とは独立して `currency = JPY` のデフォルトレコードを事後作成する
 - `currency` は UI 表示・整理用途であり、Webhook の売買判定では参照しない
+- `order_constraints` がない legacy document は制約未設定として読み書きできる。metadata または `trade_control` の更新で既存の制約を削除してはならない
+- `order_constraints` が存在する場合は上記の型・範囲を満たす必要があり、不正値は保存せず、読み取り時もエラーとして扱う
 
 ## 5. `cron_metadata`
 Cloud Run 上で動作するスロットスケジューラーが、各周期タスクの実行済みスロットIDを管理するために使用する（詳細は [slot-scheduler.md](./slot-scheduler.md) を参照）。また、Saxo audit orderactivities の batch polling 状態も保持する。

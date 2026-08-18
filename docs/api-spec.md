@@ -281,6 +281,11 @@ OpenAPI は全 endpoint を一括で定義していない。機械可読な契�
       "ticker": "BTC_JPY",
       "display_name": "BTC/JPY",
       "currency": "JPY",
+      "order_constraints": {
+        "quantity_step": 0.001,
+        "min_order_size": 0.1,
+        "max_order_size": 0.25
+      },
       "trade_control": {
         "status": "active",
         "updated_at": "2026-06-03T00:00:00.000Z",
@@ -305,9 +310,21 @@ OpenAPI は全 endpoint を一括で定義していない。機械可読な契�
 {
   "display_name": "BTC/JPY",
   "currency": "JPY",
-  "note": "main symbol"
+  "note": "main symbol",
+  "order_constraints": {
+    "quantity_step": 0.001,
+    "min_order_size": 0.1,
+    "max_order_size": 0.25
+  }
 }
 ```
+
+`order_constraints` は任意の map で、`quantity_step` と `min_order_size` は有限の正数、`max_order_size` は省略可能な有限数（設定時は `min_order_size` 以上）とする。未指定の場合、既存 symbol の制約は保持される。制約未設定の legacy symbol ではこの field はレスポンスに含まれない。
+
+#### エラーレスポンス
+- `400 Bad Request`: `symbol_id` または request body / `order_constraints` が不正
+- `401 Unauthorized`: Bearer トークン不足・不正
+- `500 Internal Server Error`: Firestore 更新失敗
 
 ### 12. Symbol 売買停止/再開
 - Method/Path: `PATCH /api/symbols/:symbol_id/trade-control`
