@@ -184,7 +184,53 @@ strategy と tradable symbol の組み合わせごとに、数量計算で使用
 - 更新時は全置換し、`created_at` を保持して `updated_at` のみを進める。transaction retry を含む同時 PUT でも version を取りこぼさない
 - 保存済み document の型、mode 別 field、日時、ID、version が壊れている場合は暗黙補正せず読み取り・更新を失敗させる
 
-## 6. `cron_metadata`
+## 6. `strategy_symbol_positions`
+strategy × symbol ごとの仮想 position を保持する runtime state。policy の固定設定や reservation の配列は保存しない。
+
+### ドキュメント ID
+- policy と同じ `{strategy_id}:{symbol_id}`。`createStrategySymbolPolicyId` と共通の契約を使う
+- `strategy_id` は trim 済みの `[A-Za-z0-9_-]+`、`symbol_id` は既存の `broker:ticker` 形式で `/` を含めない
+- `id`、`strategy_id`、`symbol_id` は document ID から再計算した値と一致しなければならない
+
+### フィールド
+- `id` (string, required)
+- `strategy_id` (string, required)
+- `symbol_id` (string, required)
+- `confirmed_position` (number, required) — broker 約定を反映済みの符号付き数量。有限数、0 許可。BUY 正、SELL 負
+- `pending_delta` (number, required) — 予約中の符号付き数量。有限数、0 許可。BUY 正、SELL 負
+- `status` (string, required) — `READY` | `MANUAL_REVIEW` | `MISMATCH`
+- `policy_version` (number, required) — 数量決定時に参照した正の safe integer。policy 設定値は重複保存しない
+- `updated_at` (timestamp, required)
+- `reconciled_at` (timestamp | null, required) — 未照合は明示的な `null`。日時は `updated_at` より後にできない
+
+`MANUAL_REVIEW` は dispatch 結果不明等の状態であり、pending を保持する。`MISMATCH` は broker aggregate との差分を表す停止状態で、差分を strategy へ推測配分しない。
+
+## 7. `strategy_symbol_reservations`
+event 単位の注文 reservation。position document 内の配列や subcollection ではなく、常に top-level の個別 document として保存する。
+
+### ドキュメント ID
+- `strategy_id`、`symbol_id`、`event_id` の UTF-8 byte 長付き tuple を SHA-256 で digest し、`r_<hex>`（固定長）とする
+- event ID は `/`、`:`、Unicode、長い値を取り得るため document path へ直接連結しない。空文字または空白だけは拒否する
+- `event_id` は document field に元の値を完全に保存し、読み取り時に tuple から再計算した ID と照合する
+
+### フィールド
+- `id` (string, required)
+- `event_id` (string, required)
+- `position_id` (string, required) — `strategy_symbol_positions/{strategy_id}:{symbol_id}` への論理参照
+- `strategy_id` (string, required)
+- `symbol_id` (string, required)
+- `order_id` (string, required) — `orders_v2` の決定済み論理 ID。注文 document 作成前でも保存する
+- `reserved_delta` (number, required) — 予約時の符号付き数量。有限かつ非 0。side や policy 設定値は重複保存しない
+- `status` (string, required) — `RESERVED` | `DISPATCHED` | `RELEASED` | `MANUAL_REVIEW` | `SETTLED`
+- `policy_version` (number, required) — 予約数量決定時に参照した正の safe integer
+- `created_at` (timestamp, required)
+- `updated_at` (timestamp, required) — `created_at` 以降
+
+状態遷移は自己遷移を冪等として許可する。`RESERVED` からは `DISPATCHED`、`RELEASED`、`MANUAL_REVIEW`、`DISPATCHED` からは `SETTLED`、`MANUAL_REVIEW` からは `DISPATCHED`、`RELEASED`、`SETTLED` へ遷移できる。`RELEASED` と `SETTLED` は終端状態である。timeout や結果不明を `RELEASED` へ自動遷移させず、`MANUAL_REVIEW` として reservation および position の pending を保持する。
+
+両 collection の repository は、検証済み document の全置換保存と document ID lookup による単一取得だけを提供する。position と reservation の同時更新、create-if-absent、compare-and-set、pending の加減算は後続の atomic transaction/reconciliation の責務である。現時点では backfill、TTL、追加の複合 index は行わない。
+
+## 8. `cron_metadata`
 Cloud Run 上で動作するスロットスケジューラーが、各周期タスクの実行済みスロットIDを管理するために使用する（詳細は [slot-scheduler.md](./slot-scheduler.md) を参照）。また、Saxo audit orderactivities の batch polling 状態も保持する。
 
 ### ドキュメント ID
@@ -225,7 +271,7 @@ Hourly range reconciliation は直近48時間を初期 window とし、range end
 
 hourly range は `saxo_orderactivities_poll_state` を読み書きせず、response の `__nextPoll` も保存しない。既存 direct recovery の state fields を削除しないよう、reconciliation state document は常に merge 更新する。24時間を超える stale order と exit related order は hourly range の適用対象外で、前者は OrderId direct recovery、後者は exit 同期の責務とする。
 
-## 7. `saxo_auth_data`
+## 9. `saxo_auth_data`
 Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_auth_data/saxo_auth` の固定ドキュメントを使う。
 
 ### ドキュメント ID
@@ -264,6 +310,8 @@ Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_au
 - `order_dispatch_logs`: 180 日
 - `orders_v2`: 現時点では明示的な TTL を設定しない
 - `tradable_symbols`: 明示的な TTL を設定しない
+- `strategy_symbol_positions`: TTL なし（runtime state を上書きで管理）
+- `strategy_symbol_reservations`: TTL なし（event 単位の監査・状態を保持）
 - `cron_metadata`: TTL なし（上書きで管理）
 - `saxo_auth_data`: TTL なし（認証連携中は保持）
 
@@ -278,7 +326,7 @@ Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_au
 - 追加の複合インデックス（必要時のみ）
   - `order_dispatch_logs`: `result` 昇順 + `created_at` 降順
   - `orders_v2`: `status` / `order_type` / `exit_sync_status` の複合条件、または `executed_at` 範囲 + 降順並び替えが必要なクエリで、Firestore から要求された場合に追加する
-- `webhook_events`, `tradable_symbols`, `cron_metadata`, `saxo_auth_data` はドキュメント ID 参照または単純な一覧取得を基本とする
+- `webhook_events`, `tradable_symbols`, `strategy_symbol_positions`, `strategy_symbol_reservations`, `cron_metadata`, `saxo_auth_data` はドキュメント ID 参照または単純な一覧取得を基本とする。position/reservation 用の追加複合 index は作成しない
 
 ## 整合性ルール
 1. `webhook_events` のドキュメント ID は `{broker}:{symbol}:{event_id}` とし、同一 broker / symbol / event の重複を拒否する
