@@ -14,3 +14,6 @@ steps:
 
 images:
   - 'asia-northeast1-docker.pkg.dev/$PROJECT_ID/repos/trade-gateway'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
