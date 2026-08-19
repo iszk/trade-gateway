@@ -367,10 +367,6 @@ const getSnapshotData = (snapshot: unknown): unknown => (
     isRecord(snapshot) && typeof snapshot.data === 'function' ? snapshot.data() : undefined
 )
 
-const isSnapshotExisting = (snapshot: unknown): boolean => (
-    isRecord(snapshot) && snapshot.exists === true
-)
-
 export const createGetStrategySymbolPolicyFn = (
     db: Firestore = getFirestoreClient(),
 ): GetStrategySymbolPolicyFn => {
