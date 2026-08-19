@@ -152,7 +152,39 @@ broker + ticker のメタデータと、symbol 単位の売買停止状態を保
 - `order_constraints` がない legacy document は制約未設定として読み書きできる。metadata または `trade_control` の更新で既存の制約を削除してはならない
 - `order_constraints` が存在する場合は上記の型・範囲を満たす必要があり、不正値は保存せず、読み取り時もエラーとして扱う
 
-## 5. `cron_metadata`
+## 5. `strategy_symbol_policies`
+strategy と tradable symbol の組み合わせごとに、数量計算で使用する固定 sizing policy を保持する。仮想 position、reservation、注文状態はこのコレクションへ保存しない。
+
+### ドキュメント ID
+- `{strategy_id}:{symbol_id}`
+- 例: `mean_reversion:bitflyer:BTC_JPY`
+- `strategy_id` は trim 済みの `[A-Za-z0-9_-]+`。`symbol_id` は既存の `broker:ticker` 形式で `/` を含めない
+- `id` fieldにも同じ値を保存し、読み取り時に document ID と `id` / `strategy_id` / `symbol_id` の一致を検証する
+
+### フィールド
+- `id` (string, required)
+- `strategy_id` (string, required)
+- `symbol_id` (string, required)
+- `sizing_mode` (string, required) — `WEBHOOK_CAPPED` | `MANAGED`
+- `enabled` (boolean, required)
+- `max_abs_position` (number, required) — 有限の正数。累積 position 上限
+- `no_flip` (boolean, required)
+- `base_order_size` (number, required for `MANAGED`) — 有限の正数。`WEBHOOK_CAPPED` には保存しない
+- `taper_strength` (number, required for `MANAGED`) — 有限数、`0` 以上 `1` 以下。`WEBHOOK_CAPPED` には保存しない
+- `version` (positive integer, required) — 作成時 `1`、更新ごとに1増加
+- `created_at` (timestamp, required)
+- `updated_at` (timestamp, required)
+
+### 制約と更新
+- PUT は `tradable_symbols/{symbol_id}` と現在の policy document を同一 Firestore transaction snapshot で読み取る
+- symbol が存在しない場合、または `order_constraints` が設定されていない場合は policy を保存しない
+- `max_abs_position >= min_order_size` かつ `quantity_step` の整数倍とする。`MANAGED` では `min_order_size <= base_order_size <= max_abs_position`、`base_order_size` は `quantity_step` の整数倍、`max_order_size` 設定時はその以下とする
+- `max_abs_position` は累積上限のため、1注文上限である `max_order_size` 以下である必要はない
+- `enabled=false` でも同じ検証を行い、不整合な下書きは保存しない。小数 step の判定は浮動小数誤差を許容するが、値を丸めない
+- 更新時は全置換し、`created_at` を保持して `updated_at` のみを進める。transaction retry を含む同時 PUT でも version を取りこぼさない
+- 保存済み document の型、mode 別 field、日時、ID、version が壊れている場合は暗黙補正せず読み取り・更新を失敗させる
+
+## 6. `cron_metadata`
 Cloud Run 上で動作するスロットスケジューラーが、各周期タスクの実行済みスロットIDを管理するために使用する（詳細は [slot-scheduler.md](./slot-scheduler.md) を参照）。また、Saxo audit orderactivities の batch polling 状態も保持する。
 
 ### ドキュメント ID
@@ -193,7 +225,7 @@ Hourly range reconciliation は直近48時間を初期 window とし、range end
 
 hourly range は `saxo_orderactivities_poll_state` を読み書きせず、response の `__nextPoll` も保存しない。既存 direct recovery の state fields を削除しないよう、reconciliation state document は常に merge 更新する。24時間を超える stale order と exit related order は hourly range の適用対象外で、前者は OrderId direct recovery、後者は exit 同期の責務とする。
 
-## 6. `saxo_auth_data`
+## 7. `saxo_auth_data`
 Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_auth_data/saxo_auth` の固定ドキュメントを使う。
 
 ### ドキュメント ID

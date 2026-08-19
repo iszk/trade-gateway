@@ -339,7 +339,83 @@ OpenAPI は全 endpoint を一括で定義していない。機械可読な契�
 }
 ```
 
-### 13. Saxo portfolio snapshot 取得
+### 13. Strategy × symbol policy 取得
+- Method/Path: `GET /api/strategy-symbol-policies/:strategy_id/:symbol_id`
+- 認証: 必要（`API_SECRET` の Bearer トークン）
+- 補足: `symbol_id` は `broker:ticker` を URL encode した値。`strategy_id` は `[A-Za-z0-9_-]+`
+
+#### 成功レスポンス
+- `200 OK`
+
+```json
+{
+  "policy": {
+    "id": "mean_reversion:bitflyer:BTC_JPY",
+    "strategy_id": "mean_reversion",
+    "symbol_id": "bitflyer:BTC_JPY",
+    "sizing_mode": "MANAGED",
+    "enabled": true,
+    "max_abs_position": 1,
+    "no_flip": true,
+    "base_order_size": 0.1,
+    "taper_strength": 0.5,
+    "version": 1,
+    "created_at": "2026-06-03T00:00:00.000Z",
+    "updated_at": "2026-06-03T00:00:00.000Z"
+  }
+}
+```
+
+`sizing_mode=WEBHOOK_CAPPED` の policy には `base_order_size` と `taper_strength` を含めない。`MANAGED` では両方を必須とする。
+
+#### エラーレスポンス
+- `401 Unauthorized`: Bearer トークン不足・不正
+- `400 Bad Request`: path が不正
+- `404 POLICY_NOT_FOUND`: policy が未登録
+- `500 INTERNAL_ERROR`: Firestore 障害または保存済み document の破損
+
+### 14. Strategy × symbol policy 更新
+- Method/Path: `PUT /api/strategy-symbol-policies/:strategy_id/:symbol_id`
+- 認証: 必要（`API_SECRET` の Bearer トークン）
+- 補足: `symbol_id` は `broker:ticker` を URL encode した値。body に ID、version、日時は指定しない。body は strict な mode 別 union とする
+
+#### リクエスト（WEBHOOK_CAPPED）
+
+```json
+{
+  "sizing_mode": "WEBHOOK_CAPPED",
+  "enabled": true,
+  "max_abs_position": 1,
+  "no_flip": true
+}
+```
+
+#### リクエスト（MANAGED）
+
+```json
+{
+  "sizing_mode": "MANAGED",
+  "enabled": true,
+  "max_abs_position": 1,
+  "no_flip": true,
+  "base_order_size": 0.1,
+  "taper_strength": 0.5
+}
+```
+
+数量は有限の正数、`taper_strength` は `0` 以上 `1` 以下とする。対象 symbol の `order_constraints` を基準に `min_order_size` / `quantity_step` / `max_order_size` を検証し、無効 policy は保存しない。`enabled=false` も検証を省略しない。
+
+#### 成功レスポンス
+- `200 OK`: body は GET と同じ `{ "policy": ... }` envelope。新規は `version=1`、更新は version が1増加する
+
+#### エラーレスポンス
+- `400 INVALID_REQUEST`: path/body、mode 別 field、数量範囲、step 整合性が不正
+- `401 UNAUTHORIZED`: Bearer トークン不足・不正
+- `404 SYMBOL_NOT_FOUND`: 対象 symbol が未登録
+- `409 SYMBOL_CONSTRAINTS_REQUIRED`: symbol は存在するが注文数量制約が未設定
+- `500 INTERNAL_ERROR`: Firestore 障害または保存済み document の破損
+
+### 15. Saxo portfolio snapshot 取得
 - Method/Path: `GET /api/saxo/portfolio-snapshot`
 - 認証: 必要（Bearerトークン）
 - 役割: Saxo の現在の口座・現金残高・建玉を `portfolio-snapshot.v1` 形式で返す。

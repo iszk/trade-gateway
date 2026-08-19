@@ -16,6 +16,8 @@ import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, createDefaultListTradableSymbolsFn, createDefaultUpdateTradeControlFn, createDefaultUpsertTradableSymbolFn, createSymbolId, parseSymbolId } from './services/tradable-symbols.js'
 import type { EnsureTradableSymbolFn, GetTradableSymbolFn, ListTradableSymbolsFn, UpdateTradeControlFn, UpsertTradableSymbolFn } from './services/tradable-symbols.js'
+import { createDefaultGetStrategySymbolPolicyFn, createDefaultPutStrategySymbolPolicyFn, InvalidStoredStrategySymbolPolicyError, InvalidStrategySymbolPolicyError, SymbolConstraintsRequiredError, SymbolNotFoundError, isValidStrategyId } from './services/strategy-symbol-policies.js'
+import type { GetStrategySymbolPolicyFn, PutStrategySymbolPolicyFn } from './services/strategy-symbol-policies.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
 import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
 import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultUpdateOrderV2AtomicallyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn, createDefaultListOrderUpdatesFn } from './services/orders-v2.js'
@@ -262,6 +264,8 @@ type CreateAppOptions = {
     upsertTradableSymbol?: UpsertTradableSymbolFn
     updateTradeControl?: UpdateTradeControlFn
     ensureTradableSymbol?: EnsureTradableSymbolFn
+    getStrategySymbolPolicy?: GetStrategySymbolPolicyFn
+    putStrategySymbolPolicy?: PutStrategySymbolPolicyFn
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -294,6 +298,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const upsertTradableSymbol = options.upsertTradableSymbol ?? createDefaultUpsertTradableSymbolFn()
     const updateTradeControl = options.updateTradeControl ?? createDefaultUpdateTradeControlFn()
     const ensureTradableSymbol = options.ensureTradableSymbol ?? createDefaultEnsureTradableSymbolFn()
+    const getStrategySymbolPolicy = options.getStrategySymbolPolicy ?? createDefaultGetStrategySymbolPolicyFn()
+    const putStrategySymbolPolicy = options.putStrategySymbolPolicy ?? createDefaultPutStrategySymbolPolicyFn()
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -424,6 +430,30 @@ export const createApp = (options: CreateAppOptions = {}) => {
             updated_by: z.string().trim().optional(),
         }).optional(),
     })
+
+    const finitePositiveNumberSchema = z.number()
+        .refine(Number.isFinite, { message: 'must be finite' })
+        .positive()
+    const taperStrengthSchema = z.number()
+        .refine(Number.isFinite, { message: 'must be finite' })
+        .min(0)
+        .max(1)
+    const strategySymbolPolicySchema = z.discriminatedUnion('sizing_mode', [
+        z.object({
+            sizing_mode: z.literal('WEBHOOK_CAPPED'),
+            enabled: z.boolean(),
+            max_abs_position: finitePositiveNumberSchema,
+            no_flip: z.boolean(),
+        }).strict(),
+        z.object({
+            sizing_mode: z.literal('MANAGED'),
+            enabled: z.boolean(),
+            max_abs_position: finitePositiveNumberSchema,
+            no_flip: z.boolean(),
+            base_order_size: finitePositiveNumberSchema,
+            taper_strength: taperStrengthSchema,
+        }).strict(),
+    ])
 
     const tradeControlSchema = z.object({
         status: z.enum(['active', 'paused']),
@@ -863,6 +893,80 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
     })
 
+    app.get('/api/strategy-symbol-policies/:strategy_id/:symbol_id', requireApiSecret, async (c) => {
+        const strategyId = decodeSymbolIdParam(c.req.param('strategy_id'))
+        const symbolId = decodeSymbolIdParam(c.req.param('symbol_id'))
+        if (!isValidStrategyId(strategyId) || !parseValidSymbolId(symbolId)) {
+            return c.json(errorBody('INVALID_REQUEST', 'strategy_id or symbol_id is invalid'), 400)
+        }
+
+        try {
+            const policy = await getStrategySymbolPolicy(strategyId, symbolId)
+            if (!policy) {
+                return c.json(errorBody('POLICY_NOT_FOUND', 'policy is not found'), 404)
+            }
+            return c.json({ policy })
+        } catch (err) {
+            logger.warn({
+                event: 'strategy_symbol_policy:fetch_failed',
+                error: err instanceof InvalidStoredStrategySymbolPolicyError ? err.name : err,
+                strategy_id: strategyId,
+                symbol_id: symbolId,
+            }, 'failed to fetch strategy-symbol policy')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch strategy-symbol policy'), 500)
+        }
+    })
+
+    app.put('/api/strategy-symbol-policies/:strategy_id/:symbol_id', requireApiSecret, async (c) => {
+        const strategyId = decodeSymbolIdParam(c.req.param('strategy_id'))
+        const symbolId = decodeSymbolIdParam(c.req.param('symbol_id'))
+        if (!isValidStrategyId(strategyId) || !parseValidSymbolId(symbolId)) {
+            return c.json(errorBody('INVALID_REQUEST', 'strategy_id or symbol_id is invalid'), 400)
+        }
+
+        let body: unknown
+        try {
+            body = await c.req.json()
+        } catch {
+            return c.json(errorBody('INVALID_REQUEST', 'invalid JSON body'), 400)
+        }
+
+        const parsedBody = strategySymbolPolicySchema.safeParse(body)
+        if (!parsedBody.success) {
+            const message = parsedBody.error.issues
+                .map((issue: z.ZodIssue) => `${issue.path.join('.') || 'body'}: ${issue.message}`)
+                .join('; ')
+            return c.json(errorBody('INVALID_REQUEST', message), 400)
+        }
+
+        try {
+            const policy = await putStrategySymbolPolicy({
+                strategy_id: strategyId,
+                symbol_id: symbolId,
+                ...parsedBody.data,
+            })
+            return c.json({ policy })
+        } catch (err) {
+            if (err instanceof InvalidStrategySymbolPolicyError) {
+                return c.json(errorBody('INVALID_REQUEST', err.message), 400)
+            }
+            if (err instanceof SymbolNotFoundError) {
+                return c.json(errorBody('SYMBOL_NOT_FOUND', 'symbol is not found'), 404)
+            }
+            if (err instanceof SymbolConstraintsRequiredError) {
+                return c.json(errorBody('SYMBOL_CONSTRAINTS_REQUIRED', 'symbol order constraints are required'), 409)
+            }
+
+            logger.warn({
+                event: 'strategy_symbol_policy:upsert_failed',
+                error: err instanceof InvalidStoredStrategySymbolPolicyError ? err.name : err,
+                strategy_id: strategyId,
+                symbol_id: symbolId,
+            }, 'failed to upsert strategy-symbol policy')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to upsert strategy-symbol policy'), 500)
+        }
+    })
+
     app.get('/api/positions', requireApiSecret, async (c) => {
         const broker = c.req.query('broker') as BrokerName | undefined
         try {
@@ -1195,6 +1299,13 @@ export type { TradeRecord, TradeRecordWithId, GroupStats, TradeStatsResponse, Tr
 export type { OrderV2 } from './types/order-v2.js'
 export type { StatsV2 } from './services/stats-v2.js'
 export type { OrderConstraints, TradableSymbol } from './types/tradable-symbol.js'
+export type {
+    ManagedStrategySymbolPolicy,
+    StrategySymbolPolicy,
+    StrategySymbolPolicyInput,
+    StrategySymbolSizingMode,
+    WebhookCappedStrategySymbolPolicy,
+} from './types/strategy-symbol-policy.js'
 
 export type OrdersV2StatsResponse = {
     stats: StatsV2[]
