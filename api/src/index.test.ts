@@ -13,6 +13,8 @@ import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js
 import type { OrderUpdate } from './services/orders-v2.js'
 import type { SlotScheduler, RunIfNewSlotParams } from './services/slot-scheduler.js'
 import type { TradableSymbol } from './types/tradable-symbol.js'
+import type { StrategySymbolPolicy } from './types/strategy-symbol-policy.js'
+import { InvalidStrategySymbolPolicyError, SymbolConstraintsRequiredError, SymbolNotFoundError } from './services/strategy-symbol-policies.js'
 
 const createLoggerStub = () => {
     const calls: Record<string, unknown>[] = []
@@ -574,6 +576,228 @@ test('PUT /api/symbols/:symbol_id rejects invalid order constraints without call
         assert.equal(body.error.code, 'INVALID_REQUEST')
     }
     assert.equal(upsertCalls, 0)
+})
+
+const makeStrategySymbolPolicy = (overrides: Partial<StrategySymbolPolicy> = {}): StrategySymbolPolicy => ({
+    id: 'strategy-1:bitflyer:BTC_JPY',
+    strategy_id: 'strategy-1',
+    symbol_id: 'bitflyer:BTC_JPY',
+    sizing_mode: 'WEBHOOK_CAPPED',
+    enabled: true,
+    max_abs_position: 1,
+    no_flip: true,
+    version: 2,
+    created_at: new Date('2026-01-01T00:00:00.000Z'),
+    updated_at: new Date('2026-01-02T00:00:00.000Z'),
+    ...overrides,
+} as StrategySymbolPolicy)
+
+test('strategy-symbol policy GET/PUT require the shared Bearer token', async () => {
+    let getCalls = 0
+    let putCalls = 0
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        getStrategySymbolPolicy: async () => {
+            getCalls += 1
+            return makeStrategySymbolPolicy()
+        },
+        putStrategySymbolPolicy: async () => {
+            putCalls += 1
+            return makeStrategySymbolPolicy()
+        },
+    })
+
+    for (const headers of [undefined, { Authorization: 'Bearer wrong-secret' }]) {
+        const getResponse = await app.request('/api/strategy-symbol-policies/strategy-1/bitflyer%3ABTC_JPY', { headers })
+        assert.equal(getResponse.status, 401)
+        assert.equal((await getResponse.json()).error.code, 'UNAUTHORIZED')
+
+        const putResponse = await app.request('/api/strategy-symbol-policies/strategy-1/bitflyer%3ABTC_JPY', {
+            method: 'PUT',
+            headers: { ...(headers ?? {}), 'content-type': 'application/json' },
+            body: JSON.stringify({
+                sizing_mode: 'WEBHOOK_CAPPED',
+                enabled: true,
+                max_abs_position: 1,
+                no_flip: true,
+            }),
+        })
+        assert.equal(putResponse.status, 401)
+        assert.equal((await putResponse.json()).error.code, 'UNAUTHORIZED')
+    }
+    assert.equal(getCalls, 0)
+    assert.equal(putCalls, 0)
+})
+
+test('strategy-symbol policy GET supports encoded symbol IDs and returns POLICY_NOT_FOUND', async () => {
+    const calls: { strategyId: string; symbolId: string }[] = []
+    const policy = makeStrategySymbolPolicy({
+        id: 'strategy-1:saxo:FX:NAS100',
+        strategy_id: 'strategy-1',
+        symbol_id: 'saxo:FX:NAS100',
+        version: 3,
+    })
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        getStrategySymbolPolicy: async (strategyId, symbolId) => {
+            calls.push({ strategyId, symbolId })
+            return symbolId === 'saxo:FX:NAS100' ? policy : null
+        },
+    })
+
+    const success = await app.request('/api/strategy-symbol-policies/strategy-1/saxo%3AFX%3ANAS100', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+    assert.equal(success.status, 200)
+    assert.equal((await success.json()).policy.version, 3)
+    assert.deepEqual(calls[0], { strategyId: 'strategy-1', symbolId: 'saxo:FX:NAS100' })
+
+    const missing = await app.request('/api/strategy-symbol-policies/strategy-1/bitflyer%3ABTC_JPY', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+    assert.equal(missing.status, 404)
+    assert.equal((await missing.json()).error.code, 'POLICY_NOT_FOUND')
+})
+
+test('strategy-symbol policy PUT passes both mode payloads without generated fields', async () => {
+    const calls: unknown[] = []
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        putStrategySymbolPolicy: async (input) => {
+            calls.push(input)
+            return makeStrategySymbolPolicy({
+                ...input,
+                id: `${input.strategy_id}:${input.symbol_id}`,
+                version: 1,
+            } as Partial<StrategySymbolPolicy>)
+        },
+    })
+
+    const webhookResponse = await app.request('/api/strategy-symbol-policies/strategy-1/bitflyer%3ABTC_JPY', {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer test-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+            sizing_mode: 'WEBHOOK_CAPPED',
+            enabled: false,
+            max_abs_position: 1,
+            no_flip: true,
+        }),
+    })
+    assert.equal(webhookResponse.status, 200)
+
+    const managedResponse = await app.request('/api/strategy-symbol-policies/strategy-1/saxo%3AFX%3ANAS100', {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer test-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+            sizing_mode: 'MANAGED',
+            enabled: true,
+            max_abs_position: 2,
+            no_flip: false,
+            base_order_size: 0.5,
+            taper_strength: 0,
+        }),
+    })
+    assert.equal(managedResponse.status, 200)
+    assert.deepEqual(calls, [
+        {
+            strategy_id: 'strategy-1',
+            symbol_id: 'bitflyer:BTC_JPY',
+            sizing_mode: 'WEBHOOK_CAPPED',
+            enabled: false,
+            max_abs_position: 1,
+            no_flip: true,
+        },
+        {
+            strategy_id: 'strategy-1',
+            symbol_id: 'saxo:FX:NAS100',
+            sizing_mode: 'MANAGED',
+            enabled: true,
+            max_abs_position: 2,
+            no_flip: false,
+            base_order_size: 0.5,
+            taper_strength: 0,
+        },
+    ])
+})
+
+test('strategy-symbol policy PUT rejects strict schema and path errors without calling service', async () => {
+    let calls = 0
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        putStrategySymbolPolicy: async () => {
+            calls += 1
+            return makeStrategySymbolPolicy()
+        },
+    })
+    const invalidBodies = [
+        { sizing_mode: 'WEBHOOK_CAPPED', enabled: true, max_abs_position: 1, no_flip: true, base_order_size: 0.1 },
+        { sizing_mode: 'MANAGED', enabled: true, max_abs_position: 1, no_flip: true, taper_strength: 0 },
+        { sizing_mode: 'MANAGED', enabled: true, max_abs_position: 1, no_flip: true, base_order_size: 0.1, taper_strength: 1.1 },
+        { sizing_mode: 'MANAGED', enabled: true, max_abs_position: 1, no_flip: true, base_order_size: 0.1, taper_strength: 0, version: 1 },
+    ]
+    for (const body of invalidBodies) {
+        const response = await app.request('/api/strategy-symbol-policies/strategy-1/bitflyer%3ABTC_JPY', {
+            method: 'PUT',
+            headers: { Authorization: 'Bearer test-secret', 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+        })
+        assert.equal(response.status, 400)
+        assert.equal((await response.json()).error.code, 'INVALID_REQUEST')
+    }
+
+    const invalidPath = await app.request('/api/strategy-symbol-policies/strategy%2F1/bitflyer%3ABTC_JPY', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+    assert.equal(invalidPath.status, 400)
+    assert.equal(calls, 0)
+})
+
+test('strategy-symbol policy PUT returns 400 for invalid JSON without calling service', async () => {
+    let calls = 0
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        putStrategySymbolPolicy: async () => {
+            calls += 1
+            return makeStrategySymbolPolicy()
+        },
+    })
+
+    const response = await app.request('/api/strategy-symbol-policies/strategy-1/bitflyer%3ABTC_JPY', {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer test-secret', 'content-type': 'application/json' },
+        body: '{"sizing_mode":"WEBHOOK_CAPPED",',
+    })
+
+    assert.equal(response.status, 400)
+    assert.equal((await response.json()).error.code, 'INVALID_REQUEST')
+    assert.equal(calls, 0)
+})
+
+test('strategy-symbol policy PUT maps domain errors and unexpected errors', async () => {
+    const cases: { error: Error; status: number; code: string }[] = [
+        { error: new InvalidStrategySymbolPolicyError('bad policy'), status: 400, code: 'INVALID_REQUEST' },
+        { error: new SymbolNotFoundError('bitflyer:BTC_JPY'), status: 404, code: 'SYMBOL_NOT_FOUND' },
+        { error: new SymbolConstraintsRequiredError('bitflyer:BTC_JPY'), status: 409, code: 'SYMBOL_CONSTRAINTS_REQUIRED' },
+        { error: new Error('firestore unavailable'), status: 500, code: 'INTERNAL_ERROR' },
+    ]
+    for (const { error, status, code } of cases) {
+        const app = createAppForTests({
+            apiSecret: 'test-secret',
+            putStrategySymbolPolicy: async () => { throw error },
+        })
+        const response = await app.request('/api/strategy-symbol-policies/strategy-1/bitflyer%3ABTC_JPY', {
+            method: 'PUT',
+            headers: { Authorization: 'Bearer test-secret', 'content-type': 'application/json' },
+            body: JSON.stringify({
+                sizing_mode: 'WEBHOOK_CAPPED',
+                enabled: true,
+                max_abs_position: 1,
+                no_flip: true,
+            }),
+        })
+        assert.equal(response.status, status)
+        assert.equal((await response.json()).error.code, code)
+    }
 })
 
 test('PATCH /api/symbols/:symbol_id/trade-control updates status and logs info', async () => {
