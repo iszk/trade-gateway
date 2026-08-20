@@ -14,10 +14,14 @@ import { DuplicateEventError, createDefaultWebhookEventFn } from './services/web
 import type { CreateWebhookEventFn } from './services/webhook-events.js'
 import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
-import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, createDefaultListTradableSymbolsFn, createDefaultUpdateTradeControlFn, createDefaultUpsertTradableSymbolFn, createSymbolId, parseSymbolId } from './services/tradable-symbols.js'
+import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, createDefaultListTradableSymbolsFn, createDefaultUpdateTradeControlFn, createDefaultUpsertTradableSymbolFn, createSymbolId, InvalidStoredTradableSymbolError, parseSymbolId } from './services/tradable-symbols.js'
 import type { EnsureTradableSymbolFn, GetTradableSymbolFn, ListTradableSymbolsFn, UpdateTradeControlFn, UpsertTradableSymbolFn } from './services/tradable-symbols.js'
 import { createDefaultGetStrategySymbolPolicyFn, createDefaultPutStrategySymbolPolicyFn, InvalidStoredStrategySymbolPolicyError, InvalidStrategySymbolPolicyError, SymbolConstraintsRequiredError, SymbolNotFoundError, isValidStrategyId } from './services/strategy-symbol-policies.js'
 import type { GetStrategySymbolPolicyFn, PutStrategySymbolPolicyFn } from './services/strategy-symbol-policies.js'
+import { createGetStrategySymbolPositionFn, InvalidStoredStrategySymbolPositionError } from './services/strategy-symbol-positions.js'
+import type { GetStrategySymbolPositionFn } from './services/strategy-symbol-positions.js'
+import { calculateOrderSize } from './services/order-size-calculator.js'
+import type { SizingDecision } from './services/order-size-calculator.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
 import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
 import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultUpdateOrderV2AtomicallyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn, createDefaultListOrderUpdatesFn } from './services/orders-v2.js'
@@ -61,10 +65,11 @@ const baseWebhookSchema = z.object({
         return upper
     }, z.enum(['BUY', 'SELL'])),
     order_type: z.literal('MARKET').optional(),
-    size: z.number().positive(),
+    size: z.number().optional(),
     price: z.number().optional(),
     interval: z.string().optional(),
     strategy: z.string().optional(),
+    strategy_id: z.string().optional(),
     note: z.string().optional(),
     dry_run: z.boolean().optional(),
     stop_loss: z.string().optional(),
@@ -266,6 +271,8 @@ type CreateAppOptions = {
     ensureTradableSymbol?: EnsureTradableSymbolFn
     getStrategySymbolPolicy?: GetStrategySymbolPolicyFn
     putStrategySymbolPolicy?: PutStrategySymbolPolicyFn
+    getStrategySymbolPosition?: GetStrategySymbolPositionFn
+    allowUnregisteredStrategyPolicyFallback?: boolean
 }
 
 export const createApp = (options: CreateAppOptions = {}) => {
@@ -300,6 +307,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const ensureTradableSymbol = options.ensureTradableSymbol ?? createDefaultEnsureTradableSymbolFn()
     const getStrategySymbolPolicy = options.getStrategySymbolPolicy ?? createDefaultGetStrategySymbolPolicyFn()
     const putStrategySymbolPolicy = options.putStrategySymbolPolicy ?? createDefaultPutStrategySymbolPolicyFn()
+    const getStrategySymbolPosition = options.getStrategySymbolPosition ?? createGetStrategySymbolPositionFn()
+    const allowUnregisteredStrategyPolicyFallback = options.allowUnregisteredStrategyPolicyFallback
+        ?? config.webhook.allowUnregisteredStrategyPolicyFallback
 
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
@@ -590,17 +600,104 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         const symbolId = createSymbolId(payload.broker, payload.ticker)
-        const tradableSymbol = await getTradableSymbol(symbolId)
-        if (!tradableSymbol && isBrokerName(payload.broker)) {
+        let tradableSymbol: Awaited<ReturnType<GetTradableSymbolFn>> = null
+        let tradableSymbolStateInvalid = false
+        try {
+            tradableSymbol = await getTradableSymbol(symbolId)
+        } catch (error) {
+            if (error instanceof InvalidStoredTradableSymbolError) {
+                tradableSymbolStateInvalid = true
+            } else {
+                logger.warn({
+                    event: 'tradable_symbol:webhook_fetch_failed',
+                    error,
+                    symbol_id: symbolId,
+                }, 'failed to resolve tradable symbol for webhook')
+                return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch symbol'), 500)
+            }
+        }
+        if (!tradableSymbol && !tradableSymbolStateInvalid && isBrokerName(payload.broker)) {
             ensureTradableSymbol({ broker: payload.broker, ticker: payload.ticker }).catch((err) => {
                 reqLogger.warn({ event: 'tradable_symbol:ensure_failed', error: err, symbol_id: symbolId }, 'failed to ensure tradable symbol')
             })
         }
 
-        const symbolPaused = tradableSymbol?.trade_control.status === 'paused'
+        const symbolPaused = tradableSymbol?.trade_control?.status === 'paused'
+        const symbolStateInvalid = tradableSymbolStateInvalid || (tradableSymbol !== null && (
+            tradableSymbol.id !== symbolId ||
+            tradableSymbol.trade_control === null ||
+            typeof tradableSymbol.trade_control !== 'object' ||
+            (tradableSymbol.trade_control.status !== 'active' && tradableSymbol.trade_control.status !== 'paused')
+        ))
 
-        try {
-            await createWebhookEvent({
+        const createEventOrDuplicate = async (
+            event: Parameters<CreateWebhookEventFn>[0],
+        ): Promise<Response | null> => {
+            try {
+                await createWebhookEvent(event)
+                return null
+            } catch (error) {
+                if (error instanceof DuplicateEventError) {
+                    logWebhookRejected({
+                        requestId,
+                        reason: 'duplicated_event',
+                        sourceIp,
+                        contentType,
+                        rawBody,
+                        payload,
+                        eventId: effectiveEventId,
+                        error: errorBody('DUPLICATED_EVENT', 'event_id is duplicated').error,
+                        reqLogger,
+                    })
+                    return c.json(errorBody('DUPLICATED_EVENT', 'event_id is duplicated'), 409)
+                }
+                throw error
+            }
+        }
+
+        type RouteSizingDecision = {
+            kind: 'REJECT' | 'SUPPRESS' | 'DISPATCH'
+            reason: string
+            effectiveSize?: number
+            details?: Record<string, unknown>
+        }
+
+        const createRouteSizingDecision = (
+            kind: RouteSizingDecision['kind'],
+            reason: string,
+            details: Record<string, unknown> = {},
+        ): RouteSizingDecision => ({ kind, reason, details })
+
+        const respondWithSizingDecision = async (
+            decision: RouteSizingDecision | SizingDecision,
+            policy: { sizing_mode: 'WEBHOOK_CAPPED' | 'MANAGED'; version: number } | null,
+            effectiveStrategyId?: string,
+        ): Promise<Response> => {
+            const details = decision.details ?? {}
+            const calculatedEffectiveSize = 'effectiveSize' in decision
+                ? decision.effectiveSize
+                : typeof details.effectiveSize === 'number'
+                    ? details.effectiveSize
+                    : undefined
+            const effectiveSize = calculatedEffectiveSize ?? (decision.kind === 'SUPPRESS' ? 0 : undefined)
+            const sizingDecision = {
+                kind: decision.kind,
+                reason: decision.reason,
+                ...(policy === null ? {} : {
+                    sizing_mode: policy.sizing_mode,
+                    policy_version: policy.version,
+                }),
+                ...(payload.size === undefined ? {} : { input_size: payload.size }),
+                ...(effectiveSize === undefined ? {} : { effective_size: effectiveSize }),
+                input_size_ignored: policy?.sizing_mode === 'MANAGED' && payload.size !== undefined,
+                details,
+            }
+            const eventStatus = decision.kind === 'REJECT'
+                ? 'rejected' as const
+                : decision.kind === 'SUPPRESS'
+                    ? 'suppressed' as const
+                    : 'accepted' as const
+            const eventResponse = await createEventOrDuplicate({
                 event_id: effectiveEventId,
                 source,
                 broker: payload.broker,
@@ -610,28 +707,89 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 size: payload.size,
                 occurred_at: new Date(payload.occurred_at),
                 received_at: new Date(),
-                status: symbolPaused ? 'suppressed' : 'accepted',
-                rejection_reason: symbolPaused ? 'symbol_paused' : undefined,
+                status: eventStatus,
+                rejection_reason: decision.kind === 'DISPATCH' ? undefined : decision.reason,
+                effective_strategy_id: effectiveStrategyId,
+                sizing_mode: policy?.sizing_mode,
+                input_size: payload.size,
+                effective_size: effectiveSize,
+                decision_kind: decision.kind,
+                decision_reason: decision.reason,
+                decision_details: details,
+                input_size_ignored: sizingDecision.input_size_ignored,
             })
-        } catch (error) {
-            if (error instanceof DuplicateEventError) {
+            if (eventResponse) return eventResponse
+
+            if (decision.kind === 'REJECT') {
                 logWebhookRejected({
                     requestId,
-                    reason: 'duplicated_event',
+                    reason: decision.reason,
                     sourceIp,
                     contentType,
                     rawBody,
                     payload,
                     eventId: effectiveEventId,
-                    error: errorBody('DUPLICATED_EVENT', 'event_id is duplicated').error,
+                    error: errorBody(decision.reason, `webhook sizing rejected: ${decision.reason}`).error,
                     reqLogger,
                 })
-                return c.json(errorBody('DUPLICATED_EVENT', 'event_id is duplicated'), 409)
+                return c.json({
+                    ...errorBody(decision.reason, `webhook sizing rejected: ${decision.reason}`),
+                    event_id: effectiveEventId,
+                    sizing_decision: sizingDecision,
+                }, 400)
             }
-            throw error
+
+            if (decision.kind === 'SUPPRESS') {
+                logWebhook('info', 'webhook:suppressed', {
+                    request_id: requestId,
+                    reason: decision.reason,
+                    sourceIp,
+                    event_id: effectiveEventId,
+                    broker: payload.broker,
+                    ticker: payload.ticker,
+                    symbol_id: symbolId,
+                    sizing_decision: sizingDecision,
+                    payload: redactSecrets(payload),
+                }, reqLogger)
+                return c.json({
+                    status: 'accepted',
+                    dispatch_status: 'suppressed',
+                    event_id: effectiveEventId,
+                    sizing_decision: sizingDecision,
+                }, 202)
+            }
+
+            logWebhook('info', 'webhook:accepted', {
+                request_id: requestId,
+                sourceIp,
+                event_id: effectiveEventId,
+                sizing_decision: sizingDecision,
+                payload: redactSecrets(payload),
+            }, reqLogger)
+            return c.json({
+                status: 'accepted',
+                dispatch_status: 'sizing_approved',
+                event_id: effectiveEventId,
+                sizing_decision: sizingDecision,
+            }, 202)
         }
 
         if (symbolPaused) {
+            const duplicateResponse = await createEventOrDuplicate({
+                event_id: effectiveEventId,
+                source,
+                broker: payload.broker,
+                symbol: payload.ticker,
+                side: payload.side,
+                order_type: payload.order_type ?? 'MARKET',
+                size: payload.size,
+                occurred_at: new Date(payload.occurred_at),
+                received_at: new Date(),
+                status: 'suppressed',
+                rejection_reason: 'symbol_paused',
+            })
+            if (duplicateResponse) return duplicateResponse
+
             logWebhook('info', 'webhook:suppressed', {
                 request_id: requestId,
                 reason: 'symbol_paused',
@@ -643,30 +801,272 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 payload: redactSecrets(payload),
             }, reqLogger)
 
-            const dispatchLogData = {
-                event_id: effectiveEventId,
-                broker: payload.broker,
-                ticker: payload.ticker,
-                side: payload.side,
-                size: payload.size,
-                request_payload: {
-                    eventId: effectiveEventId,
+            if (payload.size !== undefined) {
+                const dispatchLogData = {
+                    event_id: effectiveEventId,
                     broker: payload.broker,
                     ticker: payload.ticker,
                     side: payload.side,
                     size: payload.size,
-                    requestId,
-                },
-                response_payload: {
-                    status: 'suppressed',
-                    reason: 'symbol_paused',
-                },
-                result: 'suppressed' as const,
-                error_code: 'SYMBOL_PAUSED',
+                    request_payload: {
+                        eventId: effectiveEventId,
+                        broker: payload.broker,
+                        ticker: payload.ticker,
+                        side: payload.side,
+                        size: payload.size,
+                        requestId,
+                    },
+                    response_payload: {
+                        status: 'suppressed',
+                        reason: 'symbol_paused',
+                    },
+                    result: 'suppressed' as const,
+                    error_code: 'SYMBOL_PAUSED',
+                }
+                createOrderDispatchLog(dispatchLogData).catch(() => {})
             }
-            createOrderDispatchLog(dispatchLogData).catch(() => {})
 
             return c.json({ status: 'accepted', event_id: effectiveEventId, dispatch_status: 'suppressed' }, 202)
+        }
+
+        if (symbolStateInvalid) {
+            return respondWithSizingDecision(
+                createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
+                null,
+            )
+        }
+
+        const explicitStrategyId = payload.strategy_id !== undefined
+        const rawStrategyId = explicitStrategyId
+            ? payload.strategy_id
+            : payload.strategy === undefined
+                ? 'unknown'
+                : payload.strategy.trim().replace(/\s+/g, '_')
+        const effectiveStrategyId = rawStrategyId !== undefined && isValidStrategyId(rawStrategyId)
+            ? rawStrategyId
+            : undefined
+
+        // Explicit strategy_id is a strict contract.  Only an invalid legacy
+        // strategy name may use the migration fallback.
+        if (effectiveStrategyId === undefined && (explicitStrategyId || !allowUnregisteredStrategyPolicyFallback)) {
+            return respondWithSizingDecision(
+                createRouteSizingDecision('REJECT', 'INVALID_STRATEGY_ID'),
+                null,
+            )
+        }
+
+        let policy: Awaited<ReturnType<GetStrategySymbolPolicyFn>> = null
+        if (effectiveStrategyId !== undefined) {
+            try {
+                policy = await getStrategySymbolPolicy(effectiveStrategyId, symbolId)
+            } catch (error) {
+                if (error instanceof InvalidStoredStrategySymbolPolicyError) {
+                    return respondWithSizingDecision(
+                        createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
+                        null,
+                        effectiveStrategyId,
+                    )
+                }
+                if (error instanceof SymbolNotFoundError) {
+                    return respondWithSizingDecision(
+                        createRouteSizingDecision('REJECT', 'SYMBOL_NOT_FOUND'),
+                        null,
+                        effectiveStrategyId,
+                    )
+                }
+                if (error instanceof SymbolConstraintsRequiredError) {
+                    return respondWithSizingDecision(
+                        createRouteSizingDecision('REJECT', 'SYMBOL_CONSTRAINTS_REQUIRED'),
+                        null,
+                        effectiveStrategyId,
+                    )
+                }
+                logger.warn({
+                    event: 'strategy_symbol_policy:webhook_fetch_failed',
+                    error,
+                    strategy_id: effectiveStrategyId,
+                    symbol_id: symbolId,
+                }, 'failed to resolve strategy-symbol policy for webhook')
+                return c.json(errorBody('INTERNAL_ERROR', 'failed to resolve strategy-symbol policy'), 500)
+            }
+        }
+
+        if (policy === null) {
+            if (!allowUnregisteredStrategyPolicyFallback || (effectiveStrategyId === undefined && explicitStrategyId)) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'POLICY_NOT_FOUND'),
+                    null,
+                    effectiveStrategyId,
+                )
+            }
+
+            const fallbackSize = payload.size
+            if (fallbackSize === undefined) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'SIZE_REQUIRED'),
+                    null,
+                    effectiveStrategyId,
+                )
+            }
+            if (!Number.isFinite(fallbackSize) || fallbackSize <= 0) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'INVALID_SIZE'),
+                    null,
+                    effectiveStrategyId,
+                )
+            }
+
+            logger.warn({
+                event: 'webhook:unregistered_strategy_policy_fallback',
+                request_id: requestId,
+                event_id: effectiveEventId,
+                strategy_id: effectiveStrategyId,
+                symbol_id: symbolId,
+            }, 'using unregistered strategy policy fallback')
+
+            const duplicateResponse = await createEventOrDuplicate({
+                event_id: effectiveEventId,
+                source,
+                broker: payload.broker,
+                symbol: payload.ticker,
+                side: payload.side,
+                order_type: payload.order_type ?? 'MARKET',
+                size: fallbackSize,
+                occurred_at: new Date(payload.occurred_at),
+                received_at: new Date(),
+                status: 'accepted',
+            })
+            if (duplicateResponse) return duplicateResponse
+        } else {
+            if (typeof policy !== 'object' || Array.isArray(policy) ||
+                (policy.sizing_mode !== 'WEBHOOK_CAPPED' && policy.sizing_mode !== 'MANAGED') ||
+                !Number.isSafeInteger(policy.version) || policy.version <= 0 ||
+                policy.id !== `${effectiveStrategyId}:${symbolId}` ||
+                policy.strategy_id !== effectiveStrategyId ||
+                policy.symbol_id !== symbolId) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
+                    null,
+                    effectiveStrategyId,
+                )
+            }
+            if (tradableSymbol === null) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'SYMBOL_NOT_FOUND'),
+                    policy,
+                    effectiveStrategyId,
+                )
+            }
+
+            const constraints = tradableSymbol.order_constraints
+            if (constraints === undefined) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'SYMBOL_CONSTRAINTS_REQUIRED'),
+                    policy,
+                    effectiveStrategyId,
+                )
+            }
+            if (typeof constraints !== 'object' || constraints === null || Array.isArray(constraints) ||
+                !Number.isFinite(constraints.quantity_step) || constraints.quantity_step <= 0 ||
+                !Number.isFinite(constraints.min_order_size) || constraints.min_order_size <= 0 ||
+                (constraints.max_order_size !== undefined &&
+                    (!Number.isFinite(constraints.max_order_size) || constraints.max_order_size < constraints.min_order_size))) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
+                    policy,
+                    effectiveStrategyId,
+                )
+            }
+
+            if (policy.sizing_mode === 'MANAGED' && (
+                payload.stop_loss !== undefined ||
+                payload.take_profit !== undefined ||
+                payload.stop_loss_pct !== undefined ||
+                payload.take_profit_pct !== undefined
+            )) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'MANAGED_ATTACHED_ORDERS_UNSUPPORTED'),
+                    policy,
+                    effectiveStrategyId,
+                )
+            }
+
+            let position
+            try {
+                position = await getStrategySymbolPosition(effectiveStrategyId!, symbolId)
+            } catch (error) {
+                if (error instanceof InvalidStoredStrategySymbolPositionError) {
+                    return respondWithSizingDecision(
+                        createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
+                        policy,
+                        effectiveStrategyId,
+                    )
+                }
+                logger.warn({
+                    event: 'strategy_symbol_position:webhook_fetch_failed',
+                    error,
+                    strategy_id: effectiveStrategyId,
+                    symbol_id: symbolId,
+                }, 'failed to resolve strategy-symbol position for webhook')
+                return c.json(errorBody('INTERNAL_ERROR', 'failed to resolve strategy-symbol position'), 500)
+            }
+            if (position === null) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'POSITION_NOT_FOUND'),
+                    policy,
+                    effectiveStrategyId,
+                )
+            }
+            if (typeof position !== 'object' ||
+                position.id !== `${effectiveStrategyId}:${symbolId}` ||
+                position.strategy_id !== effectiveStrategyId ||
+                position.symbol_id !== symbolId ||
+                (position.status !== 'READY' && position.status !== 'MANUAL_REVIEW' && position.status !== 'MISMATCH')) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
+                    policy,
+                    effectiveStrategyId,
+                )
+            }
+            if (!Number.isFinite(position.confirmed_position) || !Number.isFinite(position.pending_delta)) {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
+                    policy,
+                    effectiveStrategyId,
+                )
+            }
+            if (position.status !== 'READY') {
+                return respondWithSizingDecision(
+                    createRouteSizingDecision('SUPPRESS', 'POSITION_NOT_READY', {
+                        effectivePosition: position.confirmed_position + position.pending_delta,
+                    }),
+                    policy,
+                    effectiveStrategyId,
+                )
+            }
+
+            const decision = calculateOrderSize({
+                policy,
+                constraints,
+                confirmedPosition: position.confirmed_position,
+                pendingDelta: position.pending_delta,
+                side: payload.side,
+                inputSize: payload.size,
+            })
+            return respondWithSizingDecision(decision, policy, effectiveStrategyId)
+        }
+
+        const dispatchSize = payload.size
+        if (dispatchSize === undefined) {
+            // The policy-backed branch and the fallback validation above both
+            // return before reaching this point. Keep the runtime guard close
+            // to the broker call so an invalid future branch cannot dispatch
+            // an undefined quantity.
+            return respondWithSizingDecision(
+                createRouteSizingDecision('REJECT', 'SIZE_REQUIRED'),
+                null,
+                effectiveStrategyId,
+            )
         }
 
         const pctToString = (v: string | number): string =>
@@ -685,7 +1085,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
             broker: payload.broker as BrokerName || undefined,
             ticker: payload.ticker,
             side: payload.side,
-            size: payload.size,
+            size: dispatchSize,
             requestId,
             ...(payload.dry_run ? { dryRun: true } : {}),
             ...(payload.price !== undefined ? { price: payload.price } : {}),
@@ -712,14 +1112,14 @@ export const createApp = (options: CreateAppOptions = {}) => {
             broker: payload.broker,
             ticker: payload.ticker,
             side: payload.side,
-            size: payload.size,
+            size: dispatchSize,
             provider_order_id: orderResult.ok ? orderResult.providerOrderId : undefined,
             request_payload: {
                 eventId: effectiveEventId,
                 broker: payload.broker,
                 ticker: payload.ticker,
                 side: payload.side,
-                size: payload.size,
+                size: dispatchSize,
                 requestId,
             },
             response_payload: orderResult.ok
@@ -744,7 +1144,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 ticker: payload.ticker,
                 side: payload.side,
                 order_type: (orderMethod === 'IFDOCO' || orderMethod === 'IFD') ? 'IFDOCO' : 'MARKET',
-                requested_size: payload.size,
+                requested_size: dispatchSize,
                 executed_size: 0,
                 executed_price: null,
                 status: 'PENDING',

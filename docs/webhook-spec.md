@@ -25,7 +25,7 @@ TradingView から受信するアラートを正規化し、bitFlyer 向け発�
 - `occurred_at` (integer): TradingView 側からこちらに向けて Webhook が送信された時刻（unix milliseconds）
 - `symbol` (string): 取引銘柄。`"brokerName:brokerTickerCode"` の形式（例: `"bitflyer:FX_BTC_JPY"`, `"saxo:CfdOnIndex:4911"`）を必須とする。ここからブローカーとティッカーが決定される。`brokerTickerCode` は broker に渡せる正規値を指定する。
 - `side` (string): `BUY` または `SELL`
-- `size` (number): 発注数量。`size > 0`
+- `size` (number, optional): 発注数量。`WEBHOOK_CAPPED` と policy 未登録 fallback では必須。`MANAGED` では省略でき、指定時は正の有限値として検証するが数量計算には使用しない。
 - `webhook_secret` (string): 共有シークレット
 
 ### 任意項目
@@ -34,6 +34,7 @@ TradingView から受信するアラートを正規化し、bitFlyer 向け発�
 - `price` (number): 価格情報。`stop_loss` / `take_profit` を使用する場合は必須
 - `interval` (string): TradingView の時間足
 - `strategy` (string): シグナル生成元の戦略名
+- `strategy_id` (string): sizing policy を参照する strategy ID。英数字、`_`、`-`のみ。指定時は `strategy` より優先する。
 - `note` (string): 運用メモ
 - `stop_loss` (string): ストップロス幅。`"2.5%"` のようなパーセント文字列で指定。`price` を基準に計算される
 - `take_profit` (string): テイクプロフィット幅。`"2.5%"` のようなパーセント文字列で指定。`price` を基準に計算される
@@ -49,7 +50,7 @@ TradingView から受信するアラートを正規化し、bitFlyer 向け発�
 3. `time` が ISO 8601 形式の文字列であること
 4. `occurred_at` が Unix time（milliseconds）の数値であること
 5. `side` が許可値であること
-6. `size` が正の数であること
+6. `size` が指定されている場合は number であること。正数・必須性は解決した sizing mode に従う
 7. `symbol` が 1 文字以上であること（`brokerName:brokerTickerCode` 形式）
 8. `order_type` 指定時は許可値であること（MVP は `MARKET` のみ）
 9. `webhook_secret` がサーバ設定値と一致すること
@@ -174,6 +175,21 @@ alert(json.stringify(
 - `order_dispatch_logs.error_code`: `SYMBOL_PAUSED`
 - レスポンス: `202 Accepted`
 
+### Sizing policy による webhook 判定
+
+symbol が active で strategy-symbol policy が登録されている場合、Webhook は policy、symbol の `order_constraints`、strategy の仮想 position を読み、`calculateOrderSize` の decision を返す。今回の route 判定は独立 read に基づく非 atomic な監査・HTTP 契約用であり、発注承認には使用しない。
+
+- `WEBHOOK_CAPPED`: `size` を候補数量として扱う。欠落は `SIZE_REQUIRED`、正数でない値は `INVALID_SIZE`、`quantity_step` 不一致は `INVALID_SIZE_INCREMENT`。
+- `MANAGED`: policy の `base_order_size` を使用する。`size` は指定時だけ監査し、`input_size_ignored: true` とする。`stop_loss`、`take_profit`、`stop_loss_pct`、`take_profit_pct` は `MANAGED_ATTACHED_ORDERS_UNSUPPORTED` で拒否する。
+- policy が disabled、上限・no-flip・最小数量・position 状態により発注できない場合は `202` と `dispatch_status: "suppressed"` を返す。
+- policy-backed の `DISPATCH` は sizing の承認だけを表し、`dispatch_status: "sizing_approved"` とする。broker dispatch、reservation、`pending_delta`、`orders_v2`、dispatch log は更新しない。
+
+decision の拒否は `400`、抑止は `202` で、いずれも `event_id` と `sizing_decision` を返す。`sizing_decision` には `kind`、`reason`、`sizing_mode`、`policy_version`、`input_size`、`effective_size`、`input_size_ignored`、calculator の `details` を含む。policy/constraints/position の欠落・破損は fail-closed である。
+
+`strategy_id` がない場合、legacy `strategy` の前後空白を除去し、連続 whitespace を `_` に変換した値を policy lookup に使用する。どちらもない場合は `unknown` を使用する。legacy `strategy` は orders の表示値として保持し、event ID 生成規則には `strategy_id` を追加しない。
+
+policy 未登録時は `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK=true`（既定値）の間だけ、正の `size` を必須とする既存 dispatch path を使用する。この fallback は sizing mode ではない。`false` にすると `POLICY_NOT_FOUND` を返して発注しない。環境変数は `true` または `false` 以外を許可しない。
+
 ## ログ仕様
 - 受信ログ: `event = "webhook:received"`
 - 受理ログ: `event = "webhook:accepted"`
@@ -182,6 +198,7 @@ alert(json.stringify(
 - 各ログは `request_id` を含む
 - 拒否ログは `reason`, `error`, `event_id`, `rawBody`, `payload` を可能な範囲で含む
 - `webhook_secret` はログ出力時に `[REDACTED]` へマスクする
+- policy-backed decision のログにも `webhook_secret` を出力しない
 
 ## 受け入れ観点
 - 正常系: 正常 payload + 正しい `webhook_secret` + 許可 IP + 未処理 event_id で `202`

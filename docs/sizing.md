@@ -110,3 +110,11 @@ step の整数比を安全な `Number` で表現できない値、非有限の�
 step 境界の canonical 表現が浮動小数点の丸めで入力値を僅かに上回る場合は、入力側の表現を維持する。step 整合判定で同一境界として扱える場合でも、`floorToQuantityStep(value, step)` の戻り値は数値として必ず `value` 以下である。
 
 この calculator は webhook schema、HTTP status、Firestore transaction、broker dispatch、注文監査の保存を担当しない。これらは後続の統合層が decision を解釈して実装する。
+
+## Webhook route との接続（reserve 延期）
+
+Webhook route は登録済み policy の strategy、symbol 制約、仮想 position を独立 read し、この calculator を呼び出して `REJECT` / `SUPPRESS` / `DISPATCH` を HTTP と `webhook_events` の監査へマッピングする。これは非 atomic な snapshot に基づく sizing decision であり、発注承認には使用しない。
+
+policy-backed の `DISPATCH` は `dispatch_status: "sizing_approved"` を返すだけで、broker dispatch、reservation 作成、position の `pending_delta`、`orders_v2`、dispatch log へ反映しない。reserve への接続は次の effective-size 統合タスクで行い、atomic reservation transaction 内から同じ calculator を再実行する。
+
+policy が未登録の場合の既存 dispatch は、移行用 `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK` が `true` のときだけ許可する。これは第三の sizing mode ではなく、policy 登録までの互換 fallback である。
