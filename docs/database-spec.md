@@ -228,7 +228,17 @@ event 単位の注文 reservation。position document 内の配列や subcollect
 
 状態遷移は自己遷移を冪等として許可する。`RESERVED` からは `DISPATCHED`、`RELEASED`、`MANUAL_REVIEW`、`DISPATCHED` からは `SETTLED`、`MANUAL_REVIEW` からは `DISPATCHED`、`RELEASED`、`SETTLED` へ遷移できる。`RELEASED` と `SETTLED` は終端状態である。timeout や結果不明を `RELEASED` へ自動遷移させず、`MANUAL_REVIEW` として reservation および position の pending を保持する。
 
-両 collection の repository は、検証済み document の全置換保存と document ID lookup による単一取得だけを提供する。position と reservation の同時更新、create-if-absent、compare-and-set、pending の加減算は後続の atomic transaction/reconciliation の責務である。現時点では backfill、TTL、追加の複合 index は行わない。
+両 collection の repository は、検証済み document の全置換保存と document ID lookup による単一取得だけを提供する。position と reservation の同時更新、create-if-absent、compare-and-set、pending の加減算は `strategy-symbol-reservation-service` の atomic transaction の責務である。現時点では backfill、TTL、追加の複合 index は行わない。
+
+### atomic reserve / dispatch outcome
+
+reserve は policy、tradable symbol、position、event reservation の document reference を同一 Firestore transaction snapshot で読み、全 read の後にのみ write を行う。policy、symbol の `order_constraints`、position の保存値は既存の strict parser で検証する。missing や破損値を 0 position・既定 constraint へ補完せず、policy/symbol/position の欠落はそれぞれ `POLICY_NOT_FOUND`、`SYMBOL_NOT_FOUND`、`POSITION_NOT_FOUND`、制約未設定は `SYMBOL_CONSTRAINTS_REQUIRED` として拒否する。position が `READY` 以外の場合は `POSITION_NOT_READY` として suppress し、書き込まない。
+
+reservation が存在しない event で calculator が `DISPATCH` を返した場合だけ、reservation を `RESERVED` で作成し、BUY の正または SELL の負の `reserved_delta` を position の `pending_delta` に加算する。position の `policy_version` と `updated_at` も同じ commit で更新する。calculator の `SUPPRESS` / `REJECT` は reservation を作成せず、position も更新しない。transaction の競合 retry では最新 snapshot から数量を再計算するため、複数の webhook が同じ strategy × symbol の上限を超えて予約することはない。
+
+同じ strategy × symbol × event の reservation が既に存在する場合、identity、order ID、side（`reserved_delta` の符号）が一致すれば calculator を再実行せず `DUPLICATE_EVENT` として suppress する。`RESERVED` の再処理も broker の受付有無を判定できないため再 dispatch しない。一致しない order ID または side は `EVENT_CONFLICT` とし、既存 state と pending を変更しない。
+
+dispatch outcome の更新も reservation と position を同一 transaction で再読込する。`CONFIRMED_SUCCESS` は `RESERVED` または `MANUAL_REVIEW` の reservation を `DISPATCHED` にし、pending は保持する。`CONFIRMED_FAILURE` は `RESERVED` または、手動確認後に未発注と確定した `MANUAL_REVIEW` から `RELEASED` に遷移し、同じ commit で `pending_delta -= reserved_delta` を行う。`RELEASED` への再適用は no-op とし、`DISPATCHED` / `SETTLED` からの release は拒否する。`UNKNOWN` は `RESERVED` / `DISPATCHED` の reservation と position を `MANUAL_REVIEW` にし、`reserved_delta` と pending を変更しない。結果不明の再適用、同じ outcome の再適用は no-op とする。許可されない逆遷移、非有限な加減算、保存値の破損は fail-closed で、片方だけを書き込まない。
 
 ## 8. `cron_metadata`
 Cloud Run 上で動作するスロットスケジューラーが、各周期タスクの実行済みスロットIDを管理するために使用する（詳細は [slot-scheduler.md](./slot-scheduler.md) を参照）。また、Saxo audit orderactivities の batch polling 状態も保持する。

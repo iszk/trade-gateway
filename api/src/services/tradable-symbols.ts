@@ -33,10 +33,24 @@ const toDate = (value: unknown): Date => {
 const isFinitePositiveNumber = (value: unknown): value is number =>
     typeof value === 'number' && Number.isFinite(value) && value > 0
 
-const assertValidOrderConstraints = (value: unknown): void => {
+/** A symbol snapshot is present but its identity or persisted shape is invalid. */
+class InvalidStoredTradableSymbolError extends Error {
+    readonly code = 'INVALID_STORED_SYMBOL'
+
+    constructor(message: string) {
+        super(message)
+        this.name = 'InvalidStoredTradableSymbolError'
+    }
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+)
+
+const assertValidOrderConstraints = (value: unknown): OrderConstraints | undefined => {
     if (value === undefined) return
 
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    if (!isRecord(value)) {
         throw new Error('invalid order_constraints')
     }
 
@@ -50,6 +64,34 @@ const assertValidOrderConstraints = (value: unknown): void => {
     if (constraints.max_order_size !== undefined &&
         (!isFinitePositiveNumber(constraints.max_order_size) || constraints.max_order_size < constraints.min_order_size)) {
         throw new Error('invalid order_constraints.max_order_size')
+    }
+
+    return {
+        quantity_step: constraints.quantity_step,
+        min_order_size: constraints.min_order_size,
+        ...(constraints.max_order_size === undefined ? {} : { max_order_size: constraints.max_order_size }),
+    }
+}
+
+/**
+ * Validate the identity and order constraints of a symbol snapshot read by an
+ * atomic transaction.  Legacy symbols may omit constraints, so `undefined`
+ * is returned for that case and the caller can apply its fail-closed policy.
+ */
+export const deserializeTradableSymbolOrderConstraints = (
+    value: unknown,
+    expectedSymbolId: string,
+): OrderConstraints | undefined => {
+    if (!isRecord(value)) {
+        throw new InvalidStoredTradableSymbolError('symbol document is not an object')
+    }
+    if (value.id !== expectedSymbolId || parseSymbolId(expectedSymbolId) === null) {
+        throw new InvalidStoredTradableSymbolError('symbol document identity does not match its document path')
+    }
+    try {
+        return assertValidOrderConstraints(value.order_constraints)
+    } catch {
+        throw new InvalidStoredTradableSymbolError('symbol order_constraints is invalid')
     }
 }
 
