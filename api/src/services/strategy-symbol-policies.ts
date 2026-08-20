@@ -359,6 +359,24 @@ const assertStoredPolicy = (
     } satisfies ManagedStrategySymbolPolicy
 }
 
+/**
+ * Validate and normalize a policy document read inside another Firestore
+ * transaction.  The policy repository intentionally keeps this parser
+ * private to its GET implementation, but atomic sizing must validate the
+ * exact same persisted contract before calculating a reservation.
+ */
+export const deserializeStrategySymbolPolicy = (
+    value: unknown,
+    expectedId: string,
+    expectedStrategyId: string,
+    expectedSymbolId: string,
+): StrategySymbolPolicy => assertStoredPolicy(
+    value,
+    expectedId,
+    expectedStrategyId,
+    expectedSymbolId,
+)
+
 const getSnapshotId = (snapshot: unknown, fallback: string): string => (
     isRecord(snapshot) && typeof snapshot.id === 'string' ? snapshot.id : fallback
 )

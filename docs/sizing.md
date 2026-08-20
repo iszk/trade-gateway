@@ -88,6 +88,19 @@ type SizingDecision =
 
 `DISPATCH` の `effectiveSize` は正・有限で、step 整合済みであり、すべての共通制約適用後の数量である。`SUPPRESS` は入力が有効だが安全制約により発注しない状態、`REJECT` は入力契約違反または安全に計算できない状態を表す。
 
+## atomic reservation service
+
+`calculateOrderSize` は純粋関数のまま維持し、`strategy-symbol-reservation-service.ts` が Firestore transaction の snapshot と decision を結び付ける。service は policy、symbol の `order_constraints`、position、event reservation を同じ transaction で読み、同じ snapshot の `confirmed_position + pending_delta` を calculator へ渡す。
+
+- `SUPPRESS` / `REJECT` の decision では reservation と position を書き換えない。calculator の decision はそのまま呼び出し元へ返す。
+- `DISPATCH` のときだけ、BUY を正、SELL を負とした `reserved_delta` を作り、reservation の `RESERVED` 作成と position の `pending_delta` 加算を同一 commit で行う。position の `policy_version` も参照した policy version に更新する。
+- 永続化直前にも canonical `calculateOrderSize` を同じ snapshot で再評価し、`DISPATCH` 数量が一致しない calculator decision は `INVALID_STORED_STATE` として保存しない。これによりテスト用・互換用の calculator seam が数量制約を迂回できない。
+- position document の競合で transaction が retry された場合は、最新の pending を用いて calculator を再実行する。order ID、reservation ID、transaction 外で決めた timestamp は retry ごとに生成し直さない。
+- 既存 reservation の event は calculator を再実行せず `SUPPRESS / DUPLICATE_EVENT` とする。order ID または side と符号が一致しない場合は `EVENT_CONFLICT` として永続状態を変更しない。
+- dispatch 成功は reservation を `DISPATCHED` にし pending を保持する。明確な失敗だけが `RELEASED` へ遷移し、同じ transaction で `pending_delta -= reserved_delta` を行う。結果不明は reservation と position を `MANUAL_REVIEW` にして pending を保持する。
+
+policy、symbol の制約、position が存在しない、または保存済み document が壊れている場合は 0 や既定値へ補完せず fail-closed とする。
+
 ## 浮動小数点と fail-closed
 
 数量 helper は、`0.1 + 0.2` のような IEEE 754 の演算由来誤差だけを step 境界の比較で許容する。`0.06` を step `0.1` として受理するような入力補正は行わない。
