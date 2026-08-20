@@ -14,7 +14,9 @@ import type { OrderUpdate } from './services/orders-v2.js'
 import type { SlotScheduler, RunIfNewSlotParams } from './services/slot-scheduler.js'
 import type { TradableSymbol } from './types/tradable-symbol.js'
 import type { StrategySymbolPolicy } from './types/strategy-symbol-policy.js'
+import type { StrategySymbolPosition } from './types/strategy-symbol-position.js'
 import { InvalidStrategySymbolPolicyError, SymbolConstraintsRequiredError, SymbolNotFoundError } from './services/strategy-symbol-policies.js'
+import { InvalidStoredTradableSymbolError } from './services/tradable-symbols.js'
 
 const createLoggerStub = () => {
     const calls: Record<string, unknown>[] = []
@@ -76,6 +78,10 @@ const createAppForTests = (options: Parameters<typeof createApp>[0] = {}) =>
         },
         ensureTradableSymbol: async () => {},
         listOrderUpdates: async () => [],
+        // The production default always resolves the policy, including when a
+        // symbol is missing. Keep unrelated legacy route tests deterministic;
+        // policy-specific tests override this seam explicitly.
+        getStrategySymbolPolicy: async () => null,
         ...options,
     })
 
@@ -158,6 +164,55 @@ const makeTradableSymbol = (overrides: Partial<TradableSymbol> = {}): TradableSy
     updated_at: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
 })
+
+const makeSizingPolicy = (overrides: Partial<StrategySymbolPolicy> = {}): StrategySymbolPolicy => ({
+    id: 'alpha:bitflyer:BTC_JPY',
+    strategy_id: 'alpha',
+    symbol_id: 'bitflyer:BTC_JPY',
+    sizing_mode: 'WEBHOOK_CAPPED',
+    enabled: true,
+    max_abs_position: 5,
+    no_flip: true,
+    version: 3,
+    created_at: new Date('2026-01-01T00:00:00Z'),
+    updated_at: new Date('2026-01-01T00:00:00Z'),
+    ...overrides,
+} as StrategySymbolPolicy)
+
+const makeStrategySymbolPosition = (overrides: Partial<StrategySymbolPosition> = {}): StrategySymbolPosition => ({
+    id: 'alpha:bitflyer:BTC_JPY',
+    strategy_id: 'alpha',
+    symbol_id: 'bitflyer:BTC_JPY',
+    confirmed_position: 0,
+    pending_delta: 0,
+    status: 'READY',
+    policy_version: 3,
+    updated_at: new Date('2026-01-01T00:00:00Z'),
+    reconciled_at: null,
+    ...overrides,
+})
+
+const createSizingRouteFixture = (options: Parameters<typeof createApp>[0] = {}) => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent, events } = createWebhookEventStub()
+    const { createOrderDispatchLog, logs } = createOrderDispatchLogStub()
+    const addedOrders: unknown[] = []
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+        createOrderDispatchLog,
+        addOrderV2: async (order) => { addedOrders.push(order) },
+        getTradableSymbol: async () => makeTradableSymbol({
+            order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
+        }),
+        getStrategySymbolPolicy: async () => makeSizingPolicy(),
+        getStrategySymbolPosition: async () => makeStrategySymbolPosition(),
+        ...options,
+    })
+    return { app, dispatchCalls, events, logs, addedOrders }
+}
 
 const makeOrderV2 = (overrides: Partial<OrderV2> = {}): OrderV2 => ({
     id: `ord-${Math.random()}`,
@@ -1063,6 +1118,627 @@ test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => 
         requestId: receivedLog?.request_id,
     })
 })
+
+test('POST /api/webhooks/tradingview policy-backed WEBHOOK_CAPPED returns sizing approval without dispatch', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent, events } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+        getTradableSymbol: async () => makeTradableSymbol({
+            order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
+        }),
+        getStrategySymbolPolicy: async () => makeSizingPolicy(),
+        getStrategySymbolPosition: async () => makeStrategySymbolPosition(),
+    })
+
+    const res = await postWebhook(app, {
+        ...makePayload('evt-sizing-capped-1'),
+        strategy: 'alpha',
+        size: 0.2,
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.equal(body.dispatch_status, 'sizing_approved')
+    assert.equal(body.sizing_decision.kind, 'DISPATCH')
+    assert.equal(body.sizing_decision.sizing_mode, 'WEBHOOK_CAPPED')
+    assert.equal(body.sizing_decision.policy_version, 3)
+    assert.equal(body.sizing_decision.input_size, 0.2)
+    assert.equal(body.sizing_decision.effective_size, 0.2)
+    assert.equal(body.sizing_decision.input_size_ignored, false)
+    assert.equal(dispatchCalls.length, 0)
+    assert.equal(events[0]?.status, 'accepted')
+    assert.equal(events[0]?.decision_kind, 'DISPATCH')
+    assert.equal(events[0]?.effective_strategy_id, 'alpha')
+})
+
+test('POST /api/webhooks/tradingview rejects missing size for WEBHOOK_CAPPED after policy resolution', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent, events } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+        getTradableSymbol: async () => makeTradableSymbol({
+            order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
+        }),
+        getStrategySymbolPolicy: async () => makeSizingPolicy(),
+        getStrategySymbolPosition: async () => makeStrategySymbolPosition(),
+    })
+
+    const { size: _size, ...withoutSize } = makePayload('evt-sizing-required-1')
+    const res = await postWebhook(app, { ...withoutSize, strategy: 'alpha' })
+    const body = await res.json()
+
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'SIZE_REQUIRED')
+    assert.equal(body.sizing_decision.reason, 'SIZE_REQUIRED')
+    assert.equal(dispatchCalls.length, 0)
+    assert.equal(events[0]?.status, 'rejected')
+    assert.equal(events[0]?.rejection_reason, 'SIZE_REQUIRED')
+})
+
+test('POST /api/webhooks/tradingview policy-backed MANAGED ignores a valid input size', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent, events } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+        getTradableSymbol: async () => makeTradableSymbol({
+            order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
+        }),
+        getStrategySymbolPolicy: async () => makeSizingPolicy({
+            id: 'managed:bitflyer:BTC_JPY',
+            strategy_id: 'managed',
+            sizing_mode: 'MANAGED',
+            base_order_size: 0.5,
+            taper_strength: 0,
+        }),
+        getStrategySymbolPosition: async () => makeStrategySymbolPosition({
+            id: 'managed:bitflyer:BTC_JPY',
+            strategy_id: 'managed',
+        }),
+    })
+
+    const res = await postWebhook(app, {
+        ...makePayload('evt-sizing-managed-1'),
+        strategy: 'managed',
+        size: 99,
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.equal(body.dispatch_status, 'sizing_approved')
+    assert.equal(body.sizing_decision.sizing_mode, 'MANAGED')
+    assert.equal(body.sizing_decision.input_size, 99)
+    assert.equal(body.sizing_decision.input_size_ignored, true)
+    assert.equal(body.sizing_decision.effective_size, 0.5)
+    assert.equal(dispatchCalls.length, 0)
+    assert.equal(events[0]?.input_size, 99)
+    assert.equal(events[0]?.input_size_ignored, true)
+})
+
+test('POST /api/webhooks/tradingview policy-backed suppresses without dispatch or dispatch log', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent } = createWebhookEventStub()
+    const { createOrderDispatchLog, logs } = createOrderDispatchLogStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        dispatchOrder,
+        createWebhookEvent,
+        createOrderDispatchLog,
+        getTradableSymbol: async () => makeTradableSymbol({
+            order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
+        }),
+        getStrategySymbolPolicy: async () => makeSizingPolicy({ enabled: false }),
+        getStrategySymbolPosition: async () => makeStrategySymbolPosition(),
+    })
+
+    const res = await postWebhook(app, { ...makePayload('evt-sizing-suppress-1'), strategy: 'alpha' })
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.equal(body.dispatch_status, 'suppressed')
+    assert.equal(body.sizing_decision.reason, 'POLICY_DISABLED')
+    assert.equal(dispatchCalls.length, 0)
+    assert.equal(logs.length, 0)
+})
+
+test('POST /api/webhooks/tradingview policy fallback OFF rejects unregistered policy', async () => {
+    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const { createWebhookEvent, events } = createWebhookEventStub()
+    const app = createAppForTests({
+        webhookSecret: 'test-secret',
+        sourceIpAllowlist: new Set(['52.89.214.238']),
+        allowUnregisteredStrategyPolicyFallback: false,
+        dispatchOrder,
+        createWebhookEvent,
+        getTradableSymbol: async () => makeTradableSymbol(),
+        getStrategySymbolPolicy: async () => null,
+    })
+
+    const res = await postWebhook(app, { ...makePayload('evt-sizing-policy-missing-1'), strategy: 'alpha' })
+    const body = await res.json()
+
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'POLICY_NOT_FOUND')
+    assert.equal(body.sizing_decision.reason, 'POLICY_NOT_FOUND')
+    assert.equal(dispatchCalls.length, 0)
+    assert.equal(events[0]?.status, 'rejected')
+})
+
+test('POST /api/webhooks/tradingview resolves policy before treating a missing symbol as fallback', async () => {
+    const policyCalls: { strategyId: string; symbolId: string }[] = []
+    const fixture = createSizingRouteFixture({
+        getTradableSymbol: async () => null,
+        getStrategySymbolPolicy: async (strategyId, symbolId) => {
+            policyCalls.push({ strategyId, symbolId })
+            return makeSizingPolicy()
+        },
+    })
+
+    const res = await postWebhook(fixture.app, { ...makePayload('evt-sizing-symbol-missing-policy-1'), strategy: 'alpha' })
+    const body = await res.json()
+
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'SYMBOL_NOT_FOUND')
+    assert.equal(body.sizing_decision.reason, 'SYMBOL_NOT_FOUND')
+    assert.deepEqual(policyCalls, [{ strategyId: 'alpha', symbolId: 'bitflyer:BTC_JPY' }])
+    assert.equal(fixture.dispatchCalls.length, 0)
+    assert.equal(fixture.addedOrders.length, 0)
+    assert.equal(fixture.logs.length, 0)
+    assert.equal(fixture.events[0]?.status, 'rejected')
+    assert.equal(fixture.events[0]?.rejection_reason, 'SYMBOL_NOT_FOUND')
+})
+
+test('POST /api/webhooks/tradingview allows fallback only after an explicit missing-policy result', async () => {
+    const policyCalls: string[] = []
+    const fixture = createSizingRouteFixture({
+        getTradableSymbol: async () => null,
+        getStrategySymbolPolicy: async (strategyId) => {
+            policyCalls.push(strategyId)
+            return null
+        },
+    })
+
+    const res = await postWebhook(fixture.app, { ...makePayload('evt-sizing-symbol-missing-fallback-1'), strategy: 'alpha' })
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(policyCalls, ['alpha'])
+    assert.equal(fixture.dispatchCalls.length, 1)
+    assert.equal(fixture.addedOrders.length, 1)
+})
+
+test('POST /api/webhooks/tradingview maps corrupt stored symbol constraints to INVALID_STORED_STATE', async () => {
+    const fixture = createSizingRouteFixture({
+        getTradableSymbol: async () => {
+            throw new InvalidStoredTradableSymbolError('invalid order_constraints.quantity_step')
+        },
+    })
+
+    const res = await postWebhook(fixture.app, { ...makePayload('evt-sizing-corrupt-symbol-1'), strategy: 'alpha' })
+    const body = await res.json()
+
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'INVALID_STORED_STATE')
+    assert.equal(body.sizing_decision.reason, 'INVALID_STORED_STATE')
+    assert.equal(fixture.events[0]?.status, 'rejected')
+    assert.equal(fixture.events[0]?.rejection_reason, 'INVALID_STORED_STATE')
+    assert.equal(fixture.dispatchCalls.length, 0)
+    assert.equal(fixture.addedOrders.length, 0)
+})
+
+test('POST /api/webhooks/tradingview keeps operational symbol read failures as 500', async () => {
+    const fixture = createSizingRouteFixture({
+        getTradableSymbol: async () => {
+            throw new Error('firestore unavailable')
+        },
+    })
+
+    const res = await postWebhook(fixture.app, { ...makePayload('evt-sizing-symbol-read-failure-1'), strategy: 'alpha' })
+
+    assert.equal(res.status, 500)
+    assert.deepEqual(await res.json(), {
+        error: {
+            code: 'INTERNAL_ERROR',
+            message: 'failed to fetch symbol',
+        },
+    })
+    assert.equal(fixture.events.length, 0)
+    assert.equal(fixture.dispatchCalls.length, 0)
+})
+
+test('POST /api/webhooks/tradingview rejects a malformed symbol snapshot before fallback', async () => {
+    const fixture = createSizingRouteFixture({
+        getTradableSymbol: async () => ({
+            ...makeTradableSymbol(),
+            id: 'bitflyer:OTHER_JPY',
+        } as TradableSymbol),
+        getStrategySymbolPolicy: async () => {
+            throw new Error('policy lookup must not run for malformed symbol snapshot')
+        },
+    })
+
+    const res = await postWebhook(fixture.app, { ...makePayload('evt-sizing-malformed-symbol-snapshot-1'), strategy: 'alpha' })
+    const body = await res.json()
+
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'INVALID_STORED_STATE')
+    assert.equal(fixture.events[0]?.status, 'rejected')
+    assert.equal(fixture.dispatchCalls.length, 0)
+})
+
+test('POST /api/webhooks/tradingview rejects a WEBHOOK_CAPPED size that is not step-aligned', async () => {
+    const { logger, calls } = createLoggerStub()
+    const fixture = createSizingRouteFixture({ logger })
+    const res = await postWebhook(fixture.app, {
+        ...makePayload('evt-sizing-step-invalid-1'),
+        strategy: 'alpha',
+        size: 0.15,
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'INVALID_SIZE_INCREMENT')
+    assert.equal(body.sizing_decision.reason, 'INVALID_SIZE_INCREMENT')
+    assert.equal(fixture.events[0]?.status, 'rejected')
+    assert.equal(fixture.dispatchCalls.length, 0)
+    assert.equal(fixture.logs.length, 0)
+    assert.equal(stringifyLogCalls(calls).includes('test-secret'), false)
+})
+
+for (const scenario of [
+    {
+        name: 'below minimum order size',
+        payload: { size: 0.05 },
+        symbol: { order_constraints: { quantity_step: 0.01, min_order_size: 0.1 } },
+        policy: {},
+        position: {},
+        reason: 'BELOW_MIN_ORDER_SIZE',
+    },
+    {
+        name: 'no remaining headroom at max position',
+        payload: { size: 0.1 },
+        symbol: { order_constraints: { quantity_step: 0.1, min_order_size: 0.1 } },
+        policy: { max_abs_position: 1 },
+        position: { confirmed_position: 1 },
+        reason: 'MAX_POSITION',
+    },
+    {
+        name: 'no flip below the minimum order size',
+        payload: { size: 0.5, side: 'SELL' },
+        symbol: { order_constraints: { quantity_step: 0.1, min_order_size: 0.1 } },
+        policy: {},
+        position: { confirmed_position: 0.05 },
+        reason: 'NO_FLIP',
+    },
+    {
+        name: 'position is not ready',
+        payload: { size: 0.1 },
+        symbol: { order_constraints: { quantity_step: 0.1, min_order_size: 0.1 } },
+        policy: {},
+        position: { status: 'MANUAL_REVIEW' as const },
+        reason: 'POSITION_NOT_READY',
+    },
+] as const) {
+    test(`POST /api/webhooks/tradingview suppresses sizing decision: ${scenario.name}`, async () => {
+        const fixture = createSizingRouteFixture({
+            getTradableSymbol: async () => makeTradableSymbol(scenario.symbol),
+            getStrategySymbolPolicy: async () => makeSizingPolicy(scenario.policy),
+            getStrategySymbolPosition: async () => makeStrategySymbolPosition(scenario.position),
+        })
+
+        const res = await postWebhook(fixture.app, {
+            ...makePayload(`evt-sizing-suppress-${scenario.name}`),
+            strategy: 'alpha',
+            ...scenario.payload,
+        })
+        const body = await res.json()
+
+        assert.equal(res.status, 202)
+        assert.equal(body.dispatch_status, 'suppressed')
+        assert.equal(body.sizing_decision.kind, 'SUPPRESS')
+        assert.equal(body.sizing_decision.reason, scenario.reason)
+        assert.equal(fixture.dispatchCalls.length, 0)
+        assert.equal(fixture.addedOrders.length, 0)
+        assert.equal(fixture.logs.length, 0)
+        assert.equal(fixture.events[0]?.status, 'suppressed')
+        assert.equal(fixture.events[0]?.rejection_reason, scenario.reason)
+    })
+}
+
+test('POST /api/webhooks/tradingview gives strategy_id precedence over the legacy strategy field', async () => {
+    const policyCalls: string[] = []
+    const fixture = createSizingRouteFixture({
+        getStrategySymbolPolicy: async (strategyId) => {
+            policyCalls.push(strategyId)
+            return makeSizingPolicy()
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload('evt-sizing-strategy-id-priority-1'),
+        strategy: 'display name',
+        strategy_id: 'alpha',
+        size: 0.1,
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.equal(body.dispatch_status, 'sizing_approved')
+    assert.deepEqual(policyCalls, ['alpha'])
+    assert.equal(fixture.events[0]?.effective_strategy_id, 'alpha')
+})
+
+test('POST /api/webhooks/tradingview normalizes legacy strategy whitespace for policy identity', async () => {
+    const policyCalls: string[] = []
+    const policy = makeSizingPolicy({
+        id: 'alpha_strategy_v2:bitflyer:BTC_JPY',
+        strategy_id: 'alpha_strategy_v2',
+    })
+    const position = makeStrategySymbolPosition({
+        id: 'alpha_strategy_v2:bitflyer:BTC_JPY',
+        strategy_id: 'alpha_strategy_v2',
+    })
+    const fixture = createSizingRouteFixture({
+        getStrategySymbolPolicy: async (strategyId) => {
+            policyCalls.push(strategyId)
+            return policy
+        },
+        getStrategySymbolPosition: async () => position,
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload('evt-sizing-strategy-whitespace-1'),
+        strategy: ' alpha   strategy_v2 ',
+        size: 0.1,
+    })
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(policyCalls, ['alpha_strategy_v2'])
+    assert.equal(fixture.events[0]?.effective_strategy_id, 'alpha_strategy_v2')
+})
+
+test('POST /api/webhooks/tradingview uses unknown when strategy fields are absent', async () => {
+    const policyCalls: string[] = []
+    const fixture = createSizingRouteFixture({
+        getTradableSymbol: async () => null,
+        getStrategySymbolPolicy: async (strategyId) => {
+            policyCalls.push(strategyId)
+            return null
+        },
+    })
+    const { strategy: _strategy, ...payloadWithoutStrategy } = {
+        ...makePayload('evt-sizing-strategy-unknown-1'),
+        strategy: 'alpha',
+    }
+
+    const res = await postWebhook(fixture.app, payloadWithoutStrategy)
+
+    assert.equal(res.status, 202)
+    assert.deepEqual(policyCalls, ['unknown'])
+    assert.equal(fixture.dispatchCalls.length, 1)
+    assert.equal(fixture.events[0]?.status, 'accepted')
+})
+
+test('POST /api/webhooks/tradingview invalid legacy strategy uses fallback only when enabled', async () => {
+    const enabled = createSizingRouteFixture({
+        getStrategySymbolPolicy: async () => {
+            throw new Error('policy lookup must not run for invalid legacy identity')
+        },
+    })
+    const enabledResponse = await postWebhook(enabled.app, {
+        ...makePayload('evt-sizing-invalid-legacy-on-1'),
+        strategy: 'legacy/id',
+    })
+
+    assert.equal(enabledResponse.status, 202)
+    assert.equal(enabled.dispatchCalls.length, 1)
+
+    const disabled = createSizingRouteFixture({
+        allowUnregisteredStrategyPolicyFallback: false,
+        getStrategySymbolPolicy: async () => {
+            throw new Error('policy lookup must not run for invalid legacy identity')
+        },
+    })
+    const disabledResponse = await postWebhook(disabled.app, {
+        ...makePayload('evt-sizing-invalid-legacy-off-1'),
+        strategy: 'legacy/id',
+    })
+    const disabledBody = await disabledResponse.json()
+
+    assert.equal(disabledResponse.status, 400)
+    assert.equal(disabledBody.error.code, 'INVALID_STRATEGY_ID')
+    assert.equal(disabled.events[0]?.status, 'rejected')
+    assert.equal(disabled.dispatchCalls.length, 0)
+})
+
+test('POST /api/webhooks/tradingview rejects an invalid explicit strategy_id without fallback', async () => {
+    const fixture = createSizingRouteFixture({
+        getStrategySymbolPolicy: async () => {
+            throw new Error('policy lookup must not run for invalid explicit identity')
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload('evt-sizing-invalid-explicit-strategy-id-1'),
+        strategy: 'alpha',
+        strategy_id: 'alpha/id',
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 400)
+    assert.equal(body.error.code, 'INVALID_STRATEGY_ID')
+    assert.equal(fixture.events[0]?.status, 'rejected')
+    assert.equal(fixture.dispatchCalls.length, 0)
+})
+
+const managedRoutePolicy = makeSizingPolicy({
+    id: 'managed:bitflyer:BTC_JPY',
+    strategy_id: 'managed',
+    sizing_mode: 'MANAGED',
+    base_order_size: 0.5,
+    taper_strength: 0,
+})
+const managedRoutePosition = makeStrategySymbolPosition({
+    id: 'managed:bitflyer:BTC_JPY',
+    strategy_id: 'managed',
+})
+
+test('POST /api/webhooks/tradingview allows MANAGED payloads without size', async () => {
+    const fixture = createSizingRouteFixture({
+        getStrategySymbolPolicy: async () => managedRoutePolicy,
+        getStrategySymbolPosition: async () => managedRoutePosition,
+    })
+    const { size: _size, ...payloadWithoutSize } = makePayload('evt-sizing-managed-no-size-1')
+
+    const res = await postWebhook(fixture.app, { ...payloadWithoutSize, strategy: 'managed' })
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.equal(body.dispatch_status, 'sizing_approved')
+    assert.equal(body.sizing_decision.kind, 'DISPATCH')
+    assert.equal(body.sizing_decision.effective_size, 0.5)
+    assert.equal(body.sizing_decision.input_size_ignored, false)
+    assert.equal(fixture.dispatchCalls.length, 0)
+    assert.equal(fixture.addedOrders.length, 0)
+})
+
+for (const invalidSize of [0, -1]) {
+    test(`POST /api/webhooks/tradingview rejects MANAGED non-positive size ${invalidSize}`, async () => {
+        const fixture = createSizingRouteFixture({
+            getStrategySymbolPolicy: async () => managedRoutePolicy,
+            getStrategySymbolPosition: async () => managedRoutePosition,
+        })
+
+        const res = await postWebhook(fixture.app, {
+            ...makePayload(`evt-sizing-managed-invalid-size-${invalidSize}`),
+            strategy: 'managed',
+            size: invalidSize,
+        })
+        const body = await res.json()
+
+        assert.equal(res.status, 400)
+        assert.equal(body.error.code, 'INVALID_SIZE')
+        assert.equal(body.sizing_decision.reason, 'INVALID_SIZE')
+        assert.equal(fixture.events[0]?.status, 'rejected')
+        assert.equal(fixture.dispatchCalls.length, 0)
+        assert.equal(fixture.addedOrders.length, 0)
+    })
+}
+
+for (const [field, value] of [
+    ['stop_loss', '1'] as const,
+    ['take_profit', '1'] as const,
+    ['stop_loss_pct', 1] as const,
+    ['take_profit_pct', 1] as const,
+]) {
+    test(`POST /api/webhooks/tradingview rejects MANAGED attached order field ${field}`, async () => {
+        const fixture = createSizingRouteFixture({
+            getStrategySymbolPolicy: async () => managedRoutePolicy,
+            getStrategySymbolPosition: async () => managedRoutePosition,
+        })
+
+        const res = await postWebhook(fixture.app, {
+            ...makePayload(`evt-sizing-managed-attached-${field}`),
+            strategy: 'managed',
+            [field]: value,
+        })
+        const body = await res.json()
+
+        assert.equal(res.status, 400)
+        assert.equal(body.error.code, 'MANAGED_ATTACHED_ORDERS_UNSUPPORTED')
+        assert.equal(body.sizing_decision.reason, 'MANAGED_ATTACHED_ORDERS_UNSUPPORTED')
+        assert.equal(fixture.events[0]?.status, 'rejected')
+        assert.equal(fixture.dispatchCalls.length, 0)
+        assert.equal(fixture.addedOrders.length, 0)
+    })
+}
+
+test('POST /api/webhooks/tradingview policy-backed DISPATCH does not call broker, orders_v2, or dispatch log', async () => {
+    const fixture = createSizingRouteFixture()
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload('evt-sizing-side-effect-boundary-1'),
+        strategy: 'alpha',
+        size: 0.1,
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.equal(body.dispatch_status, 'sizing_approved')
+    assert.equal(fixture.dispatchCalls.length, 0)
+    assert.equal(fixture.addedOrders.length, 0)
+    assert.equal(fixture.logs.length, 0)
+})
+
+for (const scenario of [
+    {
+        name: 'missing constraints',
+        symbol: makeTradableSymbol(),
+        position: makeStrategySymbolPosition(),
+        policy: undefined,
+        reason: 'SYMBOL_CONSTRAINTS_REQUIRED',
+    },
+    {
+        name: 'malformed constraints',
+        symbol: makeTradableSymbol({ order_constraints: { quantity_step: 0, min_order_size: 0.1 } }),
+        position: makeStrategySymbolPosition(),
+        policy: undefined,
+        reason: 'INVALID_STORED_STATE',
+    },
+    {
+        name: 'missing position',
+        symbol: makeTradableSymbol({ order_constraints: { quantity_step: 0.1, min_order_size: 0.1 } }),
+        position: null,
+        policy: undefined,
+        reason: 'POSITION_NOT_FOUND',
+    },
+    {
+        name: 'malformed position',
+        symbol: makeTradableSymbol({ order_constraints: { quantity_step: 0.1, min_order_size: 0.1 } }),
+        position: { ...makeStrategySymbolPosition(), confirmed_position: Number.NaN },
+        policy: undefined,
+        reason: 'INVALID_STORED_STATE',
+    },
+    {
+        name: 'malformed policy',
+        symbol: makeTradableSymbol({ order_constraints: { quantity_step: 0.1, min_order_size: 0.1 } }),
+        position: makeStrategySymbolPosition(),
+        policy: { ...makeSizingPolicy(), version: 0 },
+        reason: 'INVALID_STORED_STATE',
+    },
+] as const) {
+    test(`POST /api/webhooks/tradingview rejects ${scenario.name}`, async () => {
+        const fixture = createSizingRouteFixture({
+            getTradableSymbol: async () => scenario.symbol,
+            getStrategySymbolPolicy: async () => scenario.policy ?? makeSizingPolicy(),
+            getStrategySymbolPosition: async () => scenario.position,
+        })
+
+        const res = await postWebhook(fixture.app, {
+            ...makePayload(`evt-sizing-state-${scenario.name}`),
+            strategy: 'alpha',
+        })
+        const body = await res.json()
+
+        assert.equal(res.status, 400)
+        assert.equal(body.error.code, scenario.reason)
+        assert.equal(body.sizing_decision.reason, scenario.reason)
+        assert.equal(fixture.events[0]?.status, 'rejected')
+        assert.equal(fixture.events[0]?.rejection_reason, scenario.reason)
+        assert.equal(fixture.dispatchCalls.length, 0)
+        assert.equal(fixture.addedOrders.length, 0)
+        assert.equal(fixture.logs.length, 0)
+    })
+}
 
 test('POST /api/webhooks/tradingview suppresses dispatch when symbol is paused', async () => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()

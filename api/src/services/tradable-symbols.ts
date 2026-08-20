@@ -34,7 +34,7 @@ const isFinitePositiveNumber = (value: unknown): value is number =>
     typeof value === 'number' && Number.isFinite(value) && value > 0
 
 /** A symbol snapshot is present but its identity or persisted shape is invalid. */
-class InvalidStoredTradableSymbolError extends Error {
+export class InvalidStoredTradableSymbolError extends Error {
     readonly code = 'INVALID_STORED_SYMBOL'
 
     constructor(message: string) {
@@ -96,7 +96,12 @@ export const deserializeTradableSymbolOrderConstraints = (
 }
 
 const fromFirestoreTradableSymbol = (data: TradableSymbol): TradableSymbol => {
-    assertValidOrderConstraints(data.order_constraints)
+    try {
+        assertValidOrderConstraints(data.order_constraints)
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'invalid order_constraints'
+        throw new InvalidStoredTradableSymbolError(message)
+    }
 
     return {
         ...data,

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createEnsureTradableSymbolFn, createGetTradableSymbolFn, createListTradableSymbolsFn, createSymbolId, createUpdateTradeControlFn, createUpsertTradableSymbolFn, parseSymbolId } from './tradable-symbols.js'
+import { createEnsureTradableSymbolFn, createGetTradableSymbolFn, createListTradableSymbolsFn, createSymbolId, createUpdateTradeControlFn, createUpsertTradableSymbolFn, InvalidStoredTradableSymbolError, parseSymbolId } from './tradable-symbols.js'
 import type { OrderConstraints } from '../types/tradable-symbol.js'
 
 const makeFirestoreMock = () => {
@@ -273,8 +273,14 @@ test('get and list reject symbols with invalid stored order constraints', async 
         updated_at: new Date(),
     }
 
-    await assert.rejects(getTradableSymbol(baseSymbolInput.id), /invalid order_constraints/)
-    await assert.rejects(listTradableSymbols(), /invalid order_constraints/)
+    await assert.rejects(
+        getTradableSymbol(baseSymbolInput.id),
+        (error: unknown) => error instanceof InvalidStoredTradableSymbolError && /invalid order_constraints/.test(String(error)),
+    )
+    await assert.rejects(
+        listTradableSymbols(),
+        (error: unknown) => error instanceof InvalidStoredTradableSymbolError && /invalid order_constraints/.test(String(error)),
+    )
 })
 
 test('listTradableSymbols returns symbols sorted by id', async () => {

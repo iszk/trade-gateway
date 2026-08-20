@@ -28,13 +28,23 @@ webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証�
 - `symbol` (string, required)
 - `side` (string, required)
 - `order_type` (string, required)
-- `size` (number, required)
+- `size` (number, optional) — `MANAGED` の size 省略を許可。指定された入力値は `input_size` にも監査保存する
 - `occurred_at` (timestamp, required)
 - `received_at` (timestamp, required)
 - `status` (string, required)
   - `accepted` | `rejected` | `suppressed`
 - `rejection_reason` (string, optional)
+- `effective_strategy_id` (string, optional)
+- `sizing_mode` (string, optional) — `WEBHOOK_CAPPED` | `MANAGED`
+- `input_size` (number, optional)
+- `effective_size` (number, optional)
+- `decision_kind` (string, optional) — `REJECT` | `SUPPRESS` | `DISPATCH`
+- `decision_reason` (string, optional) — machine-readable sizing reason
+- `decision_details` (map, optional) — calculator の監査詳細
+- `input_size_ignored` (boolean, optional) — `MANAGED` で input size を計算に使わなかった場合
 - `expire_at` (timestamp, required, TTL 用)
+
+policy-backed webhook の `DISPATCH` は sizing-only の受付記録であり、この event の保存を broker dispatch、reservation、position の `pending_delta` 更新、`orders_v2`、dispatch log の成功記録と解釈してはならない。実発注へ接続する場合は atomic reservation transaction で再判定する。
 
 ### 重複判定仕様
 - `{broker}:{symbol}:{event_id}` をドキュメント ID とし、作成時は存在しないことを前提条件にする

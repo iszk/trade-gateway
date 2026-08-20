@@ -9,11 +9,19 @@ export type WebhookEventInput = {
     symbol: string
     side: string
     order_type: string
-    size: number
+    size?: number
     occurred_at: Date
     received_at: Date
     status: 'accepted' | 'rejected' | 'suppressed'
     rejection_reason?: string
+    effective_strategy_id?: string
+    sizing_mode?: 'WEBHOOK_CAPPED' | 'MANAGED'
+    input_size?: number
+    effective_size?: number
+    decision_kind?: 'REJECT' | 'SUPPRESS' | 'DISPATCH'
+    decision_reason?: string
+    decision_details?: Record<string, unknown>
+    input_size_ignored?: boolean
 }
 
 export class DuplicateEventError extends Error {

@@ -75,6 +75,40 @@ test('createWebhookEventFn omits undefined fields before saving to Firestore', a
     assert.equal('rejection_reason' in doc, false)
 })
 
+test('createWebhookEventFn supports optional size and stores sizing audit fields', async () => {
+    const db = makeFirestoreMock()
+    const createWebhookEvent = createWebhookEventFn(db)
+
+    await createWebhookEvent({
+        ...makeInput('evt-sizing-audit'),
+        size: undefined,
+        effective_strategy_id: 'managed_alpha',
+        sizing_mode: 'MANAGED',
+        input_size: undefined,
+        effective_size: 0.2,
+        decision_kind: 'DISPATCH',
+        decision_reason: 'CALCULATED',
+        decision_details: {
+            effectivePosition: 0,
+            nested: { omitted: undefined, kept: true },
+        },
+        input_size_ignored: false,
+    })
+
+    const doc = db.docs['bitflyer:BTC_JPY:evt-sizing-audit'] as Record<string, unknown>
+    assert.equal('size' in doc, false)
+    assert.equal(doc.effective_strategy_id, 'managed_alpha')
+    assert.equal(doc.sizing_mode, 'MANAGED')
+    assert.equal(doc.effective_size, 0.2)
+    assert.equal(doc.decision_kind, 'DISPATCH')
+    assert.equal(doc.decision_reason, 'CALCULATED')
+    assert.deepEqual(doc.decision_details, {
+        effectivePosition: 0,
+        nested: { kept: true },
+    })
+    assert.equal(doc.input_size_ignored, false)
+})
+
 test('createWebhookEventFn uses firestore write failure log on create failure', async () => {
     const firestoreError = new Error('Firestore unavailable')
     const db = {
