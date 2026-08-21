@@ -20,7 +20,6 @@ import { createDefaultGetStrategySymbolPolicyFn, createDefaultPutStrategySymbolP
 import type { GetStrategySymbolPolicyFn, PutStrategySymbolPolicyFn } from './services/strategy-symbol-policies.js'
 import { createDefaultApplyStrategySymbolDispatchOutcomeFn, createDefaultReserveStrategySymbolOrderFn } from './services/strategy-symbol-reservation-service.js'
 import type { ApplyStrategySymbolDispatchOutcomeFn, ReserveStrategySymbolOrderFn, ReserveStrategySymbolOrderResult } from './services/strategy-symbol-reservation-service.js'
-import type { GetStrategySymbolPositionFn } from './services/strategy-symbol-positions.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
 import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
 import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultUpdateOrderV2AtomicallyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn, createDefaultListOrderUpdatesFn } from './services/orders-v2.js'
@@ -272,7 +271,6 @@ type CreateAppOptions = {
     putStrategySymbolPolicy?: PutStrategySymbolPolicyFn
     reserveStrategySymbolOrder?: ReserveStrategySymbolOrderFn
     applyStrategySymbolDispatchOutcome?: ApplyStrategySymbolDispatchOutcomeFn
-    getStrategySymbolPosition?: GetStrategySymbolPositionFn
     allowUnregisteredStrategyPolicyFallback?: boolean
 }
 

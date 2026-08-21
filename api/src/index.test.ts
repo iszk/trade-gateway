@@ -19,6 +19,7 @@ import { InvalidStrategySymbolPolicyError, SymbolConstraintsRequiredError, Symbo
 import { InvalidStoredTradableSymbolError } from './services/tradable-symbols.js'
 import { calculateOrderSize } from './services/order-size-calculator.js'
 import type { ReserveStrategySymbolOrderResult } from './services/strategy-symbol-reservation-service.js'
+import type { GetStrategySymbolPositionFn } from './services/strategy-symbol-positions.js'
 
 const createLoggerStub = () => {
     const calls: Record<string, unknown>[] = []
@@ -194,9 +195,14 @@ const makeStrategySymbolPosition = (overrides: Partial<StrategySymbolPosition> =
     ...overrides,
 })
 
-const createSizingRouteFixture = (options: Parameters<typeof createApp>[0] = {}) => {
+type SizingRouteFixtureOptions = Parameters<typeof createApp>[0] & {
+    getStrategySymbolPosition?: GetStrategySymbolPositionFn
+}
+
+const createSizingRouteFixture = (options: SizingRouteFixtureOptions = {}) => {
+    const { getStrategySymbolPosition, ...appOptions } = options
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
-    const configuredDispatchOrder = options.dispatchOrder
+    const configuredDispatchOrder = appOptions.dispatchOrder
     const observedDispatchOrder: DispatchOrderFn = configuredDispatchOrder === undefined
         ? dispatchOrder
         : async (order) => {
@@ -220,7 +226,7 @@ const createSizingRouteFixture = (options: Parameters<typeof createApp>[0] = {})
         const resolvedSymbol = await (options.getTradableSymbol ?? (async () => makeTradableSymbol({
             order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
         })))(input.symbolId)
-        const resolvedPosition = await (options.getStrategySymbolPosition ?? (async () => makeStrategySymbolPosition()))(input.strategyId, input.symbolId)
+        const resolvedPosition = await (getStrategySymbolPosition ?? (async () => makeStrategySymbolPosition()))(input.strategyId, input.symbolId)
         if (resolvedPolicy === null) return { kind: 'REJECT', reason: 'POLICY_NOT_FOUND' }
         if (resolvedSymbol === null) return { kind: 'REJECT', reason: 'SYMBOL_NOT_FOUND' }
         if (resolvedSymbol.order_constraints === undefined) return { kind: 'REJECT', reason: 'SYMBOL_CONSTRAINTS_REQUIRED' }
@@ -298,7 +304,6 @@ const createSizingRouteFixture = (options: Parameters<typeof createApp>[0] = {})
             order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
         }),
         getStrategySymbolPolicy: async () => makeSizingPolicy(),
-        getStrategySymbolPosition: async () => makeStrategySymbolPosition(),
         logger,
         reserveStrategySymbolOrder: defaultReserveStrategySymbolOrder,
         applyStrategySymbolDispatchOutcome: async (input) => {
@@ -317,7 +322,7 @@ const createSizingRouteFixture = (options: Parameters<typeof createApp>[0] = {})
                 position: result.position,
             }
         },
-        ...options,
+        ...appOptions,
         dispatchOrder: observedDispatchOrder,
     })
     return { app, dispatchCalls, events, logs, addedOrders, loggerCalls }
