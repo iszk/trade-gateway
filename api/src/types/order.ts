@@ -22,6 +22,8 @@ type OrderDispatchSuccess = {
     broker: BrokerName
     providerOrderId: string
     brokerOrderMetadata?: BrokerOrderMetadata
+    /** Broker accepted the order and returned a provider identifier. */
+    certainty?: 'CONFIRMED_SUCCESS'
 }
 
 type OrderDispatchFailureCode =
@@ -35,6 +37,8 @@ export type OrderDispatchFailure = {
     broker: string
     code: OrderDispatchFailureCode
     message: string
+    /** Whether the broker definitely rejected the order or acceptance is unknown. */
+    certainty?: 'CONFIRMED_FAILURE' | 'UNKNOWN'
 }
 
 export type OrderDispatchResult = OrderDispatchSuccess | OrderDispatchFailure

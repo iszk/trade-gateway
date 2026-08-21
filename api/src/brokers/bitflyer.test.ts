@@ -41,6 +41,7 @@ test('BitflyerClient returns not configured when credentials are missing', async
         broker: 'bitflyer',
         code: 'BROKER_NOT_CONFIGURED',
         message: 'bitflyer api credentials are missing',
+        certainty: 'CONFIRMED_FAILURE',
     })
 })
 
@@ -117,7 +118,57 @@ test('BitflyerClient returns failure when broker response is error', async () =>
         broker: 'bitflyer',
         code: 'BROKER_REQUEST_FAILED',
         message: 'invalid size',
+        certainty: 'CONFIRMED_FAILURE',
     })
+})
+
+test('BitflyerClient classifies HTTP 408 as UNKNOWN', async () => {
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response('request timeout', { status: 408 }),
+    })
+
+    const result = await client.sendMarketOrder(makeOrder())
+
+    assert.equal(result.ok, false)
+    assert.equal(!result.ok && result.certainty, 'UNKNOWN')
+})
+
+test('BitflyerClient classifies 5xx and transport failures as UNKNOWN', async () => {
+    const serverErrorClient = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response('temporary', { status: 503 }),
+    })
+    const serverError = await serverErrorClient.sendMarketOrder(makeOrder())
+    assert.equal(serverError.ok, false)
+    assert.equal(!serverError.ok && serverError.certainty, 'UNKNOWN')
+
+    const transportErrorClient = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => { throw new Error('socket timeout') },
+    })
+    const transportError = await transportErrorClient.sendMarketOrder(makeOrder())
+    assert.equal(transportError.ok, false)
+    assert.equal(!transportError.ok && transportError.certainty, 'UNKNOWN')
+})
+
+test('BitflyerClient classifies a missing acceptance id as UNKNOWN', async () => {
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => Response.json({}, { status: 200 }),
+    })
+
+    const result = await client.sendMarketOrder(makeOrder())
+    assert.equal(result.ok, false)
+    assert.equal(!result.ok && result.certainty, 'UNKNOWN')
 })
 
 test('BitflyerClient clamps order size to minimum 0.001', async () => {

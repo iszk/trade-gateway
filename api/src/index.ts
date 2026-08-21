@@ -18,10 +18,9 @@ import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, 
 import type { EnsureTradableSymbolFn, GetTradableSymbolFn, ListTradableSymbolsFn, UpdateTradeControlFn, UpsertTradableSymbolFn } from './services/tradable-symbols.js'
 import { createDefaultGetStrategySymbolPolicyFn, createDefaultPutStrategySymbolPolicyFn, InvalidStoredStrategySymbolPolicyError, InvalidStrategySymbolPolicyError, SymbolConstraintsRequiredError, SymbolNotFoundError, isValidStrategyId } from './services/strategy-symbol-policies.js'
 import type { GetStrategySymbolPolicyFn, PutStrategySymbolPolicyFn } from './services/strategy-symbol-policies.js'
-import { createGetStrategySymbolPositionFn, InvalidStoredStrategySymbolPositionError } from './services/strategy-symbol-positions.js'
+import { createDefaultApplyStrategySymbolDispatchOutcomeFn, createDefaultReserveStrategySymbolOrderFn } from './services/strategy-symbol-reservation-service.js'
+import type { ApplyStrategySymbolDispatchOutcomeFn, ReserveStrategySymbolOrderFn, ReserveStrategySymbolOrderResult } from './services/strategy-symbol-reservation-service.js'
 import type { GetStrategySymbolPositionFn } from './services/strategy-symbol-positions.js'
-import { calculateOrderSize } from './services/order-size-calculator.js'
-import type { SizingDecision } from './services/order-size-calculator.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
 import type { GetTradeRecordsFn, GetTradeStatsFn } from './services/trade-records-v2.js'
 import { createDefaultAddOrderV2Fn, createDefaultGetPendingOrdersV2Fn, createDefaultUpdateOrderV2Fn, createDefaultUpdateOrderV2AtomicallyFn, createDefaultGetOrderV2Fn, createDefaultGetActiveIfdOrdersV2Fn, createDefaultListOrdersV2ByDateRangeFn, createDefaultListOrderUpdatesFn } from './services/orders-v2.js'
@@ -271,6 +270,8 @@ type CreateAppOptions = {
     ensureTradableSymbol?: EnsureTradableSymbolFn
     getStrategySymbolPolicy?: GetStrategySymbolPolicyFn
     putStrategySymbolPolicy?: PutStrategySymbolPolicyFn
+    reserveStrategySymbolOrder?: ReserveStrategySymbolOrderFn
+    applyStrategySymbolDispatchOutcome?: ApplyStrategySymbolDispatchOutcomeFn
     getStrategySymbolPosition?: GetStrategySymbolPositionFn
     allowUnregisteredStrategyPolicyFallback?: boolean
 }
@@ -307,7 +308,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const ensureTradableSymbol = options.ensureTradableSymbol ?? createDefaultEnsureTradableSymbolFn()
     const getStrategySymbolPolicy = options.getStrategySymbolPolicy ?? createDefaultGetStrategySymbolPolicyFn()
     const putStrategySymbolPolicy = options.putStrategySymbolPolicy ?? createDefaultPutStrategySymbolPolicyFn()
-    const getStrategySymbolPosition = options.getStrategySymbolPosition ?? createGetStrategySymbolPositionFn()
+    const reserveStrategySymbolOrder = options.reserveStrategySymbolOrder ?? createDefaultReserveStrategySymbolOrderFn()
+    const applyStrategySymbolDispatchOutcome = options.applyStrategySymbolDispatchOutcome ?? createDefaultApplyStrategySymbolDispatchOutcomeFn()
     const allowUnregisteredStrategyPolicyFallback = options.allowUnregisteredStrategyPolicyFallback
         ?? config.webhook.allowUnregisteredStrategyPolicyFallback
 
@@ -668,19 +670,20 @@ export const createApp = (options: CreateAppOptions = {}) => {
             details: Record<string, unknown> = {},
         ): RouteSizingDecision => ({ kind, reason, details })
 
-        const respondWithSizingDecision = async (
-            decision: RouteSizingDecision | SizingDecision,
-            policy: { sizing_mode: 'WEBHOOK_CAPPED' | 'MANAGED'; version: number } | null,
-            effectiveStrategyId?: string,
-        ): Promise<Response> => {
+        type SizingPolicyContext = {
+            sizing_mode: 'WEBHOOK_CAPPED' | 'MANAGED'
+            version: number
+        }
+
+        const buildSizingDecisionPayload = (
+            decision: RouteSizingDecision,
+            policy: SizingPolicyContext | null,
+        ) => {
             const details = decision.details ?? {}
-            const calculatedEffectiveSize = 'effectiveSize' in decision
-                ? decision.effectiveSize
-                : typeof details.effectiveSize === 'number'
-                    ? details.effectiveSize
-                    : undefined
+            const calculatedEffectiveSize = decision.effectiveSize
+                ?? (typeof details.effectiveSize === 'number' ? details.effectiveSize : undefined)
             const effectiveSize = calculatedEffectiveSize ?? (decision.kind === 'SUPPRESS' ? 0 : undefined)
-            const sizingDecision = {
+            return {
                 kind: decision.kind,
                 reason: decision.reason,
                 ...(policy === null ? {} : {
@@ -692,6 +695,14 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 input_size_ignored: policy?.sizing_mode === 'MANAGED' && payload.size !== undefined,
                 details,
             }
+        }
+
+        const createSizingEvent = async (
+            decision: RouteSizingDecision,
+            policy: SizingPolicyContext | null,
+            effectiveStrategyId?: string,
+        ): Promise<Response | null> => {
+            const sizingDecision = buildSizingDecisionPayload(decision, policy)
             const eventStatus = decision.kind === 'REJECT'
                 ? 'rejected' as const
                 : decision.kind === 'SUPPRESS'
@@ -712,12 +723,22 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 effective_strategy_id: effectiveStrategyId,
                 sizing_mode: policy?.sizing_mode,
                 input_size: payload.size,
-                effective_size: effectiveSize,
+                effective_size: sizingDecision.effective_size,
                 decision_kind: decision.kind,
                 decision_reason: decision.reason,
-                decision_details: details,
+                decision_details: sizingDecision.details,
                 input_size_ignored: sizingDecision.input_size_ignored,
             })
+            return eventResponse
+        }
+
+        const respondWithSizingDecision = async (
+            decision: RouteSizingDecision,
+            policy: SizingPolicyContext | null,
+            effectiveStrategyId?: string,
+        ): Promise<Response> => {
+            const sizingDecision = buildSizingDecisionPayload(decision, policy)
+            const eventResponse = await createSizingEvent(decision, policy, effectiveStrategyId)
             if (eventResponse) return eventResponse
 
             if (decision.kind === 'REJECT') {
@@ -823,7 +844,17 @@ export const createApp = (options: CreateAppOptions = {}) => {
                     result: 'suppressed' as const,
                     error_code: 'SYMBOL_PAUSED',
                 }
-                createOrderDispatchLog(dispatchLogData).catch(() => {})
+                try {
+                    await createOrderDispatchLog(dispatchLogData)
+                } catch (error) {
+                    reqLogger.error({
+                        event: 'order_dispatch_log:write_failed',
+                        error,
+                        event_id: effectiveEventId,
+                        symbol_id: symbolId,
+                        effective_size: payload.size,
+                    }, 'suppressed order dispatch log persistence failed')
+                }
             }
 
             return c.json({ status: 'accepted', event_id: effectiveEventId, dispatch_status: 'suppressed' }, 202)
@@ -856,6 +887,10 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         let policy: Awaited<ReturnType<GetStrategySymbolPolicyFn>> = null
+        const hasAttachedOrderInput = payload.stop_loss !== undefined ||
+            payload.take_profit !== undefined ||
+            payload.stop_loss_pct !== undefined ||
+            payload.take_profit_pct !== undefined
         if (effectiveStrategyId !== undefined) {
             try {
                 policy = await getStrategySymbolPolicy(effectiveStrategyId, symbolId)
@@ -890,6 +925,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 return c.json(errorBody('INTERNAL_ERROR', 'failed to resolve strategy-symbol policy'), 500)
             }
         }
+
+        type DispatchReservationResult = Extract<ReserveStrategySymbolOrderResult, { kind: 'DISPATCH' }>
+        let policyReservation: DispatchReservationResult | undefined
 
         if (policy === null) {
             if (!allowUnregisteredStrategyPolicyFallback || (effectiveStrategyId === undefined && explicitStrategyId)) {
@@ -950,40 +988,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
                     effectiveStrategyId,
                 )
             }
-            if (tradableSymbol === null) {
-                return respondWithSizingDecision(
-                    createRouteSizingDecision('REJECT', 'SYMBOL_NOT_FOUND'),
-                    policy,
-                    effectiveStrategyId,
-                )
-            }
-
-            const constraints = tradableSymbol.order_constraints
-            if (constraints === undefined) {
-                return respondWithSizingDecision(
-                    createRouteSizingDecision('REJECT', 'SYMBOL_CONSTRAINTS_REQUIRED'),
-                    policy,
-                    effectiveStrategyId,
-                )
-            }
-            if (typeof constraints !== 'object' || constraints === null || Array.isArray(constraints) ||
-                !Number.isFinite(constraints.quantity_step) || constraints.quantity_step <= 0 ||
-                !Number.isFinite(constraints.min_order_size) || constraints.min_order_size <= 0 ||
-                (constraints.max_order_size !== undefined &&
-                    (!Number.isFinite(constraints.max_order_size) || constraints.max_order_size < constraints.min_order_size))) {
-                return respondWithSizingDecision(
-                    createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
-                    policy,
-                    effectiveStrategyId,
-                )
-            }
-
-            if (policy.sizing_mode === 'MANAGED' && (
-                payload.stop_loss !== undefined ||
-                payload.take_profit !== undefined ||
-                payload.stop_loss_pct !== undefined ||
-                payload.take_profit_pct !== undefined
-            )) {
+            if (policy.sizing_mode === 'MANAGED' && hasAttachedOrderInput) {
                 return respondWithSizingDecision(
                     createRouteSizingDecision('REJECT', 'MANAGED_ATTACHED_ORDERS_UNSUPPORTED'),
                     policy,
@@ -991,72 +996,63 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 )
             }
 
-            let position
+            let reservationResult: ReserveStrategySymbolOrderResult
             try {
-                position = await getStrategySymbolPosition(effectiveStrategyId!, symbolId)
+                reservationResult = await reserveStrategySymbolOrder({
+                    eventId: effectiveEventId,
+                    orderId: effectiveEventId,
+                    strategyId: effectiveStrategyId,
+                    symbolId,
+                    side: payload.side,
+                    ...(payload.size === undefined ? {} : { inputSize: payload.size }),
+                })
             } catch (error) {
-                if (error instanceof InvalidStoredStrategySymbolPositionError) {
-                    return respondWithSizingDecision(
-                        createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
-                        policy,
-                        effectiveStrategyId,
-                    )
-                }
                 logger.warn({
-                    event: 'strategy_symbol_position:webhook_fetch_failed',
+                    event: 'strategy_symbol_reservation:webhook_reserve_failed',
                     error,
                     strategy_id: effectiveStrategyId,
                     symbol_id: symbolId,
-                }, 'failed to resolve strategy-symbol position for webhook')
-                return c.json(errorBody('INTERNAL_ERROR', 'failed to resolve strategy-symbol position'), 500)
+                    event_id: effectiveEventId,
+                }, 'failed to reserve strategy-symbol order for webhook')
+                return c.json(errorBody('INTERNAL_ERROR', 'failed to reserve strategy-symbol order'), 500)
             }
-            if (position === null) {
+
+            if (reservationResult.kind === 'REJECT') {
                 return respondWithSizingDecision(
-                    createRouteSizingDecision('REJECT', 'POSITION_NOT_FOUND'),
+                    createRouteSizingDecision(
+                        'REJECT',
+                        reservationResult.reason,
+                        reservationResult.decision?.details ?? {},
+                    ),
                     policy,
                     effectiveStrategyId,
                 )
             }
-            if (typeof position !== 'object' ||
-                position.id !== `${effectiveStrategyId}:${symbolId}` ||
-                position.strategy_id !== effectiveStrategyId ||
-                position.symbol_id !== symbolId ||
-                (position.status !== 'READY' && position.status !== 'MANUAL_REVIEW' && position.status !== 'MISMATCH')) {
+            if (reservationResult.kind === 'SUPPRESS') {
+                const positionDetails = reservationResult.reason === 'POSITION_NOT_READY' && reservationResult.position
+                    ? (() => {
+                        const effectivePosition = reservationResult.position.confirmed_position + reservationResult.position.pending_delta
+                        return Number.isFinite(effectivePosition) ? { effectivePosition } : {}
+                    })()
+                    : {}
                 return respondWithSizingDecision(
-                    createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
-                    policy,
-                    effectiveStrategyId,
-                )
-            }
-            if (!Number.isFinite(position.confirmed_position) || !Number.isFinite(position.pending_delta)) {
-                return respondWithSizingDecision(
-                    createRouteSizingDecision('REJECT', 'INVALID_STORED_STATE'),
-                    policy,
-                    effectiveStrategyId,
-                )
-            }
-            if (position.status !== 'READY') {
-                return respondWithSizingDecision(
-                    createRouteSizingDecision('SUPPRESS', 'POSITION_NOT_READY', {
-                        effectivePosition: position.confirmed_position + position.pending_delta,
-                    }),
+                    createRouteSizingDecision(
+                        'SUPPRESS',
+                        reservationResult.reason,
+                        {
+                            ...(reservationResult.decision?.details ?? {}),
+                            ...positionDetails,
+                        },
+                    ),
                     policy,
                     effectiveStrategyId,
                 )
             }
 
-            const decision = calculateOrderSize({
-                policy,
-                constraints,
-                confirmedPosition: position.confirmed_position,
-                pendingDelta: position.pending_delta,
-                side: payload.side,
-                inputSize: payload.size,
-            })
-            return respondWithSizingDecision(decision, policy, effectiveStrategyId)
+            policyReservation = reservationResult
         }
 
-        const dispatchSize = payload.size
+        const dispatchSize = policyReservation?.effectiveSize ?? payload.size
         if (dispatchSize === undefined) {
             // The policy-backed branch and the fallback validation above both
             // return before reaching this point. Keep the runtime guard close
@@ -1067,6 +1063,147 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 null,
                 effectiveStrategyId,
             )
+        }
+
+        const policyContext: SizingPolicyContext | null = policyReservation === undefined
+            ? null
+            : {
+                sizing_mode: policyReservation.audit.sizingMode,
+                version: policyReservation.audit.policyVersion,
+            }
+        const policyDispatchDecision = policyReservation === undefined
+            ? undefined
+            : createRouteSizingDecision(
+                'DISPATCH',
+                policyReservation.decision.reason,
+                {
+                    ...policyReservation.decision.details,
+                    effectivePosition: policyReservation.audit.positionBefore,
+                    positionAfter: policyReservation.audit.positionAfter,
+                },
+            )
+        if (policyReservation !== undefined && policyDispatchDecision !== undefined) {
+            policyDispatchDecision.effectiveSize = policyReservation.effectiveSize
+        }
+        const isPolicyDryRun = policyReservation !== undefined && payload.dry_run === true
+
+        const applyReservationOutcome = async (
+            outcome: 'CONFIRMED_SUCCESS' | 'CONFIRMED_FAILURE' | 'UNKNOWN',
+            providerOrderId?: string,
+        ): Promise<void> => {
+            if (policyReservation === undefined || effectiveStrategyId === undefined) return
+            const logOutcomeFailure = (details: Record<string, unknown>, message: string) => {
+                logger.error({
+                    event: 'strategy_symbol_reservation:outcome_apply_failed',
+                    outcome,
+                    ...details,
+                    event_id: effectiveEventId,
+                    order_id: effectiveEventId,
+                    reservation_id: policyReservation.reservation.id,
+                    strategy_id: effectiveStrategyId,
+                    symbol_id: symbolId,
+                    provider_order_id: providerOrderId,
+                    effective_size: policyReservation.effectiveSize,
+                    dry_run: isPolicyDryRun,
+                }, message)
+            }
+
+            const tryUnknownFallback = async (): Promise<void> => {
+                try {
+                    const fallbackResult = await applyStrategySymbolDispatchOutcome({
+                        strategyId: effectiveStrategyId,
+                        symbolId,
+                        eventId: effectiveEventId,
+                        outcome: 'UNKNOWN',
+                    })
+                    if (fallbackResult.kind === 'REJECT') {
+                        logOutcomeFailure(
+                            { reason: fallbackResult.reason, fallback_outcome: 'UNKNOWN' },
+                            'failed to apply UNKNOWN fallback for strategy-symbol dispatch outcome',
+                        )
+                    }
+                } catch (error) {
+                    logOutcomeFailure(
+                        { error, fallback_outcome: 'UNKNOWN' },
+                        'failed to apply UNKNOWN fallback for strategy-symbol dispatch outcome',
+                    )
+                }
+            }
+
+            let result: Awaited<ReturnType<ApplyStrategySymbolDispatchOutcomeFn>>
+            try {
+                result = await applyStrategySymbolDispatchOutcome({
+                    strategyId: effectiveStrategyId,
+                    symbolId,
+                    eventId: effectiveEventId,
+                    outcome,
+                })
+            } catch (error) {
+                logOutcomeFailure({ error }, 'failed to apply strategy-symbol dispatch outcome')
+                if (outcome === 'CONFIRMED_SUCCESS') await tryUnknownFallback()
+                return
+            }
+
+            if (result.kind !== 'REJECT') return
+
+            logOutcomeFailure({ reason: result.reason }, 'failed to apply strategy-symbol dispatch outcome')
+
+            // The broker and orders_v2 write have already succeeded when this
+            // branch handles CONFIRMED_SUCCESS.  Preserve the reservation
+            // instead of leaving it looking dispatchable; a best-effort
+            // UNKNOWN transition gives operations a manual-review anchor
+            // without ever retrying the broker request.
+            if (outcome !== 'CONFIRMED_SUCCESS') return
+            await tryUnknownFallback()
+        }
+
+        // The policy is read once for routing and again atomically by the
+        // reservation service.  If it changed to MANAGED between those
+        // reads, apply the same attached-order contract before dispatching;
+        // release the reservation created by the atomic read first.
+        if (
+            policyReservation !== undefined &&
+            policyReservation.audit.sizingMode === 'MANAGED' &&
+            hasAttachedOrderInput
+        ) {
+            await applyReservationOutcome('CONFIRMED_FAILURE')
+            return respondWithSizingDecision(
+                createRouteSizingDecision('REJECT', 'MANAGED_ATTACHED_ORDERS_UNSUPPORTED'),
+                {
+                    sizing_mode: policyReservation.audit.sizingMode,
+                    version: policyReservation.audit.policyVersion,
+                },
+                effectiveStrategyId,
+            )
+        }
+
+        // Reserve first, then persist the accepted webhook event.  If event
+        // persistence fails, the broker must not be called and the reservation
+        // is released only when the release itself is a safe confirmed action.
+        if (policyReservation !== undefined && policyDispatchDecision !== undefined) {
+            try {
+                const eventResponse = await createSizingEvent(
+                    policyDispatchDecision,
+                    policyContext,
+                    effectiveStrategyId,
+                )
+                if (eventResponse) {
+                    await applyReservationOutcome('CONFIRMED_FAILURE')
+                    return eventResponse
+                }
+            } catch (error) {
+                await applyReservationOutcome('CONFIRMED_FAILURE')
+                logger.error({
+                    event: 'webhook:event_persist_failed_after_reservation',
+                    error,
+                    event_id: effectiveEventId,
+                    order_id: effectiveEventId,
+                    reservation_id: policyReservation.reservation.id,
+                    strategy_id: effectiveStrategyId,
+                    symbol_id: symbolId,
+                }, 'webhook event persistence failed after reservation')
+                return c.json(errorBody('INTERNAL_ERROR', 'failed to persist webhook event'), 500)
+            }
         }
 
         const pctToString = (v: string | number): string =>
@@ -1080,18 +1217,72 @@ export const createApp = (options: CreateAppOptions = {}) => {
             ? pctToString(payload.take_profit_pct)
             : payload.take_profit
 
-        const orderResult = await dispatchOrder({
-            eventId: effectiveEventId,
-            broker: payload.broker as BrokerName || undefined,
-            ticker: payload.ticker,
-            side: payload.side,
-            size: dispatchSize,
-            requestId,
-            ...(payload.dry_run ? { dryRun: true } : {}),
-            ...(payload.price !== undefined ? { price: payload.price } : {}),
-            ...(effectiveStopLoss ? { stopLoss: effectiveStopLoss } : {}),
-            ...(effectiveTakeProfit ? { takeProfit: effectiveTakeProfit } : {}),
-        })
+        let orderResult: Awaited<ReturnType<DispatchOrderFn>>
+        try {
+            orderResult = await dispatchOrder({
+                eventId: effectiveEventId,
+                broker: payload.broker as BrokerName || undefined,
+                ticker: payload.ticker,
+                side: payload.side,
+                size: dispatchSize,
+                requestId,
+                ...(payload.dry_run ? { dryRun: true } : {}),
+                ...(payload.price !== undefined ? { price: payload.price } : {}),
+                ...(effectiveStopLoss ? { stopLoss: effectiveStopLoss } : {}),
+                ...(effectiveTakeProfit ? { takeProfit: effectiveTakeProfit } : {}),
+            })
+        } catch (error) {
+            orderResult = {
+                ok: false,
+                broker: payload.broker,
+                code: 'BROKER_REQUEST_FAILED',
+                message: error instanceof Error ? error.message : String(error),
+                certainty: 'UNKNOWN',
+            }
+            logger.error({
+                event: 'webhook:broker_dispatch_threw',
+                error,
+                event_id: effectiveEventId,
+                order_id: effectiveEventId,
+                reservation_id: policyReservation?.reservation.id,
+                strategy_id: effectiveStrategyId,
+                symbol_id: symbolId,
+            }, 'broker dispatcher threw while handling webhook')
+        }
+
+        // Treat a malformed success result as UNKNOWN.  The broker adapters
+        // validate this at their boundary too, but keeping the route
+        // fail-closed protects injected/legacy dispatchers from creating an
+        // orders_v2 record without a provider identifier.
+        if (orderResult.ok && (
+            typeof orderResult.providerOrderId !== 'string'
+            || orderResult.providerOrderId.trim().length === 0
+        )) {
+            orderResult = {
+                ok: false,
+                broker: orderResult.broker,
+                code: 'BROKER_REQUEST_FAILED',
+                message: 'broker dispatch success response is missing provider order id',
+                certainty: 'UNKNOWN',
+            }
+        }
+
+        const brokerOutcome = orderResult.ok
+            ? 'CONFIRMED_SUCCESS' as const
+            : orderResult.certainty ?? (
+                orderResult.code === 'BROKER_NOT_CONFIGURED' || orderResult.code === 'BROKER_NOT_SUPPORTED'
+                    ? 'CONFIRMED_FAILURE' as const
+                    : 'UNKNOWN' as const
+            )
+        // A policy-backed dry-run is guaranteed not to submit to a broker.
+        // Its reservation must therefore be released even when the dry-run
+        // dispatcher reports an otherwise unknown result.
+        const outcome = isPolicyDryRun ? 'CONFIRMED_FAILURE' as const : brokerOutcome
+        const providerOrderId = isPolicyDryRun
+            ? 'DRY_RUN'
+            : orderResult.ok
+                ? orderResult.providerOrderId
+                : undefined
 
         if (!orderResult.ok) {
             logWebhook('warn', 'webhook:rejected', {
@@ -1102,9 +1293,62 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 error: {
                     code: orderResult.code,
                     message: orderResult.message,
+                    certainty: outcome,
                 },
                 payload: redactSecrets(payload),
             }, reqLogger)
+        }
+
+        const orderMethod =
+            effectiveStopLoss && effectiveTakeProfit ? 'IFDOCO' as const :
+                effectiveStopLoss || effectiveTakeProfit ? 'IFD' as const :
+                    undefined
+        let orderPersistenceFailed = false
+        let orderPersistenceError: unknown
+        if (isPolicyDryRun) {
+            // DRY_RUN validates the real dispatch payload but never creates a
+            // broker order, so there is no orders_v2 record to persist.
+            await applyReservationOutcome('CONFIRMED_FAILURE', providerOrderId)
+        } else if (orderResult.ok) {
+            try {
+                await addOrderV2({
+                    id: effectiveEventId,
+                    strategy: payload.strategy ?? 'unknown',
+                    broker: payload.broker as BrokerName,
+                    ticker: payload.ticker,
+                    side: payload.side,
+                    order_type: (orderMethod === 'IFDOCO' || orderMethod === 'IFD') ? 'IFDOCO' : 'MARKET',
+                    requested_size: dispatchSize,
+                    executed_size: 0,
+                    executed_price: null,
+                    status: 'PENDING',
+                    exit_sync_status: orderMethod === 'IFDOCO' || orderMethod === 'IFD' ? 'MONITORING' : undefined,
+                    provider_order_ids: [orderResult.providerOrderId],
+                    broker_order_metadata: orderResult.brokerOrderMetadata,
+                    created_at: new Date(),
+                    updated_at: new Date(),
+                })
+            } catch (error) {
+                orderPersistenceFailed = true
+                orderPersistenceError = error
+                await applyReservationOutcome('UNKNOWN', orderResult.providerOrderId)
+                logger.error({
+                    event: 'orders_v2:write_failed_after_broker_dispatch',
+                    error,
+                    event_id: effectiveEventId,
+                    order_id: effectiveEventId,
+                    reservation_id: policyReservation?.reservation.id,
+                    strategy_id: effectiveStrategyId,
+                    symbol_id: symbolId,
+                    provider_order_id: orderResult.providerOrderId,
+                    effective_size: dispatchSize,
+                }, 'orders_v2 persistence failed after broker dispatch')
+            }
+            if (!orderPersistenceFailed) {
+                await applyReservationOutcome('CONFIRMED_SUCCESS', orderResult.providerOrderId)
+            }
+        } else {
+            await applyReservationOutcome(outcome, providerOrderId)
         }
 
         const dispatchLogData = {
@@ -1113,7 +1357,22 @@ export const createApp = (options: CreateAppOptions = {}) => {
             ticker: payload.ticker,
             side: payload.side,
             size: dispatchSize,
-            provider_order_id: orderResult.ok ? orderResult.providerOrderId : undefined,
+            ...(payload.size === undefined ? {} : { input_size: payload.size }),
+            effective_size: dispatchSize,
+            ...(policyReservation === undefined ? {} : {
+                sizing_mode: policyReservation.audit.sizingMode,
+                policy_version: policyReservation.audit.policyVersion,
+                position_before: policyReservation.audit.positionBefore,
+                position_after: policyReservation.audit.positionAfter,
+                decision_reason: policyReservation.decision.reason,
+            }),
+            ...(isPolicyDryRun ? { dry_run: true } : {}),
+            certainty: orderPersistenceFailed ? 'UNKNOWN' as const : outcome,
+            strategy_id: effectiveStrategyId,
+            symbol_id: symbolId,
+            order_id: effectiveEventId,
+            reservation_id: policyReservation?.reservation.id,
+            provider_order_id: providerOrderId,
             request_payload: {
                 eventId: effectiveEventId,
                 broker: payload.broker,
@@ -1121,39 +1380,45 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 side: payload.side,
                 size: dispatchSize,
                 requestId,
+                ...(isPolicyDryRun ? { dryRun: true } : {}),
             },
             response_payload: orderResult.ok
-                ? { providerOrderId: orderResult.providerOrderId }
-                : undefined,
+                ? {
+                    providerOrderId,
+                    ...(isPolicyDryRun ? { dry_run: true } : {}),
+                    ...(orderPersistenceFailed ? { order_persistence: 'failed' } : {}),
+                }
+                : {
+                    code: orderResult.code,
+                    certainty: outcome,
+                    ...(isPolicyDryRun ? { dry_run: true } : {}),
+                },
             result: (orderResult.ok ? 'success' : 'failure') as 'success' | 'failure',
-            error_code: orderResult.ok ? undefined : orderResult.code,
+            error_code: orderResult.ok
+                ? (orderPersistenceFailed ? 'ORDERS_V2_WRITE_FAILED' : undefined)
+                : orderResult.code,
+            error_message: orderResult.ok
+                ? (orderPersistenceError instanceof Error
+                    ? orderPersistenceError.message
+                    : orderPersistenceError === undefined
+                        ? undefined
+                        : String(orderPersistenceError))
+                : orderResult.message,
         }
-        createOrderDispatchLog(dispatchLogData).catch(() => {})
-
-        // 新規注文は orders_v2 のみへ記録する
-        const strategy = payload.strategy ?? 'unknown'
-        if (orderResult.ok) {
-            const orderMethod =
-                effectiveStopLoss && effectiveTakeProfit ? 'IFDOCO' as const :
-                    effectiveStopLoss || effectiveTakeProfit ? 'IFD' as const :
-                        undefined
-            addOrderV2({
-                id: effectiveEventId,
-                strategy: strategy,
-                broker: payload.broker as any, // BrokerName に一致させる
-                ticker: payload.ticker,
-                side: payload.side,
-                order_type: (orderMethod === 'IFDOCO' || orderMethod === 'IFD') ? 'IFDOCO' : 'MARKET',
-                requested_size: dispatchSize,
-                executed_size: 0,
-                executed_price: null,
-                status: 'PENDING',
-                exit_sync_status: orderMethod === 'IFDOCO' || orderMethod === 'IFD' ? 'MONITORING' : undefined,
-                provider_order_ids: [orderResult.providerOrderId],
-                broker_order_metadata: orderResult.brokerOrderMetadata,
-                created_at: new Date(),
-                updated_at: new Date(),
-            }).catch(() => {})
+        try {
+            await createOrderDispatchLog(dispatchLogData)
+        } catch (error) {
+            logger.error({
+                event: 'order_dispatch_log:write_failed',
+                error,
+                event_id: effectiveEventId,
+                order_id: effectiveEventId,
+                reservation_id: policyReservation?.reservation.id,
+                strategy_id: effectiveStrategyId,
+                symbol_id: symbolId,
+                provider_order_id: providerOrderId,
+                effective_size: dispatchSize,
+            }, 'order dispatch log persistence failed')
         }
 
         const { webhook_secret: _secret, ...safePayload } = payload
@@ -1166,16 +1431,29 @@ export const createApp = (options: CreateAppOptions = {}) => {
                     ? {
                         status: 'success',
                         broker: orderResult.broker,
-                        provider_order_id: orderResult.providerOrderId,
+                        provider_order_id: providerOrderId,
+                        certainty: outcome,
+                        ...(isPolicyDryRun ? { dry_run: true } : {}),
                     }
                     : {
                         status: 'failed',
                         broker: orderResult.broker,
                         code: orderResult.code,
+                        certainty: outcome,
+                        ...(isPolicyDryRun ? { dry_run: true } : {}),
                     },
             },
         }, reqLogger)
 
+        if (policyDispatchDecision !== undefined && policyContext !== null) {
+            const sizingDecision = buildSizingDecisionPayload(policyDispatchDecision, policyContext)
+            return c.json({
+                status: 'accepted',
+                dispatch_status: 'sizing_approved',
+                event_id: effectiveEventId,
+                sizing_decision: sizingDecision,
+            }, 202)
+        }
         return c.json({ status: 'accepted', event_id: effectiveEventId }, 202)
     }
 

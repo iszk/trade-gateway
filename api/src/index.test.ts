@@ -17,6 +17,8 @@ import type { StrategySymbolPolicy } from './types/strategy-symbol-policy.js'
 import type { StrategySymbolPosition } from './types/strategy-symbol-position.js'
 import { InvalidStrategySymbolPolicyError, SymbolConstraintsRequiredError, SymbolNotFoundError } from './services/strategy-symbol-policies.js'
 import { InvalidStoredTradableSymbolError } from './services/tradable-symbols.js'
+import { calculateOrderSize } from './services/order-size-calculator.js'
+import type { ReserveStrategySymbolOrderResult } from './services/strategy-symbol-reservation-service.js'
 
 const createLoggerStub = () => {
     const calls: Record<string, unknown>[] = []
@@ -194,13 +196,101 @@ const makeStrategySymbolPosition = (overrides: Partial<StrategySymbolPosition> =
 
 const createSizingRouteFixture = (options: Parameters<typeof createApp>[0] = {}) => {
     const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
+    const configuredDispatchOrder = options.dispatchOrder
+    const observedDispatchOrder: DispatchOrderFn = configuredDispatchOrder === undefined
+        ? dispatchOrder
+        : async (order) => {
+            dispatchCalls.push(order)
+            return configuredDispatchOrder(order)
+        }
     const { createWebhookEvent, events } = createWebhookEventStub()
     const { createOrderDispatchLog, logs } = createOrderDispatchLogStub()
+    const { logger, calls: loggerCalls } = createLoggerStub()
     const addedOrders: unknown[] = []
+    const reservationByEvent = new Map<string, Extract<ReserveStrategySymbolOrderResult, { kind: 'DISPATCH' }>>()
+    const defaultReserveStrategySymbolOrder = async (input: {
+        eventId: string
+        orderId: string
+        strategyId: string
+        symbolId: string
+        side: 'BUY' | 'SELL'
+        inputSize?: number
+    }): Promise<ReserveStrategySymbolOrderResult> => {
+        const resolvedPolicy = await (options.getStrategySymbolPolicy ?? (async () => makeSizingPolicy()))(input.strategyId, input.symbolId)
+        const resolvedSymbol = await (options.getTradableSymbol ?? (async () => makeTradableSymbol({
+            order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
+        })))(input.symbolId)
+        const resolvedPosition = await (options.getStrategySymbolPosition ?? (async () => makeStrategySymbolPosition()))(input.strategyId, input.symbolId)
+        if (resolvedPolicy === null) return { kind: 'REJECT', reason: 'POLICY_NOT_FOUND' }
+        if (resolvedSymbol === null) return { kind: 'REJECT', reason: 'SYMBOL_NOT_FOUND' }
+        if (resolvedSymbol.order_constraints === undefined) return { kind: 'REJECT', reason: 'SYMBOL_CONSTRAINTS_REQUIRED' }
+        if (!Number.isFinite(resolvedSymbol.order_constraints.quantity_step) || resolvedSymbol.order_constraints.quantity_step <= 0 ||
+            !Number.isFinite(resolvedSymbol.order_constraints.min_order_size) || resolvedSymbol.order_constraints.min_order_size <= 0 ||
+            (resolvedSymbol.order_constraints.max_order_size !== undefined &&
+                (!Number.isFinite(resolvedSymbol.order_constraints.max_order_size) ||
+                    resolvedSymbol.order_constraints.max_order_size < resolvedSymbol.order_constraints.min_order_size))) {
+            return { kind: 'REJECT', reason: 'INVALID_STORED_STATE' }
+        }
+        if (resolvedPosition === null) return { kind: 'REJECT', reason: 'POSITION_NOT_FOUND' }
+        if (!Number.isFinite(resolvedPosition.confirmed_position) || !Number.isFinite(resolvedPosition.pending_delta)) {
+            return { kind: 'REJECT', reason: 'INVALID_STORED_STATE' }
+        }
+        if (resolvedPosition.status !== 'READY') {
+            return {
+                kind: 'SUPPRESS',
+                reason: 'POSITION_NOT_READY',
+                position: resolvedPosition,
+            }
+        }
+        const decision = calculateOrderSize({
+            policy: resolvedPolicy,
+            constraints: resolvedSymbol.order_constraints,
+            confirmedPosition: resolvedPosition.confirmed_position,
+            pendingDelta: resolvedPosition.pending_delta,
+            side: input.side,
+            inputSize: input.inputSize,
+        })
+        if (decision.kind === 'SUPPRESS') return { kind: 'SUPPRESS', reason: decision.reason, decision }
+        if (decision.kind === 'REJECT') return { kind: 'REJECT', reason: decision.reason, decision }
+        const positionBefore = resolvedPosition.confirmed_position + resolvedPosition.pending_delta
+        const signedDelta = input.side === 'BUY' ? decision.effectiveSize : -decision.effectiveSize
+        const positionAfter = positionBefore + signedDelta
+        const reservation = {
+            id: `reservation-${input.eventId}`,
+            event_id: input.eventId,
+            position_id: resolvedPosition.id,
+            strategy_id: input.strategyId,
+            symbol_id: input.symbolId,
+            order_id: input.orderId,
+            reserved_delta: signedDelta,
+            status: 'RESERVED' as const,
+            policy_version: resolvedPolicy.version,
+            created_at: new Date('2026-01-01T00:00:00Z'),
+            updated_at: new Date('2026-01-01T00:00:00Z'),
+        }
+        const result = {
+            kind: 'DISPATCH' as const,
+            reason: 'CALCULATED' as const,
+            effectiveSize: decision.effectiveSize,
+            decision,
+            audit: {
+                sizingMode: resolvedPolicy.sizing_mode,
+                policyVersion: resolvedPolicy.version,
+                positionBefore,
+                positionAfter,
+            },
+            reservation,
+            position: {
+                ...resolvedPosition,
+                pending_delta: resolvedPosition.pending_delta + signedDelta,
+            },
+        }
+        reservationByEvent.set(input.eventId, result)
+        return result
+    }
     const app = createAppForTests({
         webhookSecret: 'test-secret',
         sourceIpAllowlist: new Set(['52.89.214.238']),
-        dispatchOrder,
         createWebhookEvent,
         createOrderDispatchLog,
         addOrderV2: async (order) => { addedOrders.push(order) },
@@ -209,9 +299,68 @@ const createSizingRouteFixture = (options: Parameters<typeof createApp>[0] = {})
         }),
         getStrategySymbolPolicy: async () => makeSizingPolicy(),
         getStrategySymbolPosition: async () => makeStrategySymbolPosition(),
+        logger,
+        reserveStrategySymbolOrder: defaultReserveStrategySymbolOrder,
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            const result = reservationByEvent.get(input.eventId)
+            if (!result) return { kind: 'REJECT', reason: 'RESERVATION_NOT_FOUND' as const }
+            return {
+                kind: 'UPDATED' as const,
+                reservation: {
+                    ...result.reservation,
+                    status: input.outcome === 'CONFIRMED_SUCCESS'
+                        ? 'DISPATCHED' as const
+                        : input.outcome === 'CONFIRMED_FAILURE'
+                            ? 'RELEASED' as const
+                            : 'MANUAL_REVIEW' as const,
+                },
+                position: result.position,
+            }
+        },
         ...options,
+        dispatchOrder: observedDispatchOrder,
     })
-    return { app, dispatchCalls, events, logs, addedOrders }
+    return { app, dispatchCalls, events, logs, addedOrders, loggerCalls }
+}
+
+const makeDispatchReservationResult = (
+    eventId: string,
+    effectiveSize: number,
+    overrides: Partial<Extract<ReserveStrategySymbolOrderResult, { kind: 'DISPATCH' }>> = {},
+): Extract<ReserveStrategySymbolOrderResult, { kind: 'DISPATCH' }> => {
+    const reservation = {
+        id: `reservation-${eventId}`,
+        event_id: eventId,
+        position_id: 'alpha:bitflyer:BTC_JPY',
+        strategy_id: 'alpha',
+        symbol_id: 'bitflyer:BTC_JPY',
+        order_id: eventId,
+        reserved_delta: effectiveSize,
+        status: 'RESERVED' as const,
+        policy_version: 3,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+    return {
+        kind: 'DISPATCH',
+        reason: 'CALCULATED',
+        effectiveSize,
+        decision: {
+            kind: 'DISPATCH',
+            reason: 'CALCULATED',
+            effectiveSize,
+            details: { appliedConstraints: [] },
+        },
+        audit: {
+            sizingMode: 'WEBHOOK_CAPPED',
+            policyVersion: 3,
+            positionBefore: 0,
+            positionAfter: effectiveSize,
+        },
+        reservation,
+        position: makeStrategySymbolPosition({ pending_delta: effectiveSize }),
+        ...overrides,
+    }
 }
 
 const makeOrderV2 = (overrides: Partial<OrderV2> = {}): OrderV2 => ({
@@ -1120,13 +1269,7 @@ test('POST /api/webhooks/tradingview returns 202 on valid payload', async () => 
 })
 
 test('POST /api/webhooks/tradingview policy-backed WEBHOOK_CAPPED returns sizing approval without dispatch', async () => {
-    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
-    const { createWebhookEvent, events } = createWebhookEventStub()
-    const app = createAppForTests({
-        webhookSecret: 'test-secret',
-        sourceIpAllowlist: new Set(['52.89.214.238']),
-        dispatchOrder,
-        createWebhookEvent,
+    const fixture = createSizingRouteFixture({
         getTradableSymbol: async () => makeTradableSymbol({
             order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
         }),
@@ -1134,7 +1277,7 @@ test('POST /api/webhooks/tradingview policy-backed WEBHOOK_CAPPED returns sizing
         getStrategySymbolPosition: async () => makeStrategySymbolPosition(),
     })
 
-    const res = await postWebhook(app, {
+    const res = await postWebhook(fixture.app, {
         ...makePayload('evt-sizing-capped-1'),
         strategy: 'alpha',
         size: 0.2,
@@ -1149,20 +1292,15 @@ test('POST /api/webhooks/tradingview policy-backed WEBHOOK_CAPPED returns sizing
     assert.equal(body.sizing_decision.input_size, 0.2)
     assert.equal(body.sizing_decision.effective_size, 0.2)
     assert.equal(body.sizing_decision.input_size_ignored, false)
-    assert.equal(dispatchCalls.length, 0)
-    assert.equal(events[0]?.status, 'accepted')
-    assert.equal(events[0]?.decision_kind, 'DISPATCH')
-    assert.equal(events[0]?.effective_strategy_id, 'alpha')
+    assert.equal(fixture.dispatchCalls.length, 1)
+    assert.equal(fixture.dispatchCalls[0]?.size, 0.2)
+    assert.equal(fixture.events[0]?.status, 'accepted')
+    assert.equal(fixture.events[0]?.decision_kind, 'DISPATCH')
+    assert.equal(fixture.events[0]?.effective_strategy_id, 'alpha')
 })
 
 test('POST /api/webhooks/tradingview rejects missing size for WEBHOOK_CAPPED after policy resolution', async () => {
-    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
-    const { createWebhookEvent, events } = createWebhookEventStub()
-    const app = createAppForTests({
-        webhookSecret: 'test-secret',
-        sourceIpAllowlist: new Set(['52.89.214.238']),
-        dispatchOrder,
-        createWebhookEvent,
+    const fixture = createSizingRouteFixture({
         getTradableSymbol: async () => makeTradableSymbol({
             order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
         }),
@@ -1171,25 +1309,19 @@ test('POST /api/webhooks/tradingview rejects missing size for WEBHOOK_CAPPED aft
     })
 
     const { size: _size, ...withoutSize } = makePayload('evt-sizing-required-1')
-    const res = await postWebhook(app, { ...withoutSize, strategy: 'alpha' })
+    const res = await postWebhook(fixture.app, { ...withoutSize, strategy: 'alpha' })
     const body = await res.json()
 
     assert.equal(res.status, 400)
     assert.equal(body.error.code, 'SIZE_REQUIRED')
     assert.equal(body.sizing_decision.reason, 'SIZE_REQUIRED')
-    assert.equal(dispatchCalls.length, 0)
-    assert.equal(events[0]?.status, 'rejected')
-    assert.equal(events[0]?.rejection_reason, 'SIZE_REQUIRED')
+    assert.equal(fixture.dispatchCalls.length, 0)
+    assert.equal(fixture.events[0]?.status, 'rejected')
+    assert.equal(fixture.events[0]?.rejection_reason, 'SIZE_REQUIRED')
 })
 
 test('POST /api/webhooks/tradingview policy-backed MANAGED ignores a valid input size', async () => {
-    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
-    const { createWebhookEvent, events } = createWebhookEventStub()
-    const app = createAppForTests({
-        webhookSecret: 'test-secret',
-        sourceIpAllowlist: new Set(['52.89.214.238']),
-        dispatchOrder,
-        createWebhookEvent,
+    const fixture = createSizingRouteFixture({
         getTradableSymbol: async () => makeTradableSymbol({
             order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
         }),
@@ -1206,7 +1338,7 @@ test('POST /api/webhooks/tradingview policy-backed MANAGED ignores a valid input
         }),
     })
 
-    const res = await postWebhook(app, {
+    const res = await postWebhook(fixture.app, {
         ...makePayload('evt-sizing-managed-1'),
         strategy: 'managed',
         size: 99,
@@ -1219,21 +1351,14 @@ test('POST /api/webhooks/tradingview policy-backed MANAGED ignores a valid input
     assert.equal(body.sizing_decision.input_size, 99)
     assert.equal(body.sizing_decision.input_size_ignored, true)
     assert.equal(body.sizing_decision.effective_size, 0.5)
-    assert.equal(dispatchCalls.length, 0)
-    assert.equal(events[0]?.input_size, 99)
-    assert.equal(events[0]?.input_size_ignored, true)
+    assert.equal(fixture.dispatchCalls.length, 1)
+    assert.equal(fixture.dispatchCalls[0]?.size, 0.5)
+    assert.equal(fixture.events[0]?.input_size, 99)
+    assert.equal(fixture.events[0]?.input_size_ignored, true)
 })
 
 test('POST /api/webhooks/tradingview policy-backed suppresses without dispatch or dispatch log', async () => {
-    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
-    const { createWebhookEvent } = createWebhookEventStub()
-    const { createOrderDispatchLog, logs } = createOrderDispatchLogStub()
-    const app = createAppForTests({
-        webhookSecret: 'test-secret',
-        sourceIpAllowlist: new Set(['52.89.214.238']),
-        dispatchOrder,
-        createWebhookEvent,
-        createOrderDispatchLog,
+    const fixture = createSizingRouteFixture({
         getTradableSymbol: async () => makeTradableSymbol({
             order_constraints: { quantity_step: 0.1, min_order_size: 0.1 },
         }),
@@ -1241,14 +1366,14 @@ test('POST /api/webhooks/tradingview policy-backed suppresses without dispatch o
         getStrategySymbolPosition: async () => makeStrategySymbolPosition(),
     })
 
-    const res = await postWebhook(app, { ...makePayload('evt-sizing-suppress-1'), strategy: 'alpha' })
+    const res = await postWebhook(fixture.app, { ...makePayload('evt-sizing-suppress-1'), strategy: 'alpha' })
     const body = await res.json()
 
     assert.equal(res.status, 202)
     assert.equal(body.dispatch_status, 'suppressed')
     assert.equal(body.sizing_decision.reason, 'POLICY_DISABLED')
-    assert.equal(dispatchCalls.length, 0)
-    assert.equal(logs.length, 0)
+    assert.equal(fixture.dispatchCalls.length, 0)
+    assert.equal(fixture.logs.length, 0)
 })
 
 test('POST /api/webhooks/tradingview policy fallback OFF rejects unregistered policy', async () => {
@@ -1290,7 +1415,10 @@ test('POST /api/webhooks/tradingview resolves policy before treating a missing s
     assert.equal(res.status, 400)
     assert.equal(body.error.code, 'SYMBOL_NOT_FOUND')
     assert.equal(body.sizing_decision.reason, 'SYMBOL_NOT_FOUND')
-    assert.deepEqual(policyCalls, [{ strategyId: 'alpha', symbolId: 'bitflyer:BTC_JPY' }])
+    assert.deepEqual(policyCalls, [
+        { strategyId: 'alpha', symbolId: 'bitflyer:BTC_JPY' },
+        { strategyId: 'alpha', symbolId: 'bitflyer:BTC_JPY' },
+    ])
     assert.equal(fixture.dispatchCalls.length, 0)
     assert.equal(fixture.addedOrders.length, 0)
     assert.equal(fixture.logs.length, 0)
@@ -1473,7 +1601,7 @@ test('POST /api/webhooks/tradingview gives strategy_id precedence over the legac
 
     assert.equal(res.status, 202)
     assert.equal(body.dispatch_status, 'sizing_approved')
-    assert.deepEqual(policyCalls, ['alpha'])
+    assert.deepEqual(policyCalls, ['alpha', 'alpha'])
     assert.equal(fixture.events[0]?.effective_strategy_id, 'alpha')
 })
 
@@ -1502,7 +1630,7 @@ test('POST /api/webhooks/tradingview normalizes legacy strategy whitespace for p
     })
 
     assert.equal(res.status, 202)
-    assert.deepEqual(policyCalls, ['alpha_strategy_v2'])
+    assert.deepEqual(policyCalls, ['alpha_strategy_v2', 'alpha_strategy_v2'])
     assert.equal(fixture.events[0]?.effective_strategy_id, 'alpha_strategy_v2')
 })
 
@@ -1607,8 +1735,9 @@ test('POST /api/webhooks/tradingview allows MANAGED payloads without size', asyn
     assert.equal(body.sizing_decision.kind, 'DISPATCH')
     assert.equal(body.sizing_decision.effective_size, 0.5)
     assert.equal(body.sizing_decision.input_size_ignored, false)
-    assert.equal(fixture.dispatchCalls.length, 0)
-    assert.equal(fixture.addedOrders.length, 0)
+    assert.equal(fixture.dispatchCalls.length, 1)
+    assert.equal(fixture.dispatchCalls[0]?.size, 0.5)
+    assert.equal(fixture.addedOrders.length, 1)
 })
 
 for (const invalidSize of [0, -1]) {
@@ -1662,7 +1791,7 @@ for (const [field, value] of [
     })
 }
 
-test('POST /api/webhooks/tradingview policy-backed DISPATCH does not call broker, orders_v2, or dispatch log', async () => {
+test('POST /api/webhooks/tradingview policy-backed DISPATCH propagates effective size and tracking fields', async () => {
     const fixture = createSizingRouteFixture()
 
     const res = await postWebhook(fixture.app, {
@@ -1674,9 +1803,523 @@ test('POST /api/webhooks/tradingview policy-backed DISPATCH does not call broker
 
     assert.equal(res.status, 202)
     assert.equal(body.dispatch_status, 'sizing_approved')
-    assert.equal(fixture.dispatchCalls.length, 0)
+    assert.equal(fixture.dispatchCalls.length, 1)
+    assert.equal(fixture.dispatchCalls[0]?.size, 0.1)
+    assert.equal(fixture.addedOrders.length, 1)
+    assert.equal((fixture.addedOrders[0] as { requested_size?: number }).requested_size, 0.1)
+    assert.equal(fixture.logs.length, 1)
+    assert.equal(fixture.logs[0]?.size, 0.1)
+    assert.equal(fixture.logs[0]?.effective_size, 0.1)
+    assert.equal(fixture.logs[0]?.input_size, 0.1)
+    assert.equal(fixture.logs[0]?.sizing_mode, 'WEBHOOK_CAPPED')
+    assert.equal(fixture.logs[0]?.policy_version, 3)
+    assert.equal(fixture.logs[0]?.position_before, 0)
+    assert.equal(fixture.logs[0]?.position_after, 0.1)
+})
+
+test('POST /api/webhooks/tradingview policy-backed dry-run releases reservation without orders_v2', async () => {
+    const eventId = 'evt-policy-dry-run'
+    const outcomes: string[] = []
+    const fixture = createSizingRouteFixture({
+        dispatchOrder: async () => ({
+            ok: true as const,
+            broker: 'bitflyer' as const,
+            providerOrderId: 'DRY_RUN',
+        }),
+        reserveStrategySymbolOrder: async () => makeDispatchReservationResult(eventId, 0.4, {
+            audit: {
+                sizingMode: 'WEBHOOK_CAPPED',
+                policyVersion: 3,
+                positionBefore: 0.1,
+                positionAfter: 0.5,
+            },
+        }),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return {
+                kind: 'UPDATED' as const,
+                reservation: makeDispatchReservationResult(eventId, 0.4).reservation,
+                position: makeStrategySymbolPosition({ pending_delta: 0 }),
+            }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload(eventId),
+        strategy: 'alpha',
+        size: 1,
+        dry_run: true,
+    })
+    const body = await res.json()
+
+    assert.equal(res.status, 202)
+    assert.equal(body.dispatch_status, 'sizing_approved')
+    assert.equal(fixture.dispatchCalls.length, 1)
+    assert.equal(fixture.dispatchCalls[0]?.dryRun, true)
+    assert.equal(fixture.dispatchCalls[0]?.size, 0.4)
     assert.equal(fixture.addedOrders.length, 0)
+    assert.equal(fixture.logs.length, 1)
+    assert.equal(fixture.logs[0]?.dry_run, true)
+    assert.equal(fixture.logs[0]?.provider_order_id, 'DRY_RUN')
+    assert.equal(fixture.logs[0]?.input_size, 1)
+    assert.equal(fixture.logs[0]?.effective_size, 0.4)
+    assert.equal(fixture.logs[0]?.size, 0.4)
+    assert.equal(fixture.logs[0]?.sizing_mode, 'WEBHOOK_CAPPED')
+    assert.equal(fixture.logs[0]?.policy_version, 3)
+    assert.equal(fixture.logs[0]?.position_before, 0.1)
+    assert.equal(fixture.logs[0]?.position_after, 0.5)
+    assert.equal(fixture.logs[0]?.certainty, 'CONFIRMED_FAILURE')
+    assert.equal(fixture.logs[0]?.result, 'success')
+    assert.equal(fixture.logs[0]?.request_payload.dryRun, true)
+    assert.equal(fixture.logs[0]?.response_payload?.dry_run, true)
+    assert.deepEqual(outcomes, ['CONFIRMED_FAILURE'])
+})
+
+test('POST /api/webhooks/tradingview policy-backed dry-run releases on unknown dispatcher result', async () => {
+    const eventId = 'evt-policy-dry-run-unknown'
+    const outcomes: string[] = []
+    const fixture = createSizingRouteFixture({
+        dispatchOrder: async () => ({
+            ok: false as const,
+            broker: 'bitflyer',
+            code: 'BROKER_REQUEST_FAILED' as const,
+            message: 'dry-run validation result unavailable',
+            certainty: 'UNKNOWN' as const,
+        }),
+        reserveStrategySymbolOrder: async () => makeDispatchReservationResult(eventId, 0.2),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return {
+                kind: 'UPDATED' as const,
+                reservation: makeDispatchReservationResult(eventId, 0.2).reservation,
+                position: makeStrategySymbolPosition({ pending_delta: 0 }),
+            }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload(eventId),
+        strategy: 'alpha',
+        dry_run: true,
+    })
+
+    assert.equal(res.status, 202)
+    assert.equal(fixture.dispatchCalls[0]?.dryRun, true)
+    assert.equal(fixture.addedOrders.length, 0)
+    assert.equal(fixture.logs[0]?.dry_run, true)
+    assert.equal(fixture.logs[0]?.provider_order_id, 'DRY_RUN')
+    assert.equal(fixture.logs[0]?.certainty, 'CONFIRMED_FAILURE')
+    assert.equal(fixture.logs[0]?.result, 'failure')
+    assert.deepEqual(outcomes, ['CONFIRMED_FAILURE'])
+})
+
+test('POST /api/webhooks/tradingview policy-backed dry-run release failure keeps reservation safely and returns 202', async () => {
+    const eventId = 'evt-policy-dry-run-release-failure'
+    const fixture = createSizingRouteFixture({
+        dispatchOrder: async () => ({
+            ok: true as const,
+            broker: 'bitflyer' as const,
+            providerOrderId: 'DRY_RUN',
+        }),
+        reserveStrategySymbolOrder: async () => makeDispatchReservationResult(eventId, 0.3),
+        applyStrategySymbolDispatchOutcome: async () => ({
+            kind: 'REJECT' as const,
+            reason: 'INVALID_STORED_STATE' as const,
+        }),
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload(eventId),
+        strategy: 'alpha',
+        dry_run: true,
+    })
+
+    assert.equal(res.status, 202)
+    assert.equal(fixture.addedOrders.length, 0)
+    assert.equal(fixture.logs[0]?.dry_run, true)
+    assert.equal(fixture.logs[0]?.provider_order_id, 'DRY_RUN')
+    const releaseFailure = fixture.loggerCalls.find((call) => call.event === 'strategy_symbol_reservation:outcome_apply_failed')
+    assert.equal(releaseFailure?.event_id, eventId)
+    assert.equal(releaseFailure?.reservation_id, `reservation-${eventId}`)
+    assert.equal(releaseFailure?.effective_size, 0.3)
+    assert.equal(releaseFailure?.dry_run, true)
+})
+
+test('POST /api/webhooks/tradingview policy-backed capped dispatch uses only atomic effective size', async () => {
+    const outcomes: string[] = []
+    const reservation = {
+        id: 'reservation-effective-size',
+        event_id: 'evt-effective-size',
+        position_id: 'alpha:bitflyer:BTC_JPY',
+        strategy_id: 'alpha',
+        symbol_id: 'bitflyer:BTC_JPY',
+        order_id: 'evt-effective-size',
+        reserved_delta: 0.4,
+        status: 'RESERVED' as const,
+        policy_version: 3,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+    const fixture = createSizingRouteFixture({
+        reserveStrategySymbolOrder: async () => ({
+            kind: 'DISPATCH' as const,
+            reason: 'CALCULATED' as const,
+            effectiveSize: 0.4,
+            decision: {
+                kind: 'DISPATCH' as const,
+                reason: 'CALCULATED' as const,
+                effectiveSize: 0.4,
+                details: { appliedConstraints: ['MAX_POSITION'] as const },
+            },
+            audit: {
+                sizingMode: 'WEBHOOK_CAPPED' as const,
+                policyVersion: 3,
+                positionBefore: 0.1,
+                positionAfter: 0.5,
+            },
+            reservation,
+            position: makeStrategySymbolPosition({ pending_delta: 0.4 }),
+        }),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return {
+                kind: 'UPDATED' as const,
+                reservation,
+                position: makeStrategySymbolPosition({ pending_delta: 0.4 }),
+            }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload('evt-effective-size'),
+        strategy: 'alpha',
+        size: 1,
+    })
+    assert.equal(res.status, 202)
+    assert.equal(fixture.dispatchCalls[0]?.size, 0.4)
+    assert.equal((fixture.addedOrders[0] as { requested_size?: number }).requested_size, 0.4)
+    assert.equal(fixture.logs[0]?.input_size, 1)
+    assert.equal(fixture.logs[0]?.effective_size, 0.4)
+    assert.equal(fixture.logs[0]?.size, 0.4)
+    assert.equal(fixture.logs[0]?.certainty, 'CONFIRMED_SUCCESS')
+    assert.deepEqual(outcomes, ['CONFIRMED_SUCCESS'])
+})
+
+test('POST /api/webhooks/tradingview explicit broker failure releases atomic reservation', async () => {
+    const outcomes: string[] = []
+    const reservation = {
+        id: 'reservation-failure',
+        event_id: 'evt-explicit-failure',
+        position_id: 'alpha:bitflyer:BTC_JPY',
+        strategy_id: 'alpha',
+        symbol_id: 'bitflyer:BTC_JPY',
+        order_id: 'evt-explicit-failure',
+        reserved_delta: 0.2,
+        status: 'RESERVED' as const,
+        policy_version: 3,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+    const fixture = createSizingRouteFixture({
+        dispatchOrder: async () => ({
+            ok: false as const,
+            broker: 'bitflyer',
+            code: 'BROKER_REQUEST_FAILED' as const,
+            message: 'rejected',
+            certainty: 'CONFIRMED_FAILURE' as const,
+        }),
+        reserveStrategySymbolOrder: async () => ({
+            kind: 'DISPATCH' as const,
+            reason: 'CALCULATED' as const,
+            effectiveSize: 0.2,
+            decision: {
+                kind: 'DISPATCH' as const,
+                reason: 'CALCULATED' as const,
+                effectiveSize: 0.2,
+                details: { appliedConstraints: [] },
+            },
+            audit: {
+                sizingMode: 'WEBHOOK_CAPPED' as const,
+                policyVersion: 3,
+                positionBefore: 0,
+                positionAfter: 0.2,
+            },
+            reservation,
+            position: makeStrategySymbolPosition({ pending_delta: 0.2 }),
+        }),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return { kind: 'UPDATED' as const, reservation, position: makeStrategySymbolPosition() }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload('evt-explicit-failure'),
+        strategy: 'alpha',
+    })
+    assert.equal(res.status, 202)
+    assert.equal(fixture.addedOrders.length, 0)
+    assert.equal(fixture.logs[0]?.certainty, 'CONFIRMED_FAILURE')
+    assert.deepEqual(outcomes, ['CONFIRMED_FAILURE'])
+})
+
+test('POST /api/webhooks/tradingview broker exception retains reservation as UNKNOWN', async () => {
+    const outcomes: string[] = []
+    const reservation = {
+        id: 'reservation-unknown',
+        event_id: 'evt-unknown',
+        position_id: 'alpha:bitflyer:BTC_JPY',
+        strategy_id: 'alpha',
+        symbol_id: 'bitflyer:BTC_JPY',
+        order_id: 'evt-unknown',
+        reserved_delta: 0.2,
+        status: 'RESERVED' as const,
+        policy_version: 3,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+    const fixture = createSizingRouteFixture({
+        dispatchOrder: async () => { throw new Error('timeout') },
+        reserveStrategySymbolOrder: async () => ({
+            kind: 'DISPATCH' as const,
+            reason: 'CALCULATED' as const,
+            effectiveSize: 0.2,
+            decision: {
+                kind: 'DISPATCH' as const,
+                reason: 'CALCULATED' as const,
+                effectiveSize: 0.2,
+                details: { appliedConstraints: [] },
+            },
+            audit: {
+                sizingMode: 'WEBHOOK_CAPPED' as const,
+                policyVersion: 3,
+                positionBefore: 0,
+                positionAfter: 0.2,
+            },
+            reservation,
+            position: makeStrategySymbolPosition({ pending_delta: 0.2 }),
+        }),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return { kind: 'UPDATED' as const, reservation, position: makeStrategySymbolPosition() }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload('evt-unknown'),
+        strategy: 'alpha',
+    })
+    assert.equal(res.status, 202)
+    assert.equal(fixture.addedOrders.length, 0)
+    assert.equal(fixture.logs[0]?.certainty, 'UNKNOWN')
+    assert.deepEqual(outcomes, ['UNKNOWN'])
+})
+
+test('POST /api/webhooks/tradingview orders_v2 failure keeps provider id and marks UNKNOWN', async () => {
+    const outcomes: string[] = []
+    const reservation = {
+        id: 'reservation-order-write',
+        event_id: 'evt-order-write',
+        position_id: 'alpha:bitflyer:BTC_JPY',
+        strategy_id: 'alpha',
+        symbol_id: 'bitflyer:BTC_JPY',
+        order_id: 'evt-order-write',
+        reserved_delta: 0.2,
+        status: 'RESERVED' as const,
+        policy_version: 3,
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+    }
+    const fixture = createSizingRouteFixture({
+        addOrderV2: async () => { throw new Error('orders_v2 unavailable') },
+        reserveStrategySymbolOrder: async () => ({
+            kind: 'DISPATCH' as const,
+            reason: 'CALCULATED' as const,
+            effectiveSize: 0.2,
+            decision: {
+                kind: 'DISPATCH' as const,
+                reason: 'CALCULATED' as const,
+                effectiveSize: 0.2,
+                details: { appliedConstraints: [] },
+            },
+            audit: {
+                sizingMode: 'WEBHOOK_CAPPED' as const,
+                policyVersion: 3,
+                positionBefore: 0,
+                positionAfter: 0.2,
+            },
+            reservation,
+            position: makeStrategySymbolPosition({ pending_delta: 0.2 }),
+        }),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return { kind: 'UPDATED' as const, reservation, position: makeStrategySymbolPosition() }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload('evt-order-write'),
+        strategy: 'alpha',
+    })
+    assert.equal(res.status, 202)
+    assert.equal(fixture.logs[0]?.provider_order_id, 'JRF-test-1')
+    assert.equal(fixture.logs[0]?.certainty, 'UNKNOWN')
+    assert.equal(fixture.logs[0]?.error_code, 'ORDERS_V2_WRITE_FAILED')
+    assert.deepEqual(outcomes, ['UNKNOWN'])
+})
+
+test('POST /api/webhooks/tradingview event persistence failure does not dispatch and releases reservation', async () => {
+    const outcomes: string[] = []
+    const eventId = 'evt-event-write-failure'
+    const fixture = createSizingRouteFixture({
+        createWebhookEvent: async () => { throw new Error('webhook event unavailable') },
+        reserveStrategySymbolOrder: async () => makeDispatchReservationResult(eventId, 0.2),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return {
+                kind: 'UPDATED' as const,
+                reservation: makeDispatchReservationResult(eventId, 0.2).reservation,
+                position: makeStrategySymbolPosition(),
+            }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload(eventId),
+        strategy: 'alpha',
+    })
+    assert.equal(res.status, 500)
+    assert.equal(fixture.dispatchCalls.length, 0)
     assert.equal(fixture.logs.length, 0)
+    assert.deepEqual(outcomes, ['CONFIRMED_FAILURE'])
+})
+
+test('POST /api/webhooks/tradingview policy duplicate does not redispatch or add pending twice', async () => {
+    const eventId = 'evt-policy-duplicate'
+    const firstReservation = makeDispatchReservationResult(eventId, 0.2)
+    let reserveCalls = 0
+    const outcomes: string[] = []
+    const fixture = createSizingRouteFixture({
+        reserveStrategySymbolOrder: async () => {
+            reserveCalls += 1
+            if (reserveCalls > 1) {
+                return {
+                    kind: 'SUPPRESS' as const,
+                    reason: 'DUPLICATE_EVENT' as const,
+                    reservation: firstReservation.reservation,
+                    position: firstReservation.position,
+                }
+            }
+            return firstReservation
+        },
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return {
+                kind: 'UPDATED' as const,
+                reservation: firstReservation.reservation,
+                position: firstReservation.position,
+            }
+        },
+    })
+
+    const payload = { ...makePayload(eventId), strategy: 'alpha' }
+    const firstResponse = await postWebhook(fixture.app, payload)
+    const secondResponse = await postWebhook(fixture.app, payload)
+
+    assert.equal(firstResponse.status, 202)
+    assert.equal(secondResponse.status, 409)
+    assert.equal(fixture.dispatchCalls.length, 1)
+    assert.equal(fixture.addedOrders.length, 1)
+    assert.equal(fixture.events.length, 1)
+    assert.deepEqual(outcomes, ['CONFIRMED_SUCCESS'])
+})
+
+test('POST /api/webhooks/tradingview malformed broker success is UNKNOWN without orders_v2 write', async () => {
+    const outcomes: string[] = []
+    const eventId = 'evt-malformed-success'
+    const fixture = createSizingRouteFixture({
+        dispatchOrder: async () => ({
+            ok: true as const,
+            broker: 'bitflyer' as const,
+            providerOrderId: '   ',
+        }),
+        reserveStrategySymbolOrder: async () => makeDispatchReservationResult(eventId, 0.2),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return {
+                kind: 'UPDATED' as const,
+                reservation: makeDispatchReservationResult(eventId, 0.2).reservation,
+                position: makeStrategySymbolPosition(),
+            }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload(eventId),
+        strategy: 'alpha',
+    })
+    assert.equal(res.status, 202)
+    assert.equal(fixture.addedOrders.length, 0)
+    assert.equal(fixture.logs[0]?.certainty, 'UNKNOWN')
+    assert.equal(fixture.logs[0]?.error_code, 'BROKER_REQUEST_FAILED')
+    assert.deepEqual(outcomes, ['UNKNOWN'])
+})
+
+test('POST /api/webhooks/tradingview dispatch log failure keeps 202 and preserves lifecycle outcome', async () => {
+    const outcomes: string[] = []
+    const eventId = 'evt-log-write-failure'
+    const fixture = createSizingRouteFixture({
+        createOrderDispatchLog: async () => { throw new Error('dispatch log unavailable') },
+        reserveStrategySymbolOrder: async () => makeDispatchReservationResult(eventId, 0.2),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            return {
+                kind: 'UPDATED' as const,
+                reservation: makeDispatchReservationResult(eventId, 0.2).reservation,
+                position: makeStrategySymbolPosition(),
+            }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload(eventId),
+        strategy: 'alpha',
+    })
+    assert.equal(res.status, 202)
+    assert.deepEqual(outcomes, ['CONFIRMED_SUCCESS'])
+    assert.equal(fixture.loggerCalls.some((call) => call.event === 'order_dispatch_log:write_failed'), true)
+})
+
+test('POST /api/webhooks/tradingview lifecycle update failure keeps 202 and logs recovery context', async () => {
+    const eventId = 'evt-outcome-update-failure'
+    const outcomes: string[] = []
+    let applyCalls = 0
+    const fixture = createSizingRouteFixture({
+        reserveStrategySymbolOrder: async () => makeDispatchReservationResult(eventId, 0.2),
+        applyStrategySymbolDispatchOutcome: async (input) => {
+            outcomes.push(input.outcome)
+            applyCalls += 1
+            return applyCalls === 1
+                ? {
+                    kind: 'REJECT' as const,
+                    reason: 'INVALID_STORED_STATE' as const,
+                }
+                : {
+                    kind: 'UPDATED' as const,
+                    reservation: makeDispatchReservationResult(eventId, 0.2).reservation,
+                    position: makeStrategySymbolPosition(),
+                }
+        },
+    })
+
+    const res = await postWebhook(fixture.app, {
+        ...makePayload(eventId),
+        strategy: 'alpha',
+    })
+    assert.equal(res.status, 202)
+    assert.equal(fixture.logs[0]?.certainty, 'CONFIRMED_SUCCESS')
+    assert.equal(fixture.loggerCalls.some((call) => call.event === 'strategy_symbol_reservation:outcome_apply_failed'), true)
+    assert.deepEqual(outcomes, ['CONFIRMED_SUCCESS', 'UNKNOWN'])
 })
 
 for (const scenario of [
@@ -1976,6 +2619,7 @@ test('POST /api/webhooks/tradingview still returns 202 when dispatch failed', as
         broker: 'bitflyer',
         code: 'BROKER_REQUEST_FAILED',
         message: 'bitflyer api timeout',
+        certainty: 'UNKNOWN',
     }))
     const { createWebhookEvent } = createWebhookEventStub()
     const { logger, calls } = createLoggerStub()
@@ -2000,6 +2644,7 @@ test('POST /api/webhooks/tradingview still returns 202 when dispatch failed', as
     assert.deepEqual(rejectedLog?.error, {
         code: 'BROKER_REQUEST_FAILED',
         message: 'bitflyer api timeout',
+        certainty: 'UNKNOWN',
     })
 })
 

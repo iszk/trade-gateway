@@ -1385,6 +1385,68 @@ test('SaxoClient.sendMarketOrder keeps related order ids nullable when response 
     }
 })
 
+test('SaxoClient.sendMarketOrder classifies explicit rejection, HTTP 408, and transport uncertainty', async () => {
+    const authData = {
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+            accounts: [{
+                accountKey: 'account-1',
+                clientKey: 'client-1',
+                legalAssetTypes: ['FxSpot'],
+                currency: 'USD',
+                displayName: 'Primary',
+            }],
+        },
+    }
+    const makeOrder = () => ({
+        eventId: 'evt-saxo-certainty',
+        broker: 'saxo' as const,
+        ticker: 'FxSpot:21',
+        side: 'BUY' as const,
+        size: 1,
+        requestId: 'req-saxo-certainty',
+    })
+
+    const rejectionClient = new SaxoClient({
+        db: mockFirestore(authData),
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response('invalid order', { status: 400 }),
+    })
+    const rejection = await rejectionClient.sendMarketOrder(makeOrder())
+    assert.equal(rejection.ok, false)
+    assert.equal(!rejection.ok && rejection.certainty, 'CONFIRMED_FAILURE')
+
+    const serverErrorClient = new SaxoClient({
+        db: mockFirestore(authData),
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response('temporary', { status: 503 }),
+    })
+    const serverError = await serverErrorClient.sendMarketOrder(makeOrder())
+    assert.equal(serverError.ok, false)
+    assert.equal(!serverError.ok && serverError.certainty, 'UNKNOWN')
+
+    const requestTimeoutClient = new SaxoClient({
+        db: mockFirestore(authData),
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response('request timeout', { status: 408 }),
+    })
+    const requestTimeout = await requestTimeoutClient.sendMarketOrder(makeOrder())
+    assert.equal(requestTimeout.ok, false)
+    assert.equal(!requestTimeout.ok && requestTimeout.certainty, 'UNKNOWN')
+
+    const malformedResponseClient = new SaxoClient({
+        db: mockFirestore(authData),
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response('{}', { status: 200 }),
+    })
+    const malformedResponse = await malformedResponseClient.sendMarketOrder(makeOrder())
+    assert.equal(malformedResponse.ok, false)
+    assert.equal(!malformedResponse.ok && malformedResponse.certainty, 'UNKNOWN')
+})
+
 test('SaxoClient.getExecutionPriceForOrderV2 uses batched audit activities and fill amount', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

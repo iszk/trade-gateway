@@ -112,14 +112,28 @@ type BitflyerParentOrderRequest = {
     parameters: BitflyerParentOrderParameter[]
 }
 
+class BitflyerHttpError extends Error {
+    readonly status: number
+
+    constructor(status: number, message: string) {
+        super(message)
+        this.name = 'BitflyerHttpError'
+        this.status = status
+    }
+}
+
 const buildFailure = (
     code: OrderDispatchFailure['code'],
     message: string,
+    certainty: 'CONFIRMED_FAILURE' | 'UNKNOWN' = code === 'BROKER_REQUEST_FAILED'
+        ? 'UNKNOWN'
+        : 'CONFIRMED_FAILURE',
 ): OrderDispatchFailure => ({
     ok: false,
     broker: 'bitflyer',
     code,
     message,
+    certainty,
 })
 
 const resolveProductCode = (ticker: string): string => ticker
@@ -318,7 +332,10 @@ export class BitflyerClient {
             } catch {
                 payload = undefined
             }
-            throw new Error(payload?.error_message || payload?.message || `bitflyer response status ${response.status}`)
+            throw new BitflyerHttpError(
+                response.status,
+                payload?.error_message || payload?.message || `bitflyer response status ${response.status}`,
+            )
         }
 
         return (await response.json()) as T
@@ -428,8 +445,8 @@ export class BitflyerClient {
                 )
 
                 const providerOrderId = payload?.parent_order_acceptance_id
-                if (!providerOrderId) {
-                    return buildFailure('BROKER_REQUEST_FAILED', 'missing parent_order_acceptance_id')
+                if (!providerOrderId || providerOrderId.trim().length === 0) {
+                    return buildFailure('BROKER_REQUEST_FAILED', 'missing parent_order_acceptance_id', 'UNKNOWN')
                 }
 
                 const metadataExits: BitflyerParentOrderMetadata['exits'] = parameters.slice(1).map((parameter) => ({
@@ -488,8 +505,8 @@ export class BitflyerClient {
             )
 
             const providerOrderId = payload?.child_order_acceptance_id
-            if (!providerOrderId) {
-                return buildFailure('BROKER_REQUEST_FAILED', 'missing child_order_acceptance_id')
+            if (!providerOrderId || providerOrderId.trim().length === 0) {
+                return buildFailure('BROKER_REQUEST_FAILED', 'missing child_order_acceptance_id', 'UNKNOWN')
             }
 
             return {
@@ -502,7 +519,14 @@ export class BitflyerClient {
             if (message.includes('api credentials are missing')) {
                 return buildFailure('BROKER_NOT_CONFIGURED', message)
             }
-            return buildFailure('BROKER_REQUEST_FAILED', message)
+            if (error instanceof BitflyerHttpError && error.status >= 400 && error.status < 500) {
+                return buildFailure(
+                    'BROKER_REQUEST_FAILED',
+                    message,
+                    error.status === 408 ? 'UNKNOWN' : 'CONFIRMED_FAILURE',
+                )
+            }
+            return buildFailure('BROKER_REQUEST_FAILED', message, 'UNKNOWN')
         }
     }
 

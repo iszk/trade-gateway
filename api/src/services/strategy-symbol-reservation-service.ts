@@ -68,6 +68,12 @@ export type ReserveStrategySymbolOrderResult =
         reason: 'CALCULATED'
         effectiveSize: number
         decision: SizingDispatchDecision
+        audit: {
+            sizingMode: StrategySymbolPolicy['sizing_mode']
+            policyVersion: number
+            positionBefore: number
+            positionAfter: number
+        }
         reservation: StrategySymbolReservation
         position: StrategySymbolPosition
       }
@@ -526,6 +532,13 @@ const createReserveFn = (
             const pendingDelta = addQuantities(position.pending_delta, reservedDelta)
             if (pendingDelta === null) return invalidStoredState()
 
+            const positionBefore = addQuantities(
+                position.confirmed_position,
+                position.pending_delta,
+            )
+            const positionAfter = addQuantities(position.confirmed_position, pendingDelta)
+            if (positionBefore === null || positionAfter === null) return invalidStoredState()
+
             const updatedPosition: StrategySymbolPosition = {
                 ...position,
                 pending_delta: pendingDelta,
@@ -564,6 +577,12 @@ const createReserveFn = (
                 reason: 'CALCULATED',
                 effectiveSize: decision.effectiveSize,
                 decision,
+                audit: {
+                    sizingMode: policy.sizing_mode,
+                    policyVersion: policy.version,
+                    positionBefore,
+                    positionAfter,
+                },
                 reservation,
                 position: updatedPosition,
             } satisfies ReserveStrategySymbolOrderResult

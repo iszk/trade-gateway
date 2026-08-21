@@ -58,6 +58,19 @@ test('createOrderDispatchLogFn saves ticker, side, size as structured fields', a
         ticker: 'CfdOnIndex:4912',
         side: 'SELL',
         size: 1,
+        input_size: 2,
+        effective_size: 1,
+        sizing_mode: 'WEBHOOK_CAPPED',
+        policy_version: 4,
+        position_before: 0.5,
+        position_after: -0.5,
+        decision_reason: 'CALCULATED',
+        dry_run: true,
+        certainty: 'CONFIRMED_SUCCESS',
+        strategy_id: 'alpha',
+        symbol_id: 'saxo:CfdOnIndex:4912',
+        order_id: 'evt-002',
+        reservation_id: 'r_123',
         provider_order_id: 'order-123',
         request_payload: {},
         result: 'success',
@@ -67,6 +80,19 @@ test('createOrderDispatchLogFn saves ticker, side, size as structured fields', a
     assert.equal(savedDoc?.ticker, 'CfdOnIndex:4912')
     assert.equal(savedDoc?.side, 'SELL')
     assert.equal(savedDoc?.size, 1)
+    assert.equal(savedDoc?.input_size, 2)
+    assert.equal(savedDoc?.effective_size, 1)
+    assert.equal(savedDoc?.sizing_mode, 'WEBHOOK_CAPPED')
+    assert.equal(savedDoc?.policy_version, 4)
+    assert.equal(savedDoc?.position_before, 0.5)
+    assert.equal(savedDoc?.position_after, -0.5)
+    assert.equal(savedDoc?.decision_reason, 'CALCULATED')
+    assert.equal(savedDoc?.dry_run, true)
+    assert.equal(savedDoc?.certainty, 'CONFIRMED_SUCCESS')
+    assert.equal(savedDoc?.strategy_id, 'alpha')
+    assert.equal(savedDoc?.symbol_id, 'saxo:CfdOnIndex:4912')
+    assert.equal(savedDoc?.order_id, 'evt-002')
+    assert.equal(savedDoc?.reservation_id, 'r_123')
     assert.equal('price' in savedDoc, false)
     assert.equal(savedDoc?.provider_order_id, 'order-123')
 })
