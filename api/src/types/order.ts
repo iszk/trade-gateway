@@ -22,7 +22,7 @@ type OrderDispatchSuccess = {
     broker: BrokerName
     providerOrderId: string
     brokerOrderMetadata?: BrokerOrderMetadata
-    /** Broker accepted the order and returned a provider identifier. */
+    /** Broker が注文を受け付け、provider order ID を返したことを示す。 */
     certainty?: 'CONFIRMED_SUCCESS'
 }
 
