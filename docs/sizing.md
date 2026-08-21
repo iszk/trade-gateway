@@ -111,10 +111,12 @@ step 境界の canonical 表現が浮動小数点の丸めで入力値を僅か�
 
 この calculator は webhook schema、HTTP status、Firestore transaction、broker dispatch、注文監査の保存を担当しない。これらは後続の統合層が decision を解釈して実装する。
 
-## Webhook route との接続（reserve 延期）
+## Webhook route との接続
 
-Webhook route は登録済み policy の strategy、symbol 制約、仮想 position を独立 read し、この calculator を呼び出して `REJECT` / `SUPPRESS` / `DISPATCH` を HTTP と `webhook_events` の監査へマッピングする。これは非 atomic な snapshot に基づく sizing decision であり、発注承認には使用しない。
+Webhook route は登録済み policy の strategy、symbol 制約、仮想 position、同一 event の reservation を atomic reservation transaction で読み、同じ snapshot で calculator を実行する。`REJECT` / `SUPPRESS` は reservation と position を更新せず HTTP と `webhook_events` の監査へマッピングする。`DISPATCH` のときだけ reservation の作成と position の `pending_delta` 加算を commit し、transaction が返した `effectiveSize` を唯一の発注数量として broker dispatch、`orders_v2.requested_size`、dispatch log へ伝播する。
 
-policy-backed の `DISPATCH` は `dispatch_status: "sizing_approved"` を返すだけで、broker dispatch、reservation 作成、position の `pending_delta`、`orders_v2`、dispatch log へ反映しない。reserve への接続は次の effective-size 統合タスクで行い、atomic reservation transaction 内から同じ calculator を再実行する。
+`WEBHOOK_CAPPED` では入力 `size` を calculator に渡すが、上限・no-flip・最小数量・step などの共通制約適用後の `effectiveSize` を発注する。`MANAGED` では `base_order_size` から算出した `effectiveSize` を発注し、入力 `size` は検証と監査にのみ使用して数量へ再利用しない。`input_size` と `effective_size` は dispatch log で別フィールドとして保持する。
+
+broker 成功後に `orders_v2` または dispatch log の保存が失敗しても HTTP は `202` を維持する。provider order ID、event / order / reservation ID、effective size を構造化ログへ残し、orders 保存失敗は reservation を release せず `UNKNOWN` / `MANUAL_REVIEW` とする。明確な broker 拒否だけを `CONFIRMED_FAILURE` として release し、成功かつ追跡保存完了時だけ `CONFIRMED_SUCCESS` として `DISPATCHED` にする。policy-backed dry-run は atomic reservation / sizing と実 payload 検証を行うが `orders_v2` を作成せず、dispatch log に `dry_run: true`、`DRY_RUN`、effective size と sizing 監査情報を保存して reservation を `CONFIRMED_FAILURE` / `RELEASED` に戻す。dry-run dispatcher が UNKNOWN を返しても外部送信なしが保証されるため同じ release を適用し、release 失敗時は安全側に保持して構造化ログを残す。policy 未登録時の既存 dispatch は `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK` による互換経路として維持し、policy 専用監査 field は optional とする。
 
 policy が未登録の場合の既存 dispatch は、移行用 `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK` が `true` のときだけ許可する。これは第三の sizing mode ではなく、policy 登録までの互換 fallback である。

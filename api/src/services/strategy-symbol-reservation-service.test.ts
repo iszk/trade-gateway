@@ -219,6 +219,14 @@ test('atomic reserve passes the same snapshot to the calculator and writes signe
 
     assert.equal(result.kind, 'DISPATCH')
     assertReserveResultType(result)
+    if (result.kind === 'DISPATCH') {
+        assert.deepEqual(result.audit, {
+            sizingMode: 'WEBHOOK_CAPPED',
+            policyVersion: 3,
+            positionBefore: 0,
+            positionAfter: 0.5,
+        })
+    }
     const captured = calculatorInput as {
         policy: { id: string; version: number }
         constraints: RawData

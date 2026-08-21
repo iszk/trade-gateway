@@ -34,6 +34,7 @@ TradingView から受信するアラートを正規化し、bitFlyer 向け発�
 - `price` (number): 価格情報。`stop_loss` / `take_profit` を使用する場合は必須
 - `interval` (string): TradingView の時間足
 - `strategy` (string): シグナル生成元の戦略名
+- `dry_run` (boolean): policy-backed では sizing / payload 検証だけを行い、実注文を作成せず reservation を release する。policy 未登録の migration fallback は既存挙動を維持する
 - `strategy_id` (string): sizing policy を参照する strategy ID。英数字、`_`、`-`のみ。指定時は `strategy` より優先する。
 - `note` (string): 運用メモ
 - `stop_loss` (string): ストップロス幅。`"2.5%"` のようなパーセント文字列で指定。`price` を基準に計算される
@@ -177,12 +178,15 @@ alert(json.stringify(
 
 ### Sizing policy による webhook 判定
 
-symbol が active で strategy-symbol policy が登録されている場合、Webhook は policy、symbol の `order_constraints`、strategy の仮想 position を読み、`calculateOrderSize` の decision を返す。今回の route 判定は独立 read に基づく非 atomic な監査・HTTP 契約用であり、発注承認には使用しない。
+symbol が active で strategy-symbol policy が登録されている場合、Webhook は strategy、symbol、position、同一 event の reservation を atomic reservation transaction で読み、同じ snapshot の `calculateOrderSize` の decision を発注承認に使用する。`DISPATCH` のときだけ reservation の作成と position の `pending_delta` 加算を commit し、transaction が返した `effective_size` を broker、`orders_v2`、dispatch log のすべてに渡す。独立 read した position や webhook の `size` を発注数量として再利用しない。
 
 - `WEBHOOK_CAPPED`: `size` を候補数量として扱う。欠落は `SIZE_REQUIRED`、正数でない値は `INVALID_SIZE`、`quantity_step` 不一致は `INVALID_SIZE_INCREMENT`。
 - `MANAGED`: policy の `base_order_size` を使用する。`size` は指定時だけ監査し、`input_size_ignored: true` とする。`stop_loss`、`take_profit`、`stop_loss_pct`、`take_profit_pct` は `MANAGED_ATTACHED_ORDERS_UNSUPPORTED` で拒否する。
 - policy が disabled、上限・no-flip・最小数量・position 状態により発注できない場合は `202` と `dispatch_status: "suppressed"` を返す。
-- policy-backed の `DISPATCH` は sizing の承認だけを表し、`dispatch_status: "sizing_approved"` とする。broker dispatch、reservation、`pending_delta`、`orders_v2`、dispatch log は更新しない。
+- policy-backed の `DISPATCH` は reservation と webhook event の保存後に broker へ dispatch し、レスポンスは従来どおり `202` と `dispatch_status: "sizing_approved"` を返す。broker の成否や保存処理の詳細は同期レスポンスへ露出しない。
+- webhook event の保存が失敗した場合、または duplicate event が判明した場合は broker を呼ばない。作成済み reservation は未発注が確定したときだけ `CONFIRMED_FAILURE` として release し、release に失敗した場合は安全側に保持して構造化ログで復旧対象を示す。
+- broker の明確な拒否（HTTP 4xx。ただし HTTP 408 は除く）は `CONFIRMED_FAILURE` として reservation を release する。HTTP 408、transport exception、timeout、5xx、成功 response の provider order ID 欠落、`orders_v2` 保存失敗など受付有無を確定できない場合は `UNKNOWN` として reservation と position を `MANUAL_REVIEW` にし、pending を保持する。成功かつ追跡情報を保存できた場合だけ `CONFIRMED_SUCCESS` として reservation を `DISPATCHED` にする。
+- policy-backed の `dry_run: true` も atomic reservation と sizing を実行し、effective size と監査情報を得る。dispatcher には `dryRun: true` を渡し、検証結果の provider ID `DRY_RUN` を dispatch log に保存するが、実注文ではないため `orders_v2` は作成しない。外部 broker へ送信していないことが契約で保証されるため、dispatcher が UNKNOWN を返しても reservation は `CONFIRMED_FAILURE` として `RELEASED` にし、pending を戻す。release に失敗した場合は reservation を安全側に保持して event / reservation / effective size を構造化ログに残す。レスポンスは通常の policy-backed dispatch と同じ `202` / `sizing_approved` とする。policy 未登録時の migration fallback における dry-run は従来挙動を維持する。
 
 decision の拒否は `400`、抑止は `202` で、いずれも `event_id` と `sizing_decision` を返す。`sizing_decision` には `kind`、`reason`、`sizing_mode`、`policy_version`、`input_size`、`effective_size`、`input_size_ignored`、calculator の `details` を含む。policy/constraints/position の欠落・破損は fail-closed である。
 
@@ -199,6 +203,8 @@ policy 未登録時は `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK=true`（既�
 - 拒否ログは `reason`, `error`, `event_id`, `rawBody`, `payload` を可能な範囲で含む
 - `webhook_secret` はログ出力時に `[REDACTED]` へマスクする
 - policy-backed decision のログにも `webhook_secret` を出力しない
+
+broker dispatch の `order_dispatch_logs` には、発注に使った `size` / `effective_size` に加えて、policy 経路では `input_size`（入力がある場合のみ）、`sizing_mode`、`policy_version`、`position_before`、`position_after`、`decision_reason`、`strategy_id`、`symbol_id`、`order_id`、`reservation_id` を保存する。broker が返した場合は `provider_order_id` も保存する。policy-backed dry-run では `dry_run: true` と `provider_order_id: "DRY_RUN"` を保存する。`certainty` は `CONFIRMED_SUCCESS`、`CONFIRMED_FAILURE`、`UNKNOWN` を区別し、`orders_v2` 保存失敗や監査保存失敗も provider ID と event / reservation ID を含む構造化ログから追跡できるようにする。
 
 ## 受け入れ観点
 - 正常系: 正常 payload + 正しい `webhook_secret` + 許可 IP + 未処理 event_id で `202`

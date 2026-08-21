@@ -551,12 +551,16 @@ export class SaxoClient {
     private buildFailure(
         code: OrderDispatchFailure['code'],
         message: string,
+        certainty: 'CONFIRMED_FAILURE' | 'UNKNOWN' = code === 'BROKER_REQUEST_FAILED'
+            ? 'UNKNOWN'
+            : 'CONFIRMED_FAILURE',
     ): OrderDispatchFailure {
         return {
             ok: false,
             broker: 'saxo',
             code,
             message,
+            certainty,
         }
     }
 
@@ -1923,10 +1927,20 @@ export class SaxoClient {
                 return this.buildFailure(
                     'BROKER_REQUEST_FAILED',
                     `Saxo order failed: ${response.status} ${errorBody}`,
+                    response.status >= 400 && response.status < 500 && response.status !== 408
+                        ? 'CONFIRMED_FAILURE'
+                        : 'UNKNOWN',
                 )
             }
 
             const payload = (await response.json()) as SaxoOrderResponse
+            if (typeof payload?.OrderId !== 'string' || payload.OrderId.trim().length === 0) {
+                return this.buildFailure(
+                    'BROKER_REQUEST_FAILED',
+                    'Saxo order response is missing OrderId',
+                    'UNKNOWN',
+                )
+            }
             return {
                 ok: true,
                 broker: 'saxo',
@@ -1940,7 +1954,7 @@ export class SaxoClient {
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
-            return this.buildFailure('BROKER_REQUEST_FAILED', message)
+            return this.buildFailure('BROKER_REQUEST_FAILED', message, 'UNKNOWN')
         }
     }
 

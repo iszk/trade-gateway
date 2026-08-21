@@ -44,7 +44,7 @@ webhook 重複防止、発注監査、注文状態、銘柄制御、Saxo 認証�
 - `input_size_ignored` (boolean, optional) — `MANAGED` で input size を計算に使わなかった場合
 - `expire_at` (timestamp, required, TTL 用)
 
-policy-backed webhook の `DISPATCH` は sizing-only の受付記録であり、この event の保存を broker dispatch、reservation、position の `pending_delta` 更新、`orders_v2`、dispatch log の成功記録と解釈してはならない。実発注へ接続する場合は atomic reservation transaction で再判定する。
+policy-backed webhook の `DISPATCH` は atomic reservation transaction による予約作成と position の `pending_delta` 加算を伴う受付記録である。transaction の同じ snapshot から得た `effective_size` だけを broker、`orders_v2.requested_size`、dispatch log に伝播する。event 保存後に broker を呼び、event 保存失敗または duplicate では broker を呼ばず、作成済み reservation を明確な未発注として確認できる場合だけ release する。`dry_run: true` では reservation / sizing と payload 検証まで通常どおり行うが、dispatcher が broker client の dry-run 契約で外部送信を抑止し、`orders_v2` は作成しない。`DRY_RUN` を provider ID として dispatch log に残し、reservation は `RELEASED`、pending は同一 transaction で戻す。dry-run dispatcher の結果が UNKNOWN でもこの未送信契約を根拠に release する。
 
 ### 重複判定仕様
 - `{broker}:{symbol}:{event_id}` をドキュメント ID とし、作成時は存在しないことを前提条件にする
@@ -63,6 +63,19 @@ policy-backed webhook の `DISPATCH` は sizing-only の受付記録であり、
 - `ticker` (string, required)
 - `side` (string, required) — `BUY` | `SELL`
 - `size` (number, required)
+- `input_size` (number, optional) — webhook に指定された入力数量。`MANAGED` で省略された場合は保存しない
+- `effective_size` (number, optional) — policy-backed dispatch では atomic reservation が算出し、実際に broker へ渡した数量。`size` と同値。broker dispatch を伴わない suppression では保存しない
+- `sizing_mode` (string, optional) — `WEBHOOK_CAPPED` | `MANAGED`
+- `policy_version` (number, optional) — 数量決定に使用した policy version
+- `position_before` (number, optional) — reservation commit 前の effective position
+- `position_after` (number, optional) — reservation commit 後の effective position
+- `decision_reason` (string, optional) — sizing decision の reason
+- `dry_run` (boolean, optional) — policy-backed dry-run の dispatch log で `true`。実注文を作成していないことを示す
+- `certainty` (string, optional) — `CONFIRMED_SUCCESS` | `CONFIRMED_FAILURE` | `UNKNOWN`
+- `strategy_id` (string, optional)
+- `symbol_id` (string, optional)
+- `order_id` (string, optional) — reservation / `orders_v2` の論理注文 ID
+- `reservation_id` (string, optional)
 - `provider_order_id` (string, optional) — ブローカー側の注文 ID
 - `request_payload` (map, required)
 - `response_payload` (map, optional)
@@ -86,7 +99,7 @@ policy-backed webhook の `DISPATCH` は sizing-only の受付記録であり、
 - `ticker` (string, required)
 - `side` (string, required) — `BUY` | `SELL`
 - `order_type` (string, required) — `MARKET` | `IFDOCO` | `LIMIT` | `STOP`
-- `requested_size` (number, required)
+- `requested_size` (number, required) — broker に渡した effective size。Webhook の input size ではない。policy-backed dry-run では `orders_v2` 自体を作成しない
 - `executed_size` (number, required)
 - `executed_price` (number | null, required)
 - `execution_costs` (map, optional)
@@ -248,7 +261,7 @@ reservation が存在しない event で calculator が `DISPATCH` を返した�
 
 同じ strategy × symbol × event の reservation が既に存在する場合、identity、order ID、side（`reserved_delta` の符号）が一致すれば calculator を再実行せず `DUPLICATE_EVENT` として suppress する。`RESERVED` の再処理も broker の受付有無を判定できないため再 dispatch しない。一致しない order ID または side は `EVENT_CONFLICT` とし、既存 state と pending を変更しない。
 
-dispatch outcome の更新も reservation と position を同一 transaction で再読込する。`CONFIRMED_SUCCESS` は `RESERVED` または `MANUAL_REVIEW` の reservation を `DISPATCHED` にし、pending は保持する。`CONFIRMED_FAILURE` は `RESERVED` または、手動確認後に未発注と確定した `MANUAL_REVIEW` から `RELEASED` に遷移し、同じ commit で `pending_delta -= reserved_delta` を行う。`RELEASED` への再適用は no-op とし、`DISPATCHED` / `SETTLED` からの release は拒否する。`UNKNOWN` は `RESERVED` / `DISPATCHED` の reservation と position を `MANUAL_REVIEW` にし、`reserved_delta` と pending を変更しない。結果不明の再適用、同じ outcome の再適用は no-op とする。許可されない逆遷移、非有限な加減算、保存値の破損は fail-closed で、片方だけを書き込まない。
+dispatch outcome の更新も reservation と position を同一 transaction で再読込する。`CONFIRMED_SUCCESS` は `RESERVED` または `MANUAL_REVIEW` の reservation を `DISPATCHED` にし、pending は保持する。`CONFIRMED_FAILURE` は `RESERVED` または、手動確認後に未発注と確定した `MANUAL_REVIEW` から `RELEASED` に遷移し、同じ commit で `pending_delta -= reserved_delta` を行う。`RELEASED` への再適用は no-op とし、`DISPATCHED` / `SETTLED` からの release は拒否する。`UNKNOWN` は `RESERVED` / `DISPATCHED` の reservation と position を `MANUAL_REVIEW` にし、`reserved_delta` と pending を変更しない。結果不明の再適用、同じ outcome の再適用は no-op とする。dry-run は外部送信なしが保証されるため、dispatcher の戻り値が UNKNOWN でも `CONFIRMED_FAILURE` を適用する。許可されない逆遷移、非有限な加減算、保存値の破損は fail-closed で、片方だけを書き込まない。
 
 ## 8. `cron_metadata`
 Cloud Run 上で動作するスロットスケジューラーが、各周期タスクの実行済みスロットIDを管理するために使用する（詳細は [slot-scheduler.md](./slot-scheduler.md) を参照）。また、Saxo audit orderactivities の batch polling 状態も保持する。
@@ -351,7 +364,7 @@ Saxo の暗号化済み OAuth token と account 情報を保持する。`saxo_au
 ## 整合性ルール
 1. `webhook_events` のドキュメント ID は `{broker}:{symbol}:{event_id}` とし、同一 broker / symbol / event の重複を拒否する
 2. `order_dispatch_logs.event_id` は webhook の `event_id` と同じ値を保存する
-3. `orders_v2` は webhook dispatch 成功時のみ作成する
+3. `orders_v2` は broker が注文を受け付け、provider order ID を取得した後に `requested_size=effective_size` で作成する。保存に失敗した場合は注文が成立済みのため reservation を release せず `UNKNOWN` / `MANUAL_REVIEW` とし、provider order ID を dispatch log と構造化アプリログから復旧できるようにする。policy-backed dry-run は broker 注文ではないため `orders_v2` を作成せず、`DRY_RUN` と reservation release を dispatch log に残す
 4. `orders_v2` の約定・exit 同期は `broker_order_metadata` を前提にする。限定された Saxo 単体 MARKET は最小 metadata を自己修復し、Saxo IFDOCO は完全な broker evidence recovery に成功した場合だけ metadata を transaction 保存して通常同期へ戻す。不完全・矛盾・上限到達は PENDING の手動確認状態とする
 5. `cron_metadata/task_status` の更新は Firestore transaction で行う
 6. `saxo_auth_data/saxo_auth.refreshingUntil` の更新は Firestore transaction で行う
