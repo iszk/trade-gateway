@@ -553,6 +553,7 @@ const createReserveFn = (
                 symbol_id: input.symbolId,
                 order_id: input.orderId,
                 reserved_delta: reservedDelta,
+                executed_delta: 0,
                 status: 'RESERVED',
                 policy_version: policy.version,
                 created_at: requestedAt,
@@ -636,6 +637,7 @@ const createOutcomeFn = (
                 }
                 const updatedReservation: StrategySymbolReservation = {
                     ...reservation,
+                    executed_delta: reservation.executed_delta ?? 0,
                     status: 'DISPATCHED',
                     updated_at: safeDateAfter(requestedAt, reservation.updated_at),
                 }
@@ -670,6 +672,7 @@ const createOutcomeFn = (
                 if (pendingDelta === null) return invalidOutcomeState()
                 const updatedReservation: StrategySymbolReservation = {
                     ...reservation,
+                    executed_delta: reservation.executed_delta ?? 0,
                     status: 'RELEASED',
                     updated_at: safeDateAfter(requestedAt, reservation.updated_at),
                 }
@@ -709,6 +712,7 @@ const createOutcomeFn = (
             }
             const updatedReservation: StrategySymbolReservation = {
                 ...reservation,
+                executed_delta: reservation.executed_delta ?? 0,
                 status: 'MANUAL_REVIEW',
                 updated_at: safeDateAfter(requestedAt, reservation.updated_at),
             }

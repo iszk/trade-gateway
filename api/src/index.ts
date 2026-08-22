@@ -35,6 +35,12 @@ import type { SlotScheduler } from './services/slot-scheduler.js'
 import { executeTenMinutelyTask, executeHourlyTask } from './services/cron-tasks.js'
 import type { CronContext, ExecutionPriceFetcherLike, ClosingExecutionFetcherLike } from './services/cron-tasks.js'
 import type { ExecutionReconciliationFetcherLike } from './types/execution-sync.js'
+import {
+    createDefaultApplyStrategySymbolExecutionSyncFn,
+} from './services/strategy-symbol-execution-sync.js'
+import type {
+    ApplyStrategySymbolExecutionSyncFn,
+} from './services/strategy-symbol-execution-sync.js'
 
 import { defaultLogger, type Logger } from './logger.js'
 
@@ -258,6 +264,7 @@ type CreateAppOptions = {
     getPendingOrdersV2?: GetPendingOrdersV2Fn
     updateOrderV2?: UpdateOrderV2Fn
     updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
+    applyStrategySymbolExecutionSync?: ApplyStrategySymbolExecutionSyncFn
     getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
     listOrdersV2ByDateRange?: ListOrdersV2ByDateRangeFn
@@ -295,6 +302,8 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const getPendingOrdersV2 = options.getPendingOrdersV2 ?? createDefaultGetPendingOrdersV2Fn()
     const updateOrderV2 = options.updateOrderV2 ?? createDefaultUpdateOrderV2Fn()
     const updateOrderV2Atomically = options.updateOrderV2Atomically ?? createDefaultUpdateOrderV2AtomicallyFn()
+    const applyStrategySymbolExecutionSync = options.applyStrategySymbolExecutionSync
+        ?? createDefaultApplyStrategySymbolExecutionSyncFn(logger)
     const getOrderV2 = options.getOrderV2 ?? createDefaultGetOrderV2Fn()
     const getActiveIfdOrdersV2 = options.getActiveIfdOrdersV2 ?? createDefaultGetActiveIfdOrdersV2Fn()
     const listOrdersV2ByDateRange = options.listOrdersV2ByDateRange ?? createDefaultListOrdersV2ByDateRangeFn()
@@ -338,6 +347,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         getPendingOrdersV2,
         updateOrderV2,
         updateOrderV2Atomically,
+        applyStrategySymbolExecutionSync,
         addOrderV2,
         getOrderV2,
         getActiveIfdOrdersV2,

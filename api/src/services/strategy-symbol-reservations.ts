@@ -18,11 +18,17 @@ const RESERVATION_FIELDS = [
     'symbol_id',
     'order_id',
     'reserved_delta',
+    'executed_delta',
     'status',
     'policy_version',
     'created_at',
     'updated_at',
 ] as const
+
+// Reservations written before execution reconciliation did not carry the
+// applied cumulative execution.  Keep the legacy shape readable, but do not
+// accept arbitrary partial/extended documents.
+const LEGACY_RESERVATION_FIELDS = RESERVATION_FIELDS.filter((field) => field !== 'executed_delta')
 
 const RESERVATION_STATUSES = new Set<StrategySymbolReservationStatus>([
     'RESERVED',
@@ -36,7 +42,7 @@ const ALLOWED_RESERVATION_TRANSITIONS: Record<
     StrategySymbolReservationStatus,
     readonly StrategySymbolReservationStatus[]
 > = {
-    RESERVED: ['RESERVED', 'DISPATCHED', 'RELEASED', 'MANUAL_REVIEW'],
+    RESERVED: ['RESERVED', 'DISPATCHED', 'RELEASED', 'SETTLED', 'MANUAL_REVIEW'],
     DISPATCHED: ['DISPATCHED', 'SETTLED', 'MANUAL_REVIEW'],
     RELEASED: ['RELEASED'],
     MANUAL_REVIEW: ['MANUAL_REVIEW', 'DISPATCHED', 'RELEASED', 'SETTLED'],
@@ -88,9 +94,19 @@ const isNonEmptyString = (value: unknown): value is string => (
     typeof value === 'string' && value.trim().length > 0
 )
 
-const hasExactlyReservationFields = (value: Record<string, unknown>): boolean => {
+const hasExactlyReservationFields = (
+    value: Record<string, unknown>,
+    allowLegacy: boolean,
+): boolean => {
     const fields = new Set(RESERVATION_FIELDS)
-    return Object.keys(value).length === RESERVATION_FIELDS.length && Object.keys(value).every((key) => fields.has(key as typeof RESERVATION_FIELDS[number]))
+    const keys = Object.keys(value)
+    if (keys.length === RESERVATION_FIELDS.length && keys.every((key) => fields.has(key as typeof RESERVATION_FIELDS[number]))) {
+        return true
+    }
+    if (!allowLegacy) return false
+    const legacyFields = new Set(LEGACY_RESERVATION_FIELDS)
+    return keys.length === LEGACY_RESERVATION_FIELDS.length &&
+        keys.every((key) => legacyFields.has(key as typeof LEGACY_RESERVATION_FIELDS[number]))
 }
 
 const cloneDate = (
@@ -167,7 +183,9 @@ const normalizeReservation = (
     if (!isRecord(value)) {
         throw new ErrorType('reservation document is not an object')
     }
-    if (!hasExactlyReservationFields(value)) {
+    const hasPersistedExecutedDelta = Object.prototype.propertyIsEnumerable.call(value, 'executed_delta')
+    const allowLegacy = ErrorType === InvalidStoredStrategySymbolReservationError || !hasPersistedExecutedDelta
+    if (!hasExactlyReservationFields(value, allowLegacy)) {
         throw new ErrorType('reservation document has missing or unexpected fields')
     }
 
@@ -201,6 +219,17 @@ const normalizeReservation = (
     if (!isFiniteNumber(value.reserved_delta) || value.reserved_delta === 0) {
         throw new ErrorType('reserved_delta must be a finite non-zero number')
     }
+    const executedDelta = hasPersistedExecutedDelta ? value.executed_delta : 0
+    if (!isFiniteNumber(executedDelta)) {
+        throw new ErrorType('executed_delta is invalid')
+    }
+    if (
+        executedDelta !== 0 &&
+        (Math.sign(executedDelta) !== Math.sign(value.reserved_delta) ||
+            Math.abs(executedDelta) > Math.abs(value.reserved_delta))
+    ) {
+        throw new ErrorType('executed_delta is inconsistent with reserved_delta')
+    }
     if (!RESERVATION_STATUSES.has(value.status as StrategySymbolReservationStatus)) {
         throw new ErrorType('reservation status is invalid')
     }
@@ -214,7 +243,7 @@ const normalizeReservation = (
         throw new ErrorType('updated_at must not be before created_at')
     }
 
-    return {
+    const normalized: StrategySymbolReservation = {
         id: reservationId,
         event_id: eventId,
         position_id: positionId,
@@ -227,6 +256,24 @@ const normalizeReservation = (
         created_at: createdAt,
         updated_at: updatedAt,
     }
+
+    // Preserve source compatibility for callers that still construct a
+    // legacy reservation object, while exposing the migration default to
+    // execution reconciliation.  The non-enumerable property keeps old
+    // deep-equality contracts stable until the next normal write upgrades the
+    // persisted document to the new schema.
+    if (!hasPersistedExecutedDelta) {
+        Object.defineProperty(normalized, 'executed_delta', {
+            value: 0,
+            enumerable: false,
+            writable: true,
+            configurable: true,
+        })
+    } else {
+        normalized.executed_delta = executedDelta === 0 ? 0 : executedDelta
+    }
+
+    return normalized
 }
 
 /** Validate and serialize a domain reservation without sharing mutable Date instances. */

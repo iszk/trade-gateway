@@ -1,10 +1,13 @@
+import { isDeepStrictEqual } from 'node:util'
 import type { Firestore } from 'firebase-admin/firestore'
 import { getFirestoreClient, setFirestoreDocument, updateFirestoreDocument } from '../firestore.js'
 import { omitUndefinedFields } from '../omit-undefined-fields.js'
 import type { OrderV2, SaxoIfdocoRecoveryState } from '../types/order-v2.js'
+import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
+import type { OrderExecutionSyncResult, ExecutionSyncInfo, ExecutionTerminalStatus } from '../types/execution-sync.js'
 
 const COLLECTION_NAME = 'orders_v2'
-const FILL_EPSILON = 1e-8
+export const ORDER_EXECUTION_FILL_EPSILON = 1e-8
 
 type FirestoreDate = Date | { toDate(): Date }
 
@@ -71,7 +74,7 @@ const normalizeSaxoIfdocoRecovery = (
     }
 }
 
-const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => {
+export const deserializeOrderV2 = (data: OrderV2): OrderV2 => {
     const normalized = {
         ...data,
         created_at: fromFirestoreDate(data.created_at as FirestoreDate),
@@ -84,6 +87,9 @@ const fromFirestoreOrderV2 = (data: OrderV2): OrderV2 => {
 
     return normalized as OrderV2
 }
+
+// Kept as a local alias to make the repository methods below read naturally.
+const fromFirestoreOrderV2 = deserializeOrderV2
 
 export type OrderFillStatus = 'UNFILLED' | 'PARTIALLY_FILLED' | 'FILLED'
 
@@ -109,9 +115,152 @@ export type OrderUpdate = {
     executed_at: string | null
 }
 
+export type OrderExecutionSyncLogger = {
+    warn(obj: Record<string, unknown>, msg?: string): void
+}
+
+const areSameExecutionNumber = (
+    left: number | null | undefined,
+    right: number | null | undefined,
+): boolean => {
+    if (left === null || left === undefined || right === null || right === undefined) return left === right
+    return Math.abs(left - right) < ORDER_EXECUTION_FILL_EPSILON
+}
+
+const areSameExecutionDate = (left: Date | undefined, right: Date): boolean => (
+    left !== undefined && left.getTime() === right.getTime()
+)
+
+const mergeDefinedOrderValues = (current: unknown, incoming: unknown): unknown => {
+    if (current === undefined || current === null) return incoming
+    if (incoming === undefined || incoming === null) return current
+    if (Array.isArray(current) && Array.isArray(incoming)) {
+        const length = Math.max(current.length, incoming.length)
+        return Array.from({ length }, (_, index) => mergeDefinedOrderValues(current[index], incoming[index]))
+    }
+    if (
+        typeof current === 'object' && current !== null &&
+        typeof incoming === 'object' && incoming !== null &&
+        !Array.isArray(current) && !Array.isArray(incoming)
+    ) {
+        const currentRecord = current as Record<string, unknown>
+        const incomingRecord = incoming as Record<string, unknown>
+        const keys = new Set([...Object.keys(currentRecord), ...Object.keys(incomingRecord)])
+        return Object.fromEntries([...keys].map((key) => [
+            key,
+            mergeDefinedOrderValues(currentRecord[key], incomingRecord[key]),
+        ]))
+    }
+    return current
+}
+
+const mergeBrokerOrderMetadata = (
+    current: BrokerOrderMetadata | undefined,
+    incoming: BrokerOrderMetadata | undefined,
+): BrokerOrderMetadata | undefined => (
+    incoming === undefined
+        ? current
+        : mergeDefinedOrderValues(current, incoming) as BrokerOrderMetadata
+)
+
+const isBrokerOrderMetadataUnset = (
+    value: BrokerOrderMetadata | null | undefined,
+): value is null | undefined => value === undefined || value === null
+
+const resolveOrderExecutedAt = (
+    order: Pick<OrderV2, 'created_at' | 'executed_at'>,
+    execution: ExecutionSyncInfo,
+): Date => execution.executed_at ?? order.executed_at ?? order.created_at
+
+const resolveOrderStatus = (
+    currentStatus: OrderV2['status'],
+    execution: ExecutionSyncInfo | null,
+    terminalStatus: ExecutionTerminalStatus | undefined,
+    requestedSize: number,
+): OrderV2['status'] => {
+    const isCompleted = execution !== null && execution.size >= requestedSize - ORDER_EXECUTION_FILL_EPSILON
+    if (isCompleted) return 'EXECUTED'
+    if (currentStatus !== 'PENDING') return currentStatus
+    if (terminalStatus === 'CANCELED') return 'CANCELED'
+    if (terminalStatus === 'FAILED' && execution === null) return 'FAILED'
+    return 'PENDING'
+}
+
+/**
+ * Apply the existing monotonic orders_v2 execution lifecycle to a freshly
+ * read order.  The execution reconciliation transaction uses this same seam
+ * so an order-only legacy sync and a policy-backed position sync cannot drift.
+ */
+export const buildOrderExecutionSyncUpdates = (
+    current: OrderV2,
+    result: OrderExecutionSyncResult,
+    logger?: OrderExecutionSyncLogger,
+): Partial<OrderV2> | null => {
+    if (result.brokerOrderMetadataPolicy === 'SET_IF_UNSET') {
+        const incomingMetadata = result.brokerOrderMetadata
+        if (incomingMetadata === undefined) return null
+        if (
+            !isBrokerOrderMetadataUnset(current.broker_order_metadata) &&
+            !isDeepStrictEqual(current.broker_order_metadata, incomingMetadata)
+        ) {
+            logger?.warn(
+                {
+                    event: 'cron:orders_v2_metadata_recovery_conflict',
+                    orderId: current.id,
+                },
+                'preserving concurrently written broker metadata and execution state',
+            )
+            return null
+        }
+    }
+
+    const info = result.execution
+    const updates: Partial<OrderV2> = {}
+    const nextStatus = resolveOrderStatus(current.status, info, result.terminalStatus, current.requested_size)
+    if (current.status !== nextStatus) updates.status = nextStatus
+
+    const mergedMetadata = mergeBrokerOrderMetadata(current.broker_order_metadata, result.brokerOrderMetadata)
+    if (!isDeepStrictEqual(current.broker_order_metadata, mergedMetadata)) {
+        updates.broker_order_metadata = mergedMetadata
+    }
+
+    if (info !== null) {
+        const currentExecutedSize = current.executed_size ?? 0
+        const isLargerSnapshot = info.size > currentExecutedSize + ORDER_EXECUTION_FILL_EPSILON
+        const isSameSnapshotSize = areSameExecutionNumber(currentExecutedSize, info.size)
+        const executedAt = resolveOrderExecutedAt(current, info)
+
+        if (isLargerSnapshot) {
+            updates.executed_size = info.size
+            updates.executed_price = info.price
+            updates.executed_at = executedAt
+            if (info.commission !== undefined) {
+                updates.execution_costs = { commission: info.commission }
+            }
+        } else if (isSameSnapshotSize) {
+            if (current.executed_price == null) updates.executed_price = info.price
+            if (current.executed_at === undefined) updates.executed_at = executedAt
+            if (current.execution_costs?.commission === undefined && info.commission !== undefined) {
+                updates.execution_costs = { commission: info.commission }
+            }
+        }
+
+        if (
+            nextStatus === 'EXECUTED' &&
+            current.status !== 'EXECUTED' &&
+            current.order_type === 'IFDOCO' &&
+            current.exit_sync_status === undefined
+        ) {
+            updates.exit_sync_status = 'MONITORING'
+        }
+    }
+
+    return Object.keys(updates).length === 0 ? null : updates
+}
+
 const getOrderFillStatus = (order: OrderV2): OrderFillStatus => {
     if (order.executed_size <= 0) return 'UNFILLED'
-    if (order.executed_size >= order.requested_size - FILL_EPSILON) return 'FILLED'
+    if (order.executed_size >= order.requested_size - ORDER_EXECUTION_FILL_EPSILON) return 'FILLED'
     return 'PARTIALLY_FILLED'
 }
 

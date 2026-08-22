@@ -1905,3 +1905,41 @@ test('executeTenMinutelyTask: Saxo exit 同期は10件を超えてもスキッ�
 
     assert.equal(fetchCount, 12)
 })
+
+test('executeTenMinutelyTask: policy-backed entry は atomic execution applier を使う', async () => {
+    const order = {
+        id: 'atomic-cron-entry',
+        strategy: 'cron-strategy',
+        broker: 'bitflyer' as const,
+        ticker: 'BTC_JPY',
+        side: 'BUY' as const,
+        order_type: 'MARKET' as const,
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING' as const,
+        provider_order_ids: ['provider-atomic-cron'],
+        created_at: new Date('2026-01-01T00:00:00.000Z'),
+        updated_at: new Date('2026-01-01T00:00:00.000Z'),
+    }
+    const { logger } = makeLogger()
+    const calls: Array<{ orderId: string, result: unknown }> = []
+    await executeTenMinutelyTask(makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => [order],
+        updateOrderV2: async () => {},
+        executionPriceFetchers: {
+            bitflyer: {
+                getExecutionPriceForOrderV2: async () => ({
+                    execution: { size: 1, price: 100 },
+                }),
+            },
+        },
+        applyStrategySymbolExecutionSync: async (currentOrder, result) => {
+            calls.push({ orderId: currentOrder.id, result })
+            return { orderUpdated: true, reservation: 'UPDATED' as const }
+        },
+    }))
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0]?.orderId, order.id)
+})

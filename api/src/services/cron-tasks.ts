@@ -1,5 +1,8 @@
 import { isDeepStrictEqual } from 'node:util'
 
+import {
+    buildOrderExecutionSyncUpdates,
+} from './orders-v2.js'
 import type { GetPendingOrdersV2Fn, UpdateOrderV2Fn, UpdateOrderV2AtomicallyFn, AddOrderV2Fn, GetOrderV2Fn, GetActiveIfdOrdersV2Fn } from './orders-v2.js'
 import type { OrderV2, SaxoIfdocoRecoveryState } from '../types/order-v2.js'
 import type { BrokerOrderMetadata } from '../types/broker-order-metadata.js'
@@ -8,11 +11,14 @@ import type {
     ExecutionReconciliationFetcherLike,
     ExecutionReconciliationRange,
     ExecutionSyncInfo,
-    ExecutionTerminalStatus,
     OrderExecutionSyncResult,
 } from '../types/execution-sync.js'
 import { classifySaxoOrderMetadata } from '../brokers/saxo-order-metadata.js'
 import type { SaxoIfdocoMetadataRecoveryResult } from '../brokers/saxo-ifdoco-metadata-recovery.js'
+import type {
+    ApplyStrategySymbolExecutionSyncFn,
+    ApplyStrategySymbolExecutionSyncOutcome,
+} from './strategy-symbol-execution-sync.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -47,6 +53,8 @@ export type CronContext = {
     getPendingOrdersV2?: GetPendingOrdersV2Fn
     updateOrderV2?: UpdateOrderV2Fn
     updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
+    /** policy-backed entry executionをorders_v2/position/reservationへatomic適用 */
+    applyStrategySymbolExecutionSync?: ApplyStrategySymbolExecutionSyncFn
     addOrderV2?: AddOrderV2Fn
     getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
@@ -198,6 +206,7 @@ const recoverSaxoIfdocoMetadata = async (ctx: {
     pendingOrders: OrderV2[]
     fetcher?: ExecutionPriceFetcherLike
     updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
+    applyStrategySymbolExecutionSync?: ApplyStrategySymbolExecutionSyncFn
     now: Date
 }): Promise<{ readyOrders: OrderV2[], synchronizedOrderIds: Set<string> }> => {
     const summary: SaxoIfdocoRecoverySummary = {
@@ -406,7 +415,13 @@ const recoverSaxoIfdocoMetadata = async (ctx: {
                         brokerOrderMetadata: result.metadata,
                         brokerOrderMetadataPolicy: 'SET_IF_UNSET',
                     }
-                const executionUpdates = buildOrderExecutionSyncUpdates(current, guardedResult, ctx.logger) ?? {}
+                // When the atomic strategy-symbol applier is available, leave
+                // execution fields for its transaction.  The recovery state
+                // and metadata may be saved here, then orders_v2 + position +
+                // reservation are reconciled together by the applier below.
+                const executionUpdates = ctx.applyStrategySymbolExecutionSync
+                    ? {}
+                    : buildOrderExecutionSyncUpdates(current, guardedResult, ctx.logger) ?? {}
                 const updates: Partial<OrderV2> = {
                     ...executionUpdates,
                     broker_order_metadata: result.metadata,
@@ -425,9 +440,33 @@ const recoverSaxoIfdocoMetadata = async (ctx: {
 
         const reason = result.kind === 'SUCCESS' ? 'SUCCESS' : result.reason
         if (updated && result.kind === 'SUCCESS' && savedRecoveredMetadata) {
-            summary.recovered += 1
-            incrementReason(summary, 'SUCCESS')
-            synchronizedOrderIds.add(order.id)
+            let executionApplied = true
+            if (ctx.applyStrategySymbolExecutionSync && latestReadyOrder && recoveredExecutionResult) {
+                try {
+                    await ctx.applyStrategySymbolExecutionSync(latestReadyOrder, {
+                        ...recoveredExecutionResult,
+                        brokerOrderMetadata: result.metadata,
+                        brokerOrderMetadataPolicy: 'SET_IF_UNSET',
+                    })
+                } catch (error) {
+                    executionApplied = false
+                    ctx.logger.warn(
+                        {
+                            event: 'cron:saxo_ifdoco_execution_sync_failed',
+                            orderId: order.id,
+                            error,
+                        },
+                        'failed to apply recovered Saxo IFDOCO execution atomically',
+                    )
+                }
+            }
+            if (executionApplied) {
+                summary.recovered += 1
+                incrementReason(summary, 'SUCCESS')
+                synchronizedOrderIds.add(order.id)
+            } else {
+                summary.skippedConcurrentUpdates += 1
+            }
         } else if (updated && transitionedToManualReview) {
             summary.manualReviewTransitions += 1
             incrementReason(
@@ -466,118 +505,9 @@ const recoverSaxoIfdocoMetadata = async (ctx: {
     return { readyOrders, synchronizedOrderIds }
 }
 
-const resolveOrderStatus = (
-    currentStatus: OrderV2['status'],
-    execution: ExecutionSyncInfo | null,
-    terminalStatus: ExecutionTerminalStatus | undefined,
-    requestedSize: number,
-): OrderV2['status'] => {
-    const isCompleted = execution !== null && execution.size >= requestedSize - EPSILON
-    if (isCompleted) return 'EXECUTED'
-    if (currentStatus !== 'PENDING') return currentStatus
-    if (terminalStatus === 'CANCELED') return 'CANCELED'
-    if (terminalStatus === 'FAILED' && execution === null) return 'FAILED'
-    return 'PENDING'
-}
-
-const mergeDefinedValues = (current: unknown, incoming: unknown): unknown => {
-    if (current === undefined || current === null) return incoming
-    if (incoming === undefined || incoming === null) return current
-    if (Array.isArray(current) && Array.isArray(incoming)) {
-        const length = Math.max(current.length, incoming.length)
-        return Array.from({ length }, (_, index) => mergeDefinedValues(current[index], incoming[index]))
-    }
-    if (typeof current === 'object' && typeof incoming === 'object' && !Array.isArray(current) && !Array.isArray(incoming)) {
-        const currentRecord = current as Record<string, unknown>
-        const incomingRecord = incoming as Record<string, unknown>
-        const keys = new Set([...Object.keys(currentRecord), ...Object.keys(incomingRecord)])
-        return Object.fromEntries([...keys].map((key) => [
-            key,
-            mergeDefinedValues(currentRecord[key], incomingRecord[key]),
-        ]))
-    }
-    return current
-}
-
-const mergeBrokerOrderMetadata = (
-    current: BrokerOrderMetadata | undefined,
-    incoming: BrokerOrderMetadata | undefined,
-): BrokerOrderMetadata | undefined => (
-    incoming === undefined
-        ? current
-        : mergeDefinedValues(current, incoming) as BrokerOrderMetadata
-)
-
 export type OrderExecutionSyncApplyOutcome = {
     updated: boolean
     noOpReason?: 'OVERFILL' | 'UNCHANGED' | 'STALE' | 'METADATA_CONFLICT'
-}
-
-const buildOrderExecutionSyncUpdates = (
-    current: OrderV2,
-    result: OrderExecutionSyncResult,
-    logger?: Logger,
-): Partial<OrderV2> | null => {
-    if (result.brokerOrderMetadataPolicy === 'SET_IF_UNSET') {
-        const incomingMetadata = result.brokerOrderMetadata
-        if (incomingMetadata === undefined) return null
-        if (
-            !isBrokerOrderMetadataUnset(current.broker_order_metadata) &&
-            !areSameBrokerOrderMetadata(current.broker_order_metadata, incomingMetadata)
-        ) {
-            logger?.warn(
-                {
-                    event: 'cron:orders_v2_metadata_recovery_conflict',
-                    orderId: current.id,
-                },
-                'preserving concurrently written broker metadata and execution state',
-            )
-            return null
-        }
-    }
-
-    const info = result.execution
-    const updates: Partial<OrderV2> = {}
-    const nextStatus = resolveOrderStatus(current.status, info, result.terminalStatus, current.requested_size)
-    if (current.status !== nextStatus) updates.status = nextStatus
-
-    const mergedMetadata = mergeBrokerOrderMetadata(current.broker_order_metadata, result.brokerOrderMetadata)
-    if (!areSameBrokerOrderMetadata(current.broker_order_metadata, mergedMetadata)) {
-        updates.broker_order_metadata = mergedMetadata
-    }
-
-    if (info !== null) {
-        const currentExecutedSize = current.executed_size ?? 0
-        const isLargerSnapshot = info.size > currentExecutedSize + EPSILON
-        const isSameSnapshotSize = areSameNumber(currentExecutedSize, info.size)
-        const executedAt = resolveExecutedAt(current, info)
-
-        if (isLargerSnapshot) {
-            updates.executed_size = info.size
-            updates.executed_price = info.price
-            updates.executed_at = executedAt
-            if (info.commission !== undefined) {
-                updates.execution_costs = { commission: info.commission }
-            }
-        } else if (isSameSnapshotSize) {
-            if (current.executed_price == null) updates.executed_price = info.price
-            if (current.executed_at === undefined) updates.executed_at = executedAt
-            if (current.execution_costs?.commission === undefined && info.commission !== undefined) {
-                updates.execution_costs = { commission: info.commission }
-            }
-        }
-
-        if (
-            nextStatus === 'EXECUTED' &&
-            current.status !== 'EXECUTED' &&
-            current.order_type === 'IFDOCO' &&
-            current.exit_sync_status === undefined
-        ) {
-            updates.exit_sync_status = 'MONITORING'
-        }
-    }
-
-    return Object.keys(updates).length === 0 ? null : updates
 }
 
 /** execution snapshot と broker の終端判定を最新注文へ冪等に適用する。 */
@@ -588,7 +518,10 @@ export const applyOrderExecutionSyncResult = async (
     logger?: Logger,
 ): Promise<OrderExecutionSyncApplyOutcome> => {
     const info = result.execution
-    if (info !== null && info.size > order.requested_size + EPSILON) {
+    if (
+        info !== null &&
+        info.size > order.requested_size + EPSILON
+    ) {
         return { updated: false, noOpReason: 'OVERFILL' }
     }
 
@@ -656,13 +589,18 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
     ctx.logger.info({ event: 'cron:positions_fetched', broker, count: positions.length }, 'cron fetched positions')
 
     // Phase 3: orders_v2 のステータス同期
-    if (ctx.getPendingOrdersV2 && ctx.updateOrderV2 && ctx.executionPriceFetchers) {
+    if (
+        ctx.getPendingOrdersV2 &&
+        (ctx.updateOrderV2 || ctx.applyStrategySymbolExecutionSync) &&
+        ctx.executionPriceFetchers
+    ) {
         await fetchAndUpdatePendingOrdersV2({
             logger: ctx.logger,
             executionPriceFetchers: ctx.executionPriceFetchers,
             getPendingOrdersV2: ctx.getPendingOrdersV2,
-            updateOrderV2: ctx.updateOrderV2,
+            updateOrderV2: ctx.updateOrderV2!,
             updateOrderV2Atomically: ctx.updateOrderV2Atomically,
+            applyStrategySymbolExecutionSync: ctx.applyStrategySymbolExecutionSync,
             nowMs,
         })
     }
@@ -683,7 +621,11 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
 export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
     ctx.logger.info({ event: 'cron:hourly_task' }, 'hourly task executed')
 
-    if (!ctx.getPendingOrdersV2 || !ctx.updateOrderV2 || !ctx.executionReconciliationFetchers) return
+    if (
+        !ctx.getPendingOrdersV2 ||
+        (!ctx.updateOrderV2 && !ctx.applyStrategySymbolExecutionSync) ||
+        !ctx.executionReconciliationFetchers
+    ) return
 
     const pendingOrders = await ctx.getPendingOrdersV2()
     const saxoOrders = pendingOrders.filter((order) => (
@@ -706,12 +648,16 @@ export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
         for (const order of saxoOrders) {
             const result = results.get(order.id)
             if (result) {
-                await applyOrderExecutionSyncResult(
-                    order,
-                    result,
-                    ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2),
-                    ctx.logger,
-                )
+                if (ctx.applyStrategySymbolExecutionSync) {
+                    await ctx.applyStrategySymbolExecutionSync(order, result)
+                } else {
+                    await applyOrderExecutionSyncResult(
+                        order,
+                        result,
+                        ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2!),
+                        ctx.logger,
+                    )
+                }
             }
         }
     } catch (error) {
@@ -727,6 +673,7 @@ const applyPendingOrderSyncResult = async (
         logger: Logger
         updateOrderV2: UpdateOrderV2Fn
         updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
+        applyStrategySymbolExecutionSync?: ApplyStrategySymbolExecutionSyncFn
     },
     order: OrderV2,
     syncResult: OrderExecutionSyncResult,
@@ -734,7 +681,11 @@ const applyPendingOrderSyncResult = async (
 ): Promise<void> => {
     const providerOrderId = order.provider_order_ids[0]
     const info = syncResult.execution
-    if (info !== null && info.size > order.requested_size + EPSILON) {
+    if (
+        info !== null &&
+        info.size > order.requested_size + EPSILON &&
+        !ctx.applyStrategySymbolExecutionSync
+    ) {
         ctx.logger.warn(
             {
                 event: 'cron:orders_v2_sync_invalid_size',
@@ -747,12 +698,18 @@ const applyPendingOrderSyncResult = async (
         return
     }
 
-    const applyOutcome = await applyOrderExecutionSyncResult(
-        order,
-        syncResult,
-        ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2),
-        ctx.logger,
-    )
+    const applyOutcome: OrderExecutionSyncApplyOutcome | ApplyStrategySymbolExecutionSyncOutcome =
+        ctx.applyStrategySymbolExecutionSync
+            ? await ctx.applyStrategySymbolExecutionSync(order, syncResult)
+            : await applyOrderExecutionSyncResult(
+                order,
+                syncResult,
+                ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2),
+                ctx.logger,
+            )
+
+    const updated = 'updated' in applyOutcome ? applyOutcome.updated : applyOutcome.orderUpdated
+    const noOpReason = applyOutcome.noOpReason
 
     if (syncResult.brokerOrderMetadataPolicy === 'SET_IF_UNSET' && info === null && syncResult.terminalStatus === undefined) {
         ctx.logger.info(
@@ -761,8 +718,8 @@ const applyPendingOrderSyncResult = async (
                 broker: order.broker,
                 orderId: order.id,
                 metadataOnly: true,
-                updated: applyOutcome.updated,
-                noOpReason: applyOutcome.noOpReason,
+                updated,
+                noOpReason,
             },
             'orders_v2 Saxo legacy metadata recovery attempted without confirmed execution',
         )
@@ -777,8 +734,8 @@ const applyPendingOrderSyncResult = async (
                 orderId: order.id,
                 price: info.price,
                 size: info.size,
-                updated: applyOutcome.updated,
-                noOpReason: applyOutcome.noOpReason,
+                updated,
+                noOpReason,
             },
             isCompleted
                 ? 'orders_v2 execution synchronized as EXECUTED'
@@ -792,8 +749,8 @@ const applyPendingOrderSyncResult = async (
                 orderId: order.id,
                 status: syncResult.terminalStatus,
                 reason: syncResult.terminalReason,
-                updated: applyOutcome.updated,
-                noOpReason: applyOutcome.noOpReason,
+                updated,
+                noOpReason,
             },
             `orders_v2 terminal status synchronized as ${syncResult.terminalStatus}`,
         )
@@ -817,6 +774,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
     getPendingOrdersV2: GetPendingOrdersV2Fn
     updateOrderV2: UpdateOrderV2Fn
     updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
+    applyStrategySymbolExecutionSync?: ApplyStrategySymbolExecutionSyncFn
     nowMs: number
 }): Promise<void> => {
     const pendingOrders = await ctx.getPendingOrdersV2()
@@ -830,6 +788,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
         pendingOrders,
         fetcher: ctx.executionPriceFetchers.saxo,
         updateOrderV2Atomically: ctx.updateOrderV2Atomically,
+        applyStrategySymbolExecutionSync: ctx.applyStrategySymbolExecutionSync,
         now: new Date(ctx.nowMs),
     })
     const syncableOrders = pendingOrders.filter((order) => (

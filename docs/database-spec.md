@@ -244,12 +244,13 @@ event 単位の注文 reservation。position document 内の配列や subcollect
 - `symbol_id` (string, required)
 - `order_id` (string, required) — `orders_v2` の決定済み論理 ID。注文 document 作成前でも保存する
 - `reserved_delta` (number, required) — 予約時の符号付き数量。有限かつ非 0。side や policy 設定値は重複保存しない
+- `executed_delta` (number, required) — 約定結果を position へ適用済みの累積数量。`reserved_delta` と同じ符号で、絶対値は予約量以下。旧 document で欠落している場合は読み取り時だけ `0` とし、次回の正常更新で保存する
 - `status` (string, required) — `RESERVED` | `DISPATCHED` | `RELEASED` | `MANUAL_REVIEW` | `SETTLED`
 - `policy_version` (number, required) — 予約数量決定時に参照した正の safe integer
 - `created_at` (timestamp, required)
 - `updated_at` (timestamp, required) — `created_at` 以降
 
-状態遷移は自己遷移を冪等として許可する。`RESERVED` からは `DISPATCHED`、`RELEASED`、`MANUAL_REVIEW`、`DISPATCHED` からは `SETTLED`、`MANUAL_REVIEW` からは `DISPATCHED`、`RELEASED`、`SETTLED` へ遷移できる。`RELEASED` と `SETTLED` は終端状態である。timeout や結果不明を `RELEASED` へ自動遷移させず、`MANUAL_REVIEW` として reservation および position の pending を保持する。
+状態遷移は自己遷移を冪等として許可する。`RESERVED` からは `DISPATCHED`、`RELEASED`、`SETTLED`、`MANUAL_REVIEW`、`DISPATCHED` からは `SETTLED`、`MANUAL_REVIEW` からは `DISPATCHED`、`RELEASED`、`SETTLED` へ遷移できる。`RELEASED` と `SETTLED` は終端状態である。timeout や結果不明を `RELEASED` へ自動遷移させず、`MANUAL_REVIEW` として reservation および position の pending を保持する。
 
 両 collection の repository は、検証済み document の全置換保存と document ID lookup による単一取得だけを提供する。position と reservation の同時更新、create-if-absent、compare-and-set、pending の加減算は `strategy-symbol-reservation-service` の atomic transaction の責務である。現時点では backfill、TTL、追加の複合 index は行わない。
 
@@ -262,6 +263,14 @@ reservation が存在しない event で calculator が `DISPATCH` を返した�
 同じ strategy × symbol × event の reservation が既に存在する場合、identity、order ID、side（`reserved_delta` の符号）が一致すれば calculator を再実行せず `DUPLICATE_EVENT` として suppress する。`RESERVED` の再処理も broker の受付有無を判定できないため再 dispatch しない。一致しない order ID または side は `EVENT_CONFLICT` とし、既存 state と pending を変更しない。
 
 dispatch outcome の更新も reservation と position を同一 transaction で再読込する。`CONFIRMED_SUCCESS` は `RESERVED` または `MANUAL_REVIEW` の reservation を `DISPATCHED` にし、pending は保持する。`CONFIRMED_FAILURE` は `RESERVED` または、手動確認後に未発注と確定した `MANUAL_REVIEW` から `RELEASED` に遷移し、同じ commit で `pending_delta -= reserved_delta` を行う。`RELEASED` への再適用は no-op とし、`DISPATCHED` / `SETTLED` からの release は拒否する。`UNKNOWN` は `RESERVED` / `DISPATCHED` の reservation と position を `MANUAL_REVIEW` にし、`reserved_delta` と pending を変更しない。結果不明の再適用、同じ outcome の再適用は no-op とする。dry-run は外部送信なしが保証されるため、dispatcher の戻り値が UNKNOWN でも `CONFIRMED_FAILURE` を適用する。許可されない逆遷移、非有限な加減算、保存値の破損は fail-closed で、片方だけを書き込まない。
+
+### entry execution の反映
+
+`orders_v2.id`、reservation の `event_id` / `order_id` が同じ event ID であることを関連付けの正とする。10分同期、Saxo の hourly reconciliation、IFDOCO metadata recovery 後の execution は `strategy-symbol-execution-sync` の同一 transaction を通り、transaction 内で再読込した最新の `orders_v2`、reservation、position をまとめて更新する。reservation がない legacy/fallback 注文は従来どおり `orders_v2` だけを更新する。
+
+約定量は snapshot の累積 `executed_size` を reservation の符号へ変換し、`executed_delta` との差分だけを適用する。差分 `d` に対して `confirmed_position += d`、`pending_delta -= d` とし、partial fill は `DISPATCHED` のまま未約定分を保持する。full fill は `SETTLED` とし、cancel/expire/failed は適用済み約定を確定したうえで `reserved_delta - executed_delta` を pending から解放して `SETTLED` とする。重複・stale snapshot は最大適用済み累積量から再計算し、cron の再実行や transaction retry で二重加算しない。
+
+requested size/予約量超過、identity/side/数量の矛盾、同一数量で価格等が矛盾する snapshot、終端 reservation 後の新規約定は数量を変更せず、可能な document を `MANUAL_REVIEW` として手動確認へ送る。非有限値・符号不一致・overflow・破損 document は fail-closed とする。broker aggregate mismatch とその復旧は後続タスクの対象であり、ここでは扱わない。
 
 ## 8. `cron_metadata`
 Cloud Run 上で動作するスロットスケジューラーが、各周期タスクの実行済みスロットIDを管理するために使用する（詳細は [slot-scheduler.md](./slot-scheduler.md) を参照）。また、Saxo audit orderactivities の batch polling 状態も保持する。

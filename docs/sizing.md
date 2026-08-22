@@ -99,6 +99,19 @@ type SizingDecision =
 - 既存 reservation の event は calculator を再実行せず `SUPPRESS / DUPLICATE_EVENT` とする。order ID または side と符号が一致しない場合は `EVENT_CONFLICT` として永続状態を変更しない。
 - dispatch 成功は reservation を `DISPATCHED` にし pending を保持する。明確な失敗だけが `RELEASED` へ遷移し、同じ transaction で `pending_delta -= reserved_delta` を行う。結果不明は reservation と position を `MANUAL_REVIEW` にして pending を保持する。
 
+## 約定結果と仮想 position の同期
+
+entry の約定同期は `orders_v2.id = reservation.event_id = reservation.order_id` を関連付けのキーとして、最新 `orders_v2`、reservation、position を同一 Firestore transaction で再読込する。policy 未登録など reservation のない注文は従来の `orders_v2` lifecycle だけを適用する。reservation には position へ適用済みの符号付き累積量 `executed_delta` を持たせ、旧 document の欠落値は読み取り時だけ `0` として扱い、正常な更新で schema を upgrade する。
+
+累積約定を reservation の符号へ変換した値を `e`、前回の `executed_delta` を `e₀`、今回の増分を `d = e - e₀` とする。stale snapshot では `e` を `e₀` より小さくせず、`d` は 0 とする。`d` が有効なら次を同じ commit で適用する。
+
+- partial fill: `confirmed_position += d`、`pending_delta -= d`、reservation は `DISPATCHED`
+- full fill: 上記に加えて未約定分が 0 になり reservation を `SETTLED`
+- cancel/expire: 約定済み `d` を移した後、`reserved_delta - executed_delta` だけ pending から解放して `SETTLED`
+- fill なしの confirmed `FAILED`: 全 `reserved_delta` を pending から解放して `SETTLED`
+
+同一 snapshot の再適用、10分同期と hourly reconciliation の重複、transaction retry は `executed_delta` との差分計算で no-op になる。requested/reserved size 超過、identity・side・数量の矛盾、同一数量で価格・時刻・commission・metadata が矛盾する snapshot、終端 reservation 後の新規約定は数量を推測修復せず、pending を保持して `MANUAL_REVIEW` とする。非有限値、符号不一致、overflow、破損した保存値も fail-closed とし、orders_v2・reservation・position の一部だけを成功させない。broker aggregate mismatch と backfill は後続タスクで扱う。
+
 policy、symbol の制約、position が存在しない、または保存済み document が壊れている場合は 0 や既定値へ補完せず fail-closed とする。
 
 ## 浮動小数点と fail-closed
