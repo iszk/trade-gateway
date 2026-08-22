@@ -1927,7 +1927,6 @@ test('executeTenMinutelyTask: policy-backed entry ã¯ atomic execution applier ã
     await executeTenMinutelyTask(makeBaseCtx({
         logger,
         getPendingOrdersV2: async () => [order],
-        updateOrderV2: async () => {},
         executionPriceFetchers: {
             bitflyer: {
                 getExecutionPriceForOrderV2: async () => ({

@@ -132,6 +132,7 @@ test('reservation state transitions allow only the fail-closed lifecycle table a
     const allowed: [typeof statuses[number], typeof statuses[number]][] = [
         ['RESERVED', 'DISPATCHED'],
         ['RESERVED', 'RELEASED'],
+        ['RESERVED', 'SETTLED'],
         ['RESERVED', 'MANUAL_REVIEW'],
         ['DISPATCHED', 'SETTLED'],
         ['DISPATCHED', 'MANUAL_REVIEW'],

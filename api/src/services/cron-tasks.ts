@@ -598,7 +598,7 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             logger: ctx.logger,
             executionPriceFetchers: ctx.executionPriceFetchers,
             getPendingOrdersV2: ctx.getPendingOrdersV2,
-            updateOrderV2: ctx.updateOrderV2!,
+            updateOrderV2: ctx.updateOrderV2,
             updateOrderV2Atomically: ctx.updateOrderV2Atomically,
             applyStrategySymbolExecutionSync: ctx.applyStrategySymbolExecutionSync,
             nowMs,
@@ -650,11 +650,11 @@ export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
             if (result) {
                 if (ctx.applyStrategySymbolExecutionSync) {
                     await ctx.applyStrategySymbolExecutionSync(order, result)
-                } else {
+                } else if (ctx.updateOrderV2) {
                     await applyOrderExecutionSyncResult(
                         order,
                         result,
-                        ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2!),
+                        ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2),
                         ctx.logger,
                     )
                 }
@@ -671,7 +671,7 @@ export const executeHourlyTask = async (ctx: CronContext): Promise<void> => {
 const applyPendingOrderSyncResult = async (
     ctx: {
         logger: Logger
-        updateOrderV2: UpdateOrderV2Fn
+        updateOrderV2?: UpdateOrderV2Fn
         updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
         applyStrategySymbolExecutionSync?: ApplyStrategySymbolExecutionSyncFn
     },
@@ -698,15 +698,18 @@ const applyPendingOrderSyncResult = async (
         return
     }
 
-    const applyOutcome: OrderExecutionSyncApplyOutcome | ApplyStrategySymbolExecutionSyncOutcome =
-        ctx.applyStrategySymbolExecutionSync
-            ? await ctx.applyStrategySymbolExecutionSync(order, syncResult)
-            : await applyOrderExecutionSyncResult(
-                order,
-                syncResult,
-                ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2),
-                ctx.logger,
-            )
+    let applyOutcome: OrderExecutionSyncApplyOutcome | ApplyStrategySymbolExecutionSyncOutcome
+    if (ctx.applyStrategySymbolExecutionSync) {
+        applyOutcome = await ctx.applyStrategySymbolExecutionSync(order, syncResult)
+    } else {
+        if (!ctx.updateOrderV2) return
+        applyOutcome = await applyOrderExecutionSyncResult(
+            order,
+            syncResult,
+            ctx.updateOrderV2Atomically ?? createLegacyAtomicUpdater(order, ctx.updateOrderV2),
+            ctx.logger,
+        )
+    }
 
     const updated = 'updated' in applyOutcome ? applyOutcome.updated : applyOutcome.orderUpdated
     const noOpReason = applyOutcome.noOpReason
@@ -772,7 +775,7 @@ const fetchAndUpdatePendingOrdersV2 = async (ctx: {
     logger: Logger
     executionPriceFetchers: Partial<Record<string, ExecutionPriceFetcherLike>>
     getPendingOrdersV2: GetPendingOrdersV2Fn
-    updateOrderV2: UpdateOrderV2Fn
+    updateOrderV2?: UpdateOrderV2Fn
     updateOrderV2Atomically?: UpdateOrderV2AtomicallyFn
     applyStrategySymbolExecutionSync?: ApplyStrategySymbolExecutionSyncFn
     nowMs: number
