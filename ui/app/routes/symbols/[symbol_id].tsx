@@ -1,7 +1,12 @@
 import { createRoute } from 'honox/factory'
 import type { TradableSymbol } from '@trade-gateway/api'
 import { fetchApiJson, sendApiJson } from '../../lib/api'
-import { buildApiSymbolPath, buildSymbolDetailPath } from '../../lib/symbols'
+import {
+  buildApiSymbolPath,
+  buildSymbolDetailPath,
+  buildSymbolOrderConstraintsPayload,
+  parseOrderConstraintsForm,
+} from '../../lib/symbols'
 
 type SymbolResponse = {
   symbol: TradableSymbol
@@ -43,6 +48,14 @@ export const POST = createRoute(async (c) => {
         currency: textValue(body.currency) || 'JPY',
         note: textValue(body.note) || undefined,
       })
+    } else if (action === 'save_constraints') {
+      const orderConstraints = parseOrderConstraintsForm(body)
+      const latest = await fetchApiJson<SymbolResponse>(buildApiSymbolPath(symbolId))
+      await sendApiJson(
+        buildApiSymbolPath(symbolId),
+        'PUT',
+        buildSymbolOrderConstraintsPayload(latest.symbol, orderConstraints),
+      )
     } else if (action === 'pause' || action === 'resume') {
       await sendApiJson(`${buildApiSymbolPath(symbolId)}/trade-control`, 'PATCH', {
         status: action === 'pause' ? 'paused' : 'active',
@@ -151,6 +164,55 @@ export default createRoute(async (c) => {
               <div class="mt-4 flex justify-end">
                 <button type="submit" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-6 rounded shadow text-sm">
                   Save
+                </button>
+              </div>
+            </form>
+          </section>
+
+          <section class="bg-white shadow rounded-lg p-4">
+            <h2 class="text-xl font-semibold mb-2">Order Constraints</h2>
+            <p class="text-sm text-gray-500 mb-4">
+              Configure the broker-specific quantity increment and order size limits. These values are not inferred automatically.
+            </p>
+            <form method="post" action={buildSymbolDetailPath(data.symbol.id)}>
+              <input type="hidden" name="action" value="save_constraints" />
+              <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <div>
+                  <label class="block text-xs font-semibold text-gray-600 mb-1">Quantity Step (smallest increment)</label>
+                  <input
+                    name="quantity_step"
+                    type="number"
+                    step="any"
+                    required
+                    value={data.symbol.order_constraints?.quantity_step === undefined ? '' : String(data.symbol.order_constraints.quantity_step)}
+                    class="border border-gray-300 rounded px-3 py-1.5 w-full text-sm"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-gray-600 mb-1">Minimum Order Size</label>
+                  <input
+                    name="min_order_size"
+                    type="number"
+                    step="any"
+                    required
+                    value={data.symbol.order_constraints?.min_order_size === undefined ? '' : String(data.symbol.order_constraints.min_order_size)}
+                    class="border border-gray-300 rounded px-3 py-1.5 w-full text-sm"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-gray-600 mb-1">Maximum Order Size (optional)</label>
+                  <input
+                    name="max_order_size"
+                    type="number"
+                    step="any"
+                    value={data.symbol.order_constraints?.max_order_size === undefined ? '' : String(data.symbol.order_constraints.max_order_size)}
+                    class="border border-gray-300 rounded px-3 py-1.5 w-full text-sm"
+                  />
+                </div>
+              </div>
+              <div class="mt-4 flex justify-end">
+                <button type="submit" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-6 rounded shadow text-sm">
+                  Save Order Constraints
                 </button>
               </div>
             </form>

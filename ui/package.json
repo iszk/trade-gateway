@@ -9,7 +9,7 @@
     "build:client": "vite build --mode client",
     "build:server": "vite build --ssr app/server.ts --outDir dist/server",
     "start": "node dist/server/server.js",
-    "test": "node --import tsx --test app/**/*.test.ts",
+    "test": "node --import tsx --test app/**/*.test.ts app/**/*.test.tsx",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
