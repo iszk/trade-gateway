@@ -84,10 +84,29 @@ test('reservation serialization round-trips and defensively copies dates', () =>
     assert.notEqual(serialized.updated_at, original.updated_at)
 
     const restored = deserializeStrategySymbolReservation(serialized, reservationId)
-    assert.deepEqual(restored, original)
+    const { executed_delta: _executedDelta, ...restoredWithoutExecution } = restored
+    assert.deepEqual(restoredWithoutExecution, original)
     assert.notEqual(restored.created_at, serialized.created_at)
     ;(serialized.created_at as Date).setUTCFullYear(2030)
     assert.equal(original.created_at.getUTCFullYear(), 2026)
+})
+
+test('legacy reservation serialization enumerates executed_delta for schema upgrade', async () => {
+    const legacy = deserializeStrategySymbolReservation(makeReservation(), reservationId)
+    assert.equal(legacy.executed_delta, 0)
+    assert.equal(Object.prototype.propertyIsEnumerable.call(legacy, 'executed_delta'), false)
+
+    const serialized = serializeStrategySymbolReservation(legacy)
+    assert.equal(serialized.executed_delta, 0)
+    assert.equal(Object.prototype.propertyIsEnumerable.call(serialized, 'executed_delta'), true)
+    assert.ok(Object.keys(serialized).includes('executed_delta'))
+
+    const db = makeFirestoreMock()
+    await createSetStrategySymbolReservationFn(db)(legacy)
+    const stored = db.collections.strategy_symbol_reservations?.[reservationId]
+    assert.equal(stored?.executed_delta, 0)
+    assert.equal(Object.prototype.propertyIsEnumerable.call(stored, 'executed_delta'), true)
+    assert.ok(Object.keys(stored ?? {}).includes('executed_delta'))
 })
 
 test('reservation deserialization accepts Timestamp-like values but rejects malformed documents', () => {
@@ -166,7 +185,7 @@ test('reservation SET/GET remains independent from position documents', async ()
 
     await set(reservation)
     const restored = await get(strategyId, symbolId, eventId)
-    assert.deepEqual(restored, reservation)
+    assert.deepEqual(restored, { ...reservation, executed_delta: 0 })
     assert.ok(db.collections.strategy_symbol_reservations?.[reservation.id])
     assert.equal(db.collections.strategy_symbol_reservations?.[reservation.id]?.reservations, undefined)
     assert.equal(db.collections.strategy_symbol_positions, undefined)

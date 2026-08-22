@@ -279,7 +279,16 @@ const normalizeReservation = (
 /** Validate and serialize a domain reservation without sharing mutable Date instances. */
 export const serializeStrategySymbolReservation = (
     reservation: StrategySymbolReservation,
-): ReservationFirestoreData => normalizeReservation(reservation, InvalidStrategySymbolReservationError)
+): ReservationFirestoreData => {
+    const normalized = normalizeReservation(reservation, InvalidStrategySymbolReservationError)
+    // Legacy domain objects expose executed_delta as a non-enumerable
+    // compatibility property.  Firestore writes must still materialize the
+    // migration default so the next normal write upgrades the document.
+    return {
+        ...normalized,
+        executed_delta: normalized.executed_delta ?? 0,
+    }
+}
 
 /** Validate and normalize a Firestore reservation document into the domain model. */
 export const deserializeStrategySymbolReservation = (
