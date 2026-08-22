@@ -81,10 +81,10 @@ test('reservation repository stores independent event/strategy/symbol documents 
     const get = createGetStrategySymbolReservationFn(db)
     for (const reservation of reservations) await set(reservation)
 
-    assert.deepEqual(await get(strategyId, symbolId, eventId), reservations[0])
-    assert.deepEqual(await get(secondStrategyId, symbolId, eventId), reservations[1])
-    assert.deepEqual(await get(strategyId, secondSymbolId, eventId), reservations[2])
-    assert.deepEqual(await get(strategyId, symbolId, secondEventId), reservations[3])
+    assert.deepEqual(await get(strategyId, symbolId, eventId), { ...reservations[0], executed_delta: 0 })
+    assert.deepEqual(await get(secondStrategyId, symbolId, eventId), { ...reservations[1], executed_delta: 0 })
+    assert.deepEqual(await get(strategyId, secondSymbolId, eventId), { ...reservations[2], executed_delta: 0 })
+    assert.deepEqual(await get(strategyId, symbolId, secondEventId), { ...reservations[3], executed_delta: 0 })
 
     const raw = await db.collection('strategy_symbol_reservations').doc(reservations[0]!.id).get()
     assert.ok(raw.data()?.created_at && typeof raw.data()?.created_at.toDate === 'function')
