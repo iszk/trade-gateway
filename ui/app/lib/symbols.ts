@@ -46,9 +46,9 @@ const parsePositiveFormNumber = (
 }
 
 /**
- * Parse and validate order constraint values submitted by the detail form.
- * Form values are intentionally required to be strings so malformed multipart
- * or repeated fields cannot be silently coerced into a valid number.
+ * 詳細フォームで送信された注文数量制約をパースして検証します。
+ * フォーム値は文字列のみを受け付け、壊れた multipart や重複フィールドが
+ * 数値に暗黙変換されて通ってしまうのを防ぎます。
  */
 export const parseOrderConstraintsForm = (
   values: OrderConstraintsFormValues,
