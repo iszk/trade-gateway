@@ -628,7 +628,7 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
                 'strategy symbol reconciliation completed after execution sync',
             )
         } catch (error) {
-            // Reconciliation is a safety side task.  A fetch or Firestore
+            // Reconciliation is a monitoring side task.  A fetch or Firestore
             // failure must not turn the existing 10-minute execution sync
             // into a failed cron invocation.
             ctx.logger.warn(

@@ -339,38 +339,6 @@ OpenAPI は全 endpoint を一括で定義していない。機械可読な契�
 }
 ```
 
-### 12a. Symbol position reconciliation 手動復旧
-- Method/Path: `POST /api/symbols/:symbol_id/reconciliation/recover`
-- 認証: 必要（`API_SECRET` の Bearer トークン）
-- リクエスト body: なし（body は送信しない）
-- 役割: fresh な broker position snapshot と Firestore の最新 strategy position を再照合し、復旧条件を満たす場合だけ `MISMATCH` を `READY` に戻す。通常の trade-control PATCH による解除は復旧手順として使用しない。
-
-復旧条件は broker と confirmed の MATCH、pending 合計の quantity step 許容ゼロ、`MANUAL_REVIEW` 不在、symbol/position/制約の保存値が妥当であること。reconciliation が所有する pause だけ active に戻し、operator 所有の pause は維持する。
-
-#### 成功レスポンス
-- `200 OK`: `status: "recovered"`。operator pause を維持した場合は `operator_pause_preserved: true`。
-
-```json
-{
-  "status": "recovered",
-  "symbol_id": "bitflyer:BTC_JPY",
-  "operator_pause_preserved": false,
-  "transitioned_positions": 1,
-  "totals": {
-    "strategyConfirmedTotal": 0,
-    "strategyPendingTotal": 0,
-    "brokerPositionTotal": 0,
-    "delta": 0
-  }
-}
-```
-
-#### エラーレスポンス
-- `401 Unauthorized`: API secret 不足・不正
-- `404 Not Found`: symbol が未登録
-- `409 Conflict`: mismatch 継続、pending 未解消、MANUAL_REVIEW、または対象が復旧対象ではない
-- `500 Internal Server Error`: broker snapshot 取得失敗、認証欠落、Firestore/保存状態不正。状態は変更しない
-
 ### 13. Strategy × symbol policy 取得
 - Method/Path: `GET /api/strategy-symbol-policies/:strategy_id/:symbol_id`
 - 認証: 必要（`API_SECRET` の Bearer トークン）

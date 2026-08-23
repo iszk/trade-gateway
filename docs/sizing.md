@@ -120,7 +120,7 @@ policy、symbol の制約、position が存在しない、または保存済み 
 
 `quantity_step` に依存した ULP 誤差だけを許容するため、`0.1 + 0.2` と `0.3` は一致するが、step=0.1 の経済的な 0.06 差は `MISMATCH` とする。broker 取得失敗、認証欠落、partial response、不正な side/size、保存状態の破損は 0 position に補完せず未判定とする。
 
-MISMATCH では symbol の pause と `READY` position の `MISMATCH` 遷移を適用し、縮小注文を含む全 webhook dispatch を抑止する。複数 strategy の相殺や帰属不明差分があるため、strategy-local な縮小が broker 全体のリスクを必ず減らすとは証明できない。confirmed/pending は変更せず、強制解消注文も発行しない。通常 MATCH は write せず、MISMATCH の解消は fresh broker snapshot、pending の step 許容ゼロ、MANUAL_REVIEW 不在を確認する `POST /api/symbols/:symbol_id/reconciliation/recover` でのみ行う。reconciliation 所有 pause だけを active に戻し、operator pause は維持する。
+MISMATCH、INDETERMINATE、broker fetch failure は警告ログだけを残し、symbol pause、position status/quantity、reservation、orders、webhook dispatch を変更しない。手動売買による broker excess/shortage も同じ MISMATCH として集約し、差分の配分や自動解消注文は行わない。通常 MATCH も write せず、復旧 API や reconciliation 所有の pause は設けない。
 
 ## 浮動小数点と fail-closed
 

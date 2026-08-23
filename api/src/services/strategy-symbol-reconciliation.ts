@@ -1,4 +1,4 @@
-import { FieldValue, type DocumentReference, type Firestore, type Transaction } from 'firebase-admin/firestore'
+import type { Firestore } from 'firebase-admin/firestore'
 
 import { getFirestoreClient } from '../firestore.js'
 import { defaultLogger, type Logger } from '../logger.js'
@@ -20,19 +20,13 @@ import {
     parseSymbolId,
     type ListTradableSymbolsFn,
 } from './tradable-symbols.js'
-import {
-    deserializeStrategySymbolPosition,
-} from './strategy-symbol-positions.js'
+import { deserializeStrategySymbolPosition } from './strategy-symbol-positions.js'
 import type { PositionFetcher } from './position-fetcher.js'
 
 const SYMBOL_COLLECTION = 'tradable_symbols'
 const POSITION_COLLECTION = 'strategy_symbol_positions'
 const ALL_BROKERS: readonly BrokerName[] = ['bitflyer', 'saxo', 'dummy']
 const POSITION_STATUSES: readonly StrategySymbolPositionStatus[] = ['READY', 'MANUAL_REVIEW', 'MISMATCH']
-
-/** Ownership markers used when reconciliation pauses a symbol. */
-export const RECONCILIATION_PAUSE_REASON = 'strategy_symbol_reconciliation:mismatch'
-export const RECONCILIATION_PAUSE_UPDATED_BY = 'strategy-symbol-reconciliation'
 
 type ReconciliationFailureReason =
     | 'SYMBOL_LIST_FAILED'
@@ -43,8 +37,6 @@ type ReconciliationFailureReason =
     | 'SYMBOL_CONSTRAINTS_INVALID'
     | 'POSITION_INVALID'
     | 'ARITHMETIC_OVERFLOW'
-    | 'NOT_FOUND'
-    | 'TRANSACTION_FAILED'
 
 export type ReconciliationTotals = {
     symbolId: string
@@ -64,8 +56,6 @@ export type SymbolReconciliationDecision =
     | { kind: 'MATCH'; totals: ReconciliationTotals }
     | { kind: 'MISMATCH'; totals: ReconciliationTotals }
     | { kind: 'INDETERMINATE'; reason: ReconciliationFailureReason }
-
-type MatchDecision = Extract<SymbolReconciliationDecision, { kind: 'MATCH' }>
 
 export type StrategySymbolReconciliationInput = {
     symbol: Pick<TradableSymbol, 'id' | 'broker' | 'ticker' | 'order_constraints'>
@@ -100,8 +90,6 @@ export type ReconciliationRunSummary = {
     matched: number
     mismatched: number
     indeterminate: number
-    recoveryReady: number
-    stateTransitionFailed: number
     orphanBrokerPositions: number
     brokers: ReconciliationRunBrokerSummary[]
     mismatches: ReconciliationMismatchDetail[]
@@ -110,75 +98,33 @@ export type ReconciliationRunSummary = {
 
 export type RunStrategySymbolReconciliationFn = () => Promise<ReconciliationRunSummary>
 
-type RecoverStrategySymbolResult =
-    | { kind: 'RECOVERED'; decision: MatchDecision; transitionedPositions: number }
-    | {
-        kind: 'RECOVERED_STILL_OPERATOR_PAUSED'
-        decision: MatchDecision
-        transitionedPositions: number
-    }
-    | { kind: 'NO_CHANGE'; reason: 'NOT_MISMATCH' }
-    | {
-        kind: 'BLOCKED'
-        reason: 'STILL_MISMATCH' | 'PENDING_NOT_ZERO' | 'MANUAL_REVIEW' | 'INDETERMINATE'
-    }
-    | { kind: 'NOT_FOUND' }
-
-export type RecoverStrategySymbolFn = (symbolId: string) => Promise<RecoverStrategySymbolResult>
-
 export type StrategySymbolReconciliationServiceOptions = {
     db?: Firestore
     listTradableSymbols?: ListTradableSymbolsFn
     fetchPositionsForReconciliation?: (broker: BrokerName) => Promise<Position[]>
     positionFetcher?: Pick<PositionFetcher, 'fetchPositionsForReconciliation'>
     logger?: Pick<Logger, 'info' | 'warn'>
-    now?: () => Date
     maxMismatchDetails?: number
 }
 
 type ReconciliationService = {
     runStrategySymbolReconciliation: RunStrategySymbolReconciliationFn
-    recoverStrategySymbol: RecoverStrategySymbolFn
 }
 
 type SymbolState = {
     id: string
     broker: BrokerName
     ticker: string
-    constraints?: OrderConstraints
-    tradeControl: {
-        status: 'active' | 'paused'
-        reason?: string
-        updatedBy?: string
-        updatedAt: Date
-    }
-    updatedAt: Date
+    constraints: OrderConstraints
 }
 
 type SymbolStateResult =
     | { ok: true; state: SymbolState }
-    | { ok: false; canPause: false; reason: ReconciliationFailureReason }
-    | {
-        ok: false
-        canPause: true
-        state: SymbolState
-        reason: 'SYMBOL_INVALID' | 'SYMBOL_CONSTRAINTS_INVALID'
-    }
-
-const isPausableSymbolState = (
-    result: SymbolStateResult,
-): result is Extract<SymbolStateResult, { ok: false; canPause: true }> => (
-    !result.ok && result.canPause
-)
+    | { ok: false; reason: 'SYMBOL_INVALID' | 'SYMBOL_CONSTRAINTS_INVALID' }
 
 type SnapshotLike = {
     id: string
-    exists: boolean
     data: () => unknown
-}
-
-type QuerySnapshotLike = {
-    docs: SnapshotLike[]
 }
 
 type StoredPositionsResult = {
@@ -220,18 +166,6 @@ const toDate = (value: unknown): Date | null => {
     return null
 }
 
-const safeDateAfter = (candidate: Date, previous: Date): Date => (
-    candidate.getTime() > previous.getTime()
-        ? new Date(candidate.getTime())
-        : new Date(previous.getTime() + 1)
-)
-
-// A malformed persisted timestamp must never be copied back into Firestore.
-// This value is only an internal ordering baseline for the minimal pause
-// state; updatePauseIfNeeded always replaces both persisted timestamps with
-// the current reconciliation time.
-const INVALID_TIMESTAMP_BASELINE = new Date(0)
-
 const isValidTicker = (value: unknown): value is string => (
     typeof value === 'string' && value.trim().length > 0 && !value.includes('/')
 )
@@ -251,9 +185,10 @@ const isValidConstraints = (constraints: unknown): constraints is OrderConstrain
 }
 
 const parseSymbolState = (value: unknown, expectedSymbolId: string): SymbolStateResult => {
-    if (!isRecord(value)) return { ok: false, canPause: false, reason: 'SYMBOL_INVALID' }
+    if (!isRecord(value) || typeof expectedSymbolId !== 'string') {
+        return { ok: false, reason: 'SYMBOL_INVALID' }
+    }
 
-    if (typeof expectedSymbolId !== 'string') return { ok: false, canPause: false, reason: 'SYMBOL_INVALID' }
     const parsedId = parseSymbolId(expectedSymbolId)
     const broker = value.broker
     const ticker = value.ticker
@@ -265,65 +200,37 @@ const parseSymbolState = (value: unknown, expectedSymbolId: string): SymbolState
         !isValidTicker(ticker) ||
         ticker !== parsedId.ticker
     ) {
-        return { ok: false, canPause: false, reason: 'SYMBOL_INVALID' }
+        return { ok: false, reason: 'SYMBOL_INVALID' }
     }
 
     const tradeControl = value.trade_control
     if (!isRecord(tradeControl) ||
-        (tradeControl.status !== 'active' && tradeControl.status !== 'paused')) {
-        return { ok: false, canPause: false, reason: 'SYMBOL_INVALID' }
-    }
-    const tradeControlUpdatedAt = toDate(tradeControl.updated_at)
-    const updatedAt = toDate(value.updated_at)
-    const reasonIsValid = tradeControl.reason === undefined || typeof tradeControl.reason === 'string'
-    const updatedByIsValid = tradeControl.updated_by === undefined || typeof tradeControl.updated_by === 'string'
-    const minimalState: SymbolState = {
-        id: expectedSymbolId,
-        broker,
-        ticker,
-        tradeControl: {
-            status: tradeControl.status,
-            ...(typeof tradeControl.reason === 'string' ? { reason: tradeControl.reason } : {}),
-            ...(typeof tradeControl.updated_by === 'string' ? { updatedBy: tradeControl.updated_by } : {}),
-            updatedAt: tradeControlUpdatedAt ?? INVALID_TIMESTAMP_BASELINE,
-        },
-        updatedAt: updatedAt ?? INVALID_TIMESTAMP_BASELINE,
-    }
-    if (tradeControlUpdatedAt === null || updatedAt === null || !reasonIsValid || !updatedByIsValid) {
-        return { ok: false, canPause: true, state: minimalState, reason: 'SYMBOL_INVALID' }
+        (tradeControl.status !== 'active' && tradeControl.status !== 'paused') ||
+        toDate(tradeControl.updated_at) === null ||
+        toDate(value.updated_at) === null ||
+        (tradeControl.reason !== undefined && typeof tradeControl.reason !== 'string') ||
+        (tradeControl.updated_by !== undefined && typeof tradeControl.updated_by !== 'string')) {
+        return { ok: false, reason: 'SYMBOL_INVALID' }
     }
 
     let constraints: OrderConstraints | undefined
     try {
         constraints = deserializeTradableSymbolOrderConstraints(value, expectedSymbolId)
     } catch {
-        return {
-            ok: false,
-            canPause: true,
-            state: minimalState,
-            reason: 'SYMBOL_CONSTRAINTS_INVALID',
-        }
+        return { ok: false, reason: 'SYMBOL_CONSTRAINTS_INVALID' }
     }
-    if (constraints !== undefined && !isValidConstraints(constraints)) {
-        return {
-            ok: false,
-            canPause: true,
-            state: { ...minimalState, constraints },
-            reason: 'SYMBOL_CONSTRAINTS_INVALID',
-        }
-    }
-    if (constraints === undefined) {
-        return {
-            ok: false,
-            canPause: true,
-            state: minimalState,
-            reason: 'SYMBOL_CONSTRAINTS_INVALID',
-        }
+    if (constraints === undefined || !isValidConstraints(constraints)) {
+        return { ok: false, reason: 'SYMBOL_CONSTRAINTS_INVALID' }
     }
 
     return {
         ok: true,
-        state: { ...minimalState, constraints },
+        state: {
+            id: expectedSymbolId,
+            broker,
+            ticker,
+            constraints,
+        },
     }
 }
 
@@ -500,8 +407,6 @@ const createEmptySummary = (): ReconciliationRunSummary => ({
     matched: 0,
     mismatched: 0,
     indeterminate: 0,
-    recoveryReady: 0,
-    stateTransitionFailed: 0,
     orphanBrokerPositions: 0,
     brokers: [],
     mismatches: [],
@@ -518,121 +423,6 @@ const toMismatchDetail = (totals: ReconciliationTotals): ReconciliationMismatchD
     quantityStep: totals.quantityStep,
     strategyCount: totals.strategyCount,
     statusCounts: totals.statusCounts,
-})
-
-const isReconciliationOwnedPause = (state: SymbolState): boolean => (
-    state.tradeControl.status === 'paused' &&
-    state.tradeControl.reason === RECONCILIATION_PAUSE_REASON &&
-    state.tradeControl.updatedBy === RECONCILIATION_PAUSE_UPDATED_BY
-)
-
-const updatePauseIfNeeded = (
-    transaction: Transaction,
-    symbolRef: DocumentReference,
-    state: SymbolState,
-    now: Date,
-): boolean => {
-    if (state.tradeControl.status === 'paused') {
-        return false
-    }
-    const updatedAt = safeDateAfter(now, state.updatedAt)
-    transaction.update(symbolRef, {
-        'trade_control.status': 'paused',
-        'trade_control.reason': RECONCILIATION_PAUSE_REASON,
-        'trade_control.updated_at': updatedAt,
-        'trade_control.updated_by': RECONCILIATION_PAUSE_UPDATED_BY,
-        updated_at: updatedAt,
-    })
-    return true
-}
-
-const readTransactionPositions = async (
-    db: Firestore,
-    transaction: Transaction,
-    symbolId: string,
-): Promise<{ positions: StrategySymbolPosition[]; invalid: boolean }> => {
-    const query = db.collection(POSITION_COLLECTION).where('symbol_id', '==', symbolId)
-    const snapshot = await transaction.get(query) as unknown as QuerySnapshotLike
-    const positions: StrategySymbolPosition[] = []
-    let invalid = false
-    for (const document of snapshot.docs) {
-        try {
-            positions.push(parseStoredPositionSnapshot(document))
-        } catch {
-            invalid = true
-        }
-    }
-    return { positions, invalid }
-}
-
-type ApplyMismatchResult =
-    | { kind: 'APPLIED'; transitionedPositions: number }
-    | { kind: 'NO_CHANGE' }
-    | { kind: 'INDETERMINATE' }
-
-const applyMismatchTransaction = async (
-    db: Firestore,
-    symbolId: string,
-    brokerPositions: readonly Position[],
-    now: Date,
-): Promise<ApplyMismatchResult> => db.runTransaction(async (transaction) => {
-    const symbolRef = db.collection(SYMBOL_COLLECTION).doc(symbolId)
-    const symbolSnapshot = await transaction.get(symbolRef) as unknown as SnapshotLike
-    if (!symbolSnapshot.exists) return { kind: 'INDETERMINATE' }
-    const symbolResult = parseSymbolState(symbolSnapshot.data(), symbolId)
-    if (!symbolResult.ok && !isPausableSymbolState(symbolResult)) return { kind: 'INDETERMINATE' }
-    const state = symbolResult.state
-    const storedPositions = await readTransactionPositions(db, transaction, symbolId)
-
-    if (storedPositions.invalid) {
-        // A valid symbol with a corrupt strategy position is still safe to
-        // pause, but the malformed position itself must never be guessed or
-        // rewritten.
-        updatePauseIfNeeded(transaction, symbolRef, state, now)
-        return { kind: 'APPLIED', transitionedPositions: 0 }
-    }
-    if (!symbolResult.ok) {
-        if (isPausableSymbolState(symbolResult)) {
-            updatePauseIfNeeded(transaction, symbolRef, state, now)
-            return { kind: 'APPLIED', transitionedPositions: 0 }
-        }
-        return { kind: 'INDETERMINATE' }
-    }
-
-    const decision = decideSymbolReconciliation({
-        symbol: {
-            id: state.id,
-            broker: state.broker,
-            ticker: state.ticker,
-            order_constraints: state.constraints,
-        },
-        strategyPositions: storedPositions.positions,
-        brokerPositions,
-    })
-    if (decision.kind === 'MATCH') {
-        // A later MATCH only makes a symbol eligible for explicit recovery;
-        // regular reconciliation must remain write-free.
-        return { kind: 'NO_CHANGE' }
-    }
-    if (decision.kind === 'INDETERMINATE') {
-        updatePauseIfNeeded(transaction, symbolRef, state, now)
-        return { kind: 'APPLIED', transitionedPositions: 0 }
-    }
-
-    let transitionedPositions = 0
-    for (const position of storedPositions.positions) {
-        if (position.status !== 'READY') continue
-        const positionRef = db.collection(POSITION_COLLECTION).doc(position.id)
-        const updatedAt = safeDateAfter(now, position.updated_at)
-        transaction.update(positionRef, {
-            status: 'MISMATCH',
-            updated_at: updatedAt,
-            reconciled_at: updatedAt,
-        })
-        transitionedPositions += 1
-    }
-    updatePauseIfNeeded(transaction, symbolRef, state, now)
-    return { kind: 'APPLIED', transitionedPositions }
 })
 
 const buildPureInput = (
@@ -652,10 +442,9 @@ const buildPureInput = (
 
 const createService = (options: StrategySymbolReconciliationServiceOptions = {}): ReconciliationService => {
     const db = options.db ?? getFirestoreClient()
-    // Read raw symbol documents here instead of using the normal symbol
-    // repository parser.  Reconciliation must be able to distinguish a
-    // single malformed constraint document (which can still be safely paused)
-    // from a collection read failure (which must leave all state untouched).
+    // Reconciliation reads raw symbol documents so a malformed symbol is
+    // counted as INDETERMINATE without turning the whole collection read into
+    // an empty successful snapshot.  This path never writes the document.
     const listTradableSymbols = options.listTradableSymbols ?? (async (): Promise<TradableSymbol[]> => {
         const snapshot = await db.collection(SYMBOL_COLLECTION).get()
         return snapshot.docs.map((document) => document.data() as TradableSymbol)
@@ -664,10 +453,7 @@ const createService = (options: StrategySymbolReconciliationServiceOptions = {})
         ?? options.positionFetcher?.fetchPositionsForReconciliation
         ?? (async (_broker: BrokerName) => { throw new Error('reconciliation position fetcher is not configured') })
     const logger = options.logger ?? defaultLogger
-    const now = options.now ?? (() => new Date())
     const maxMismatchDetails = options.maxMismatchDetails ?? 100
-
-    const parseListedSymbol = (symbol: TradableSymbol): SymbolStateResult => parseSymbolState(symbol, symbol.id)
 
     const runStrategySymbolReconciliation: RunStrategySymbolReconciliationFn = async () => {
         const summary = createEmptySummary()
@@ -691,8 +477,9 @@ const createService = (options: StrategySymbolReconciliationServiceOptions = {})
 
         const parsedSymbols = new Map<string, SymbolStateResult>()
         for (const symbol of symbols) {
-            const parsed = parseListedSymbol(symbol)
-            parsedSymbols.set(symbol.id, parsed)
+            const symbolRecord = isRecord(symbol) ? symbol : {}
+            const symbolId = isRecord(symbol) && typeof symbol.id === 'string' ? symbol.id : ''
+            parsedSymbols.set(symbolId, parseSymbolState(symbolRecord, symbolId))
         }
 
         const brokerPositions = new Map<BrokerName, Position[]>()
@@ -714,7 +501,9 @@ const createService = (options: StrategySymbolReconciliationServiceOptions = {})
         })
         summary.brokers = await Promise.all(brokerTasks)
 
-        const knownSymbolIds = new Set(symbols.map((symbol) => symbol.id))
+        const knownSymbolIds = new Set(symbols
+            .filter((symbol) => isRecord(symbol) && typeof symbol.id === 'string')
+            .map((symbol) => symbol.id))
         for (const positions of brokerPositions.values()) {
             for (const position of positions) {
                 if (!knownSymbolIds.has(createSymbolId(position.broker, position.ticker))) {
@@ -724,44 +513,26 @@ const createService = (options: StrategySymbolReconciliationServiceOptions = {})
         }
 
         for (const symbol of symbols) {
+            const symbolId = isRecord(symbol) && typeof symbol.id === 'string' ? symbol.id : ''
             summary.checked += 1
-            const parsed = parsedSymbols.get(symbol.id)
-            if (parsed === undefined || (!parsed.ok && !isPausableSymbolState(parsed))) {
+            const parsed = parsedSymbols.get(symbolId)
+            if (parsed === undefined || !parsed.ok) {
                 summary.indeterminate += 1
                 continue
             }
+
             const state = parsed.state
             if (failedBrokers.has(state.broker)) {
                 summary.indeterminate += 1
                 continue
             }
-            const positions = storedPositions.bySymbol.get(symbol.id) ?? []
-            if (storedPositions.globallyInvalid || storedPositions.invalidSymbols.has(symbol.id)) {
+
+            if (storedPositions.globallyInvalid || storedPositions.invalidSymbols.has(symbolId)) {
                 summary.indeterminate += 1
-                try {
-                    // A valid symbol can still be safely paused when one of
-                    // its strategy positions is malformed.  The transaction
-                    // re-reads and preserves that malformed position without
-                    // attempting to infer or rewrite its quantity.
-                    const result = await applyMismatchTransaction(db, symbol.id, brokerPositions.get(state.broker) ?? [], now())
-                    if (result.kind === 'INDETERMINATE') summary.stateTransitionFailed += 1
-                } catch (error) {
-                    summary.stateTransitionFailed += 1
-                    logger.warn({ event: 'strategy_symbol_reconciliation:state_transition_failed', symbol_id: symbol.id, error }, 'failed to pause invalid symbol state')
-                }
-                continue
-            }
-            if (!parsed.ok) {
-                summary.indeterminate += 1
-                try {
-                    await applyMismatchTransaction(db, symbol.id, brokerPositions.get(state.broker) ?? [], now())
-                } catch (error) {
-                    summary.stateTransitionFailed += 1
-                    logger.warn({ event: 'strategy_symbol_reconciliation:state_transition_failed', symbol_id: symbol.id, error }, 'failed to pause invalid symbol constraints')
-                }
                 continue
             }
 
+            const positions = storedPositions.bySymbol.get(symbolId) ?? []
             const decision = decideSymbolReconciliation(buildPureInput(
                 state,
                 positions,
@@ -773,9 +544,6 @@ const createService = (options: StrategySymbolReconciliationServiceOptions = {})
             }
             if (decision.kind === 'MATCH') {
                 summary.matched += 1
-                if (decision.totals.statusCounts.MISMATCH > 0 || isReconciliationOwnedPause(state)) {
-                    summary.recoveryReady += 1
-                }
                 continue
             }
 
@@ -785,95 +553,13 @@ const createService = (options: StrategySymbolReconciliationServiceOptions = {})
             } else {
                 summary.truncatedCount += 1
             }
-            try {
-                const result = await applyMismatchTransaction(db, symbol.id, brokerPositions.get(state.broker) ?? [], now())
-                if (result.kind === 'INDETERMINATE') summary.stateTransitionFailed += 1
-            } catch (error) {
-                summary.stateTransitionFailed += 1
-                logger.warn({ event: 'strategy_symbol_reconciliation:state_transition_failed', symbol_id: symbol.id, error }, 'failed to apply symbol mismatch state')
-            }
         }
 
         logger.info({ event: 'strategy_symbol_reconciliation:run_summary', ...summary }, 'strategy symbol reconciliation completed')
         return summary
     }
 
-    const recoverStrategySymbol: RecoverStrategySymbolFn = async (symbolId) => {
-        const symbolRef = db.collection(SYMBOL_COLLECTION).doc(symbolId)
-        const initialSnapshot = await symbolRef.get()
-        if (!initialSnapshot.exists) return { kind: 'NOT_FOUND' }
-        const initialState = parseSymbolState(initialSnapshot.data(), symbolId)
-        if (!initialState.ok) return { kind: 'BLOCKED', reason: 'INDETERMINATE' }
-
-        let freshPositions: Position[]
-        try {
-            freshPositions = await fetchPositions(initialState.state.broker)
-        } catch {
-            return { kind: 'BLOCKED', reason: 'INDETERMINATE' }
-        }
-        const validated = validateBrokerSnapshot(initialState.state.broker, freshPositions)
-        if (!validated.ok) return { kind: 'BLOCKED', reason: 'INDETERMINATE' }
-
-        return db.runTransaction(async (transaction): Promise<RecoverStrategySymbolResult> => {
-            const latestSymbolSnapshot = await transaction.get(symbolRef) as unknown as SnapshotLike
-            if (!latestSymbolSnapshot.exists) return { kind: 'NOT_FOUND' }
-            const latestStateResult = parseSymbolState(latestSymbolSnapshot.data(), symbolId)
-            if (!latestStateResult.ok) return { kind: 'BLOCKED', reason: 'INDETERMINATE' }
-            const latestState = latestStateResult.state
-            const stored = await readTransactionPositions(db, transaction, symbolId)
-            if (stored.invalid) return { kind: 'BLOCKED', reason: 'INDETERMINATE' }
-            const mismatchCount = stored.positions.filter((position) => position.status === 'MISMATCH').length
-            const reconciliationPause = isReconciliationOwnedPause(latestState)
-            if (mismatchCount === 0 && !reconciliationPause) {
-                return { kind: 'NO_CHANGE', reason: 'NOT_MISMATCH' }
-            }
-
-            const decision = decideSymbolReconciliation(buildPureInput(
-                latestState,
-                stored.positions,
-                validated.positions,
-            ))
-            if (decision.kind === 'INDETERMINATE') return { kind: 'BLOCKED', reason: 'INDETERMINATE' }
-            if (decision.kind === 'MISMATCH') return { kind: 'BLOCKED', reason: 'STILL_MISMATCH' }
-            if (decision.totals.statusCounts.MANUAL_REVIEW > 0) {
-                return { kind: 'BLOCKED', reason: 'MANUAL_REVIEW' }
-            }
-            if (compareQuantities(decision.totals.strategyPendingTotal, 0, decision.totals.quantityStep) !== 0) {
-                return { kind: 'BLOCKED', reason: 'PENDING_NOT_ZERO' }
-            }
-
-            const recoveryNow = now()
-            let transitionedPositions = 0
-            for (const position of stored.positions) {
-                if (position.status !== 'MISMATCH') continue
-                const positionRef = db.collection(POSITION_COLLECTION).doc(position.id)
-                const updatedAt = safeDateAfter(recoveryNow, position.updated_at)
-                transaction.update(positionRef, {
-                    status: 'READY',
-                    updated_at: updatedAt,
-                    reconciled_at: updatedAt,
-                })
-                transitionedPositions += 1
-            }
-
-            const operatorPaused = latestState.tradeControl.status === 'paused' && !isReconciliationOwnedPause(latestState)
-            if (isReconciliationOwnedPause(latestState)) {
-                const updatedAt = safeDateAfter(recoveryNow, latestState.updatedAt)
-                transaction.update(symbolRef, {
-                    'trade_control.status': 'active',
-                    'trade_control.reason': FieldValue.delete(),
-                    'trade_control.updated_by': FieldValue.delete(),
-                    'trade_control.updated_at': updatedAt,
-                    updated_at: updatedAt,
-                })
-            }
-            return operatorPaused
-                ? { kind: 'RECOVERED_STILL_OPERATOR_PAUSED', decision, transitionedPositions }
-                : { kind: 'RECOVERED', decision, transitionedPositions }
-        })
-    }
-
-    return { runStrategySymbolReconciliation, recoverStrategySymbol }
+    return { runStrategySymbolReconciliation }
 }
 
 export const createStrategySymbolReconciliationService = (
@@ -883,7 +569,3 @@ export const createStrategySymbolReconciliationService = (
 export const createDefaultRunStrategySymbolReconciliationFn = (
     options: StrategySymbolReconciliationServiceOptions = {},
 ): RunStrategySymbolReconciliationFn => createService(options).runStrategySymbolReconciliation
-
-export const createDefaultRecoverStrategySymbolFn = (
-    options: StrategySymbolReconciliationServiceOptions = {},
-): RecoverStrategySymbolFn => createService(options).recoverStrategySymbol

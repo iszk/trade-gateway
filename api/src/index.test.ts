@@ -1055,30 +1055,6 @@ test('PATCH /api/symbols/:symbol_id/trade-control updates status and logs info',
     assert.equal(calls.find((call) => call.event === 'symbol_trade_control:updated')?.status, 'paused')
 })
 
-test('POST /api/symbols/:symbol_id/reconciliation/recover requires API secret and maps blocked recovery', async () => {
-    let calledSymbolId = ''
-    const app = createAppForTests({
-        apiSecret: 'reconciliation-secret',
-        recoverStrategySymbol: async (symbolId) => {
-            calledSymbolId = symbolId
-            return { kind: 'BLOCKED', reason: 'STILL_MISMATCH' }
-        },
-    })
-
-    const unauthorized = await app.request('/api/symbols/dummy%3ABTC_JPY/reconciliation/recover', {
-        method: 'POST',
-    })
-    assert.equal(unauthorized.status, 401)
-
-    const blocked = await app.request('/api/symbols/dummy%3ABTC_JPY/reconciliation/recover', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer reconciliation-secret' },
-    })
-    assert.equal(blocked.status, 409)
-    assert.equal(calledSymbolId, 'dummy:BTC_JPY')
-    assert.equal((await blocked.json()).error.code, 'RECONCILIATION_BLOCKED')
-})
-
 test('GET /api/positions returns positions when the shared key matches', async () => {
     const samplePositions: Position[] = [
         {
@@ -2448,75 +2424,6 @@ test('POST /api/webhooks/tradingview suppresses dispatch when symbol is paused',
     assert.equal(logs[0]?.result, 'suppressed')
     assert.equal(logs[0]?.error_code, 'SYMBOL_PAUSED')
     assert.equal(logCalls.find((call) => call.event === 'webhook:suppressed')?.reason, 'symbol_paused')
-})
-
-for (const scenario of [
-    { name: 'policy', policy: makeSizingPolicy() },
-    { name: 'fallback', policy: null },
-] as const) {
-    test(`POST /api/webhooks/tradingview suppresses reconciliation pause on ${scenario.name} path`, async () => {
-        const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
-        const { createWebhookEvent, events } = createWebhookEventStub()
-        const { createOrderDispatchLog, logs } = createOrderDispatchLogStub()
-        const app = createAppForTests({
-            webhookSecret: 'test-secret',
-            sourceIpAllowlist: new Set(['52.89.214.238']),
-            allowUnregisteredStrategyPolicyFallback: true,
-            dispatchOrder,
-            createWebhookEvent,
-            createOrderDispatchLog,
-            getTradableSymbol: async () => makeTradableSymbol({
-                trade_control: {
-                    status: 'paused',
-                    reason: 'strategy_symbol_reconciliation:mismatch',
-                    updated_by: 'strategy-symbol-reconciliation',
-                    updated_at: new Date('2026-01-01T00:00:00Z'),
-                },
-            }),
-            getStrategySymbolPolicy: async () => scenario.policy,
-        })
-
-        const response = await postWebhook(app, {
-            ...makePayload(`evt-reconciliation-pause-${scenario.name}`),
-            strategy: 'alpha',
-        })
-
-        assert.equal(response.status, 202)
-        assert.deepEqual((await response.json()).dispatch_status, 'suppressed')
-        assert.equal(dispatchCalls.length, 0)
-        assert.equal(events[0]?.status, 'suppressed')
-        assert.equal(events[0]?.rejection_reason, 'symbol_paused')
-        assert.equal(logs[0]?.result, 'suppressed')
-    })
-}
-
-test('POST /api/webhooks/tradingview rejects active symbol with corrupt timestamps before dispatch', async () => {
-    const { dispatchOrder, calls: dispatchCalls } = createDispatchStub()
-    const { createWebhookEvent, events } = createWebhookEventStub()
-    const { createOrderDispatchLog, logs } = createOrderDispatchLogStub()
-    const app = createAppForTests({
-        webhookSecret: 'test-secret',
-        sourceIpAllowlist: new Set(['52.89.214.238']),
-        dispatchOrder,
-        createWebhookEvent,
-        createOrderDispatchLog,
-        getTradableSymbol: async () => makeTradableSymbol({
-            trade_control: {
-                status: 'active',
-                updated_at: new Date(Number.NaN),
-            },
-            updated_at: new Date(Number.NaN),
-        }),
-    })
-
-    const response = await postWebhook(app, makePayload('evt-corrupt-symbol-timestamps'))
-    const body = await response.json()
-
-    assert.equal(response.status, 400)
-    assert.equal(body.error.code, 'INVALID_STORED_STATE')
-    assert.equal(dispatchCalls.length, 0)
-    assert.equal(events[0]?.status, 'rejected')
-    assert.equal(logs.length, 0)
 })
 
 test('POST /api/webhooks/tradingview creates default tradable symbol after unknown active symbol', async () => {

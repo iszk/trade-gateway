@@ -176,9 +176,7 @@ alert(json.stringify(
 - `order_dispatch_logs.error_code`: `SYMBOL_PAUSED`
 - レスポンス: `202 Accepted`
 
-broker × symbol reconciliation が差分を検出した場合も同じ symbol pause を適用する。policy 登録済みの経路では `strategy_symbol_positions.status=MISMATCH` が `POSITION_NOT_READY` として抑止され、policy 未登録の migration fallback も symbol pause の判定が先に行われるため発注しない。縮小シグナルも例外にせず、全注文を抑止する。通常 MATCH は自動で pause を解除せず、fresh snapshot を使う API secret 必須の手動復旧だけが状態を戻す。
-
-symbol の timestamp や trade-control metadata が破損している場合も、active として policy/fallback へ進めず `INVALID_STORED_STATE` で fail-closed にする。reconciliation が identity/status を検証できる symbol は数量を補正せず pause だけを適用する。
+broker × symbol reconciliation は read-only の監視であり、差分や取得失敗を検出しても symbol pause、`POSITION_NOT_READY`、縮小を含む webhook 抑止を追加しない。手動売買による broker excess/shortage も同じ MISMATCH 集約ログへ残るが、Webhook の受付・dispatch は既存の trade-control と sizing policy の契約に従う。保存状態が不正な場合も reconciliation は write せず、警告ログだけを残す。
 
 ### Sizing policy による webhook 判定
 

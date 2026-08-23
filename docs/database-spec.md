@@ -226,15 +226,15 @@ strategy × symbol ごとの仮想 position を保持する runtime state。poli
 - `updated_at` (timestamp, required)
 - `reconciled_at` (timestamp | null, required) — 未照合は明示的な `null`。日時は `updated_at` より後にできない
 
-`MANUAL_REVIEW` は dispatch 結果不明等の状態であり、pending を保持する。`MISMATCH` は broker aggregate との差分を表す停止状態で、差分を strategy へ推測配分しない。
+`MANUAL_REVIEW` は dispatch 結果不明等の状態であり、pending を保持する。`MISMATCH` は broker aggregate との差分を表す調査状態として利用できるが、reconciliation はこの status を変更せず、差分を strategy へ推測配分しない。
 
 ### broker × symbol reconciliation
 
 10分 cron は broker の完全な position snapshot と `strategy_symbol_positions` を symbol 単位で集約する。BUY/long を正、SELL/short を負とし、`strategy_confirmed_total`、`strategy_pending_total`、`strategy_effective_total`（confirmed + pending）、`broker_position_total` を監査用に算出する。複数 strategy / broker leg は net 集約し、差分を個別 strategy へ配分しない。
 
-約定済み broker position と比較するのは confirmed のみで、`delta = broker_position_total - strategy_confirmed_total` とする。`quantity_step` に依存した IEEE 754 の ULP 誤差だけを `compareQuantities` で許容し、半 step の丸めや暗黙補正は行わない。正常に完了した空 snapshot のみ broker position 0 とし、認証欠落、取得失敗、partial snapshot、不正な side/size、symbol/制約/position の破損は未判定として扱う。symbol の identity、broker/ticker、trade-control status が検証できる場合は、timestamp 等の補助フィールドが破損していても数量を推測修復せず、現在時刻の最小 pause 更新だけを適用する。
+約定済み broker position と比較するのは confirmed のみで、`delta = broker_position_total - strategy_confirmed_total` とする。`quantity_step` に依存した IEEE 754 の ULP 誤差だけを `compareQuantities` で許容し、半 step の丸めや暗黙補正は行わない。正常に完了した空 snapshot のみ broker position 0 とし、認証欠落、取得失敗、partial snapshot、不正な side/size、symbol/制約/position の破損は未判定として扱う。保存状態が不正な場合も数量を推測修復せず、照合結果をログへ残すだけにする。
 
-MISMATCH のときは symbol の `trade_control` を `paused` にし、`READY` position だけを `MISMATCH` に遷移する。`MANUAL_REVIEW`、confirmed、pending、operator 所有の pause は上書きしない。同じ mismatch の再検出は write せず冪等にする。通常の MATCH は position、symbol、数量、timestamp を含めて write しない。MATCH になった MISMATCH は自動復旧せず、API secret 必須の手動復旧で fresh snapshot、pending の step 許容ゼロ、MANUAL_REVIEW 不在、保存値の妥当性を再確認してから `READY` に戻す。reconciliation 所有の pause だけ active に戻し、operator pause は維持する。snapshot collection は追加せず、構造化集約ログを監査の正とする。
+MISMATCH、INDETERMINATE、broker fetch failure はすべて警告のみとし、`trade_control`、strategy position の status/quantity、reservation、orders、webhook 受付状態を変更しない。手動売買による broker excess/shortage も strategy 起因の差分と区別せず、同じ symbol 集約ログへ残して手動調査に委ねる。通常の MATCH も position、symbol、数量、timestamp を含めて write しない。snapshot collection は追加せず、構造化集約ログを監査の正とする。
 
 ## 7. `strategy_symbol_reservations`
 event 単位の注文 reservation。position document 内の配列や subcollection ではなく、常に top-level の個別 document として保存する。
@@ -278,7 +278,7 @@ dispatch outcome の更新も reservation と position を同一 transaction で
 
 約定量は snapshot の累積 `executed_size` を reservation の符号へ変換し、`executed_delta` との差分だけを適用する。差分 `d` に対して `confirmed_position += d`、`pending_delta -= d` とし、partial fill は `DISPATCHED` のまま未約定分を保持する。full fill は `SETTLED` とし、cancel/expire/failed は適用済み約定を確定したうえで `reserved_delta - executed_delta` を pending から解放して `SETTLED` とする。重複・stale snapshot は最大適用済み累積量から再計算し、cron の再実行や transaction retry で二重加算しない。
 
-requested size/予約量超過、identity/side/数量の矛盾、同一数量で価格等が矛盾する snapshot、終端 reservation 後の新規約定は数量を変更せず、可能な document を `MANUAL_REVIEW` として手動確認へ送る。非有限値・符号不一致・overflow・破損 document は fail-closed とする。broker aggregate mismatch とその復旧は後続タスクの対象であり、ここでは扱わない。
+requested size/予約量超過、identity/side/数量の矛盾、同一数量で価格等が矛盾する snapshot、終端 reservation 後の新規約定は数量を変更せず、可能な document を `MANUAL_REVIEW` として手動確認へ送る。非有限値・符号不一致・overflow・破損 document は fail-closed とする。broker aggregate mismatch は上記の read-only 監視ログへ記録するが、execution sync の transaction から状態を変更しない。
 
 ## 8. `cron_metadata`
 Cloud Run 上で動作するスロットスケジューラーが、各周期タスクの実行済みスロットIDを管理するために使用する（詳細は [slot-scheduler.md](./slot-scheduler.md) を参照）。また、Saxo audit orderactivities の batch polling 状態も保持する。

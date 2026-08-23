@@ -42,11 +42,9 @@ import type {
     ApplyStrategySymbolExecutionSyncFn,
 } from './services/strategy-symbol-execution-sync.js'
 import {
-    createDefaultRecoverStrategySymbolFn,
     createDefaultRunStrategySymbolReconciliationFn,
 } from './services/strategy-symbol-reconciliation.js'
 import type {
-    RecoverStrategySymbolFn,
     RunStrategySymbolReconciliationFn,
 } from './services/strategy-symbol-reconciliation.js'
 
@@ -288,7 +286,6 @@ type CreateAppOptions = {
     reserveStrategySymbolOrder?: ReserveStrategySymbolOrderFn
     applyStrategySymbolDispatchOutcome?: ApplyStrategySymbolDispatchOutcomeFn
     runStrategySymbolReconciliation?: RunStrategySymbolReconciliationFn
-    recoverStrategySymbol?: RecoverStrategySymbolFn
     allowUnregisteredStrategyPolicyFallback?: boolean
 }
 
@@ -338,14 +335,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 : { fetchPositionsForReconciliation: positionFetcher.fetchPositionsForReconciliation.bind(positionFetcher) }),
             logger,
         })
-    const recoverStrategySymbol = options.recoverStrategySymbol
-        ?? createDefaultRecoverStrategySymbolFn({
-            ...(positionFetcher.fetchPositionsForReconciliation === undefined
-                ? {}
-                : { fetchPositionsForReconciliation: positionFetcher.fetchPositionsForReconciliation.bind(positionFetcher) }),
-            logger,
-        })
-
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
         apiSecret: bitflyerConfig.apiSecret,
@@ -453,10 +442,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
             ticker: parsed.ticker,
         }
     }
-
-    const isValidStoredDate = (value: unknown): value is Date => (
-        value instanceof Date && Number.isFinite(value.getTime())
-    )
 
     const tradableSymbolSchema = z.object({
         display_name: z.string().trim().optional(),
@@ -664,19 +649,11 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         const symbolPaused = tradableSymbol?.trade_control?.status === 'paused'
-        const parsedStoredSymbolId = parseValidSymbolId(symbolId)
         const symbolStateInvalid = tradableSymbolStateInvalid || (tradableSymbol !== null && (
-            parsedStoredSymbolId === null ||
             tradableSymbol.id !== symbolId ||
-            tradableSymbol.broker !== parsedStoredSymbolId.broker ||
-            tradableSymbol.ticker !== parsedStoredSymbolId.ticker ||
             tradableSymbol.trade_control === null ||
             typeof tradableSymbol.trade_control !== 'object' ||
-            (tradableSymbol.trade_control.status !== 'active' && tradableSymbol.trade_control.status !== 'paused') ||
-            !isValidStoredDate(tradableSymbol.updated_at) ||
-            !isValidStoredDate(tradableSymbol.trade_control.updated_at) ||
-            (tradableSymbol.trade_control.reason !== undefined && typeof tradableSymbol.trade_control.reason !== 'string') ||
-            (tradableSymbol.trade_control.updated_by !== undefined && typeof tradableSymbol.trade_control.updated_by !== 'string')
+            (tradableSymbol.trade_control.status !== 'active' && tradableSymbol.trade_control.status !== 'paused')
         ))
 
         const createEventOrDuplicate = async (
@@ -1615,50 +1592,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
         } catch (err) {
             logger.warn({ event: 'symbol_trade_control:update_failed', error: err, symbol_id: symbolId }, 'failed to update symbol trade control')
             return c.json(errorBody('INTERNAL_ERROR', 'failed to update symbol trade control'), 500)
-        }
-    })
-
-    app.post('/api/symbols/:symbol_id/reconciliation/recover', requireApiSecret, async (c) => {
-        const symbolId = decodeSymbolIdParam(c.req.param('symbol_id'))
-        if (!parseValidSymbolId(symbolId)) {
-            return c.json(errorBody('INVALID_REQUEST', 'symbol_id is invalid'), 400)
-        }
-
-        try {
-            const result = await recoverStrategySymbol(symbolId)
-            if (result.kind === 'NOT_FOUND') {
-                return c.json(errorBody('NOT_FOUND', 'symbol is not found'), 404)
-            }
-            if (result.kind === 'NO_CHANGE') {
-                return c.json(errorBody('RECONCILIATION_NOT_MISMATCH', 'symbol is not in MISMATCH state'), 409)
-            }
-            if (result.kind === 'BLOCKED') {
-                if (result.reason === 'INDETERMINATE') {
-                    return c.json(errorBody('INTERNAL_ERROR', 'symbol reconciliation state is indeterminate'), 500)
-                }
-                return c.json(errorBody('RECONCILIATION_BLOCKED', `symbol reconciliation recovery is blocked: ${result.reason}`), 409)
-            }
-
-            const operatorPausePreserved = result.kind === 'RECOVERED_STILL_OPERATOR_PAUSED'
-            logger.info({
-                event: 'strategy_symbol_reconciliation:manual_recovery',
-                requested: true,
-                result: result.kind,
-                symbol_id: symbolId,
-                operator_pause_preserved: operatorPausePreserved,
-                transitioned_positions: result.transitionedPositions,
-                totals: result.decision.totals,
-            }, 'strategy symbol reconciliation manual recovery completed')
-            return c.json({
-                status: 'recovered',
-                symbol_id: symbolId,
-                operator_pause_preserved: operatorPausePreserved,
-                transitioned_positions: result.transitionedPositions,
-                totals: result.decision.totals,
-            }, 200)
-        } catch (error) {
-            logger.warn({ event: 'strategy_symbol_reconciliation:manual_recovery', requested: true, result: 'FAILED', symbol_id: symbolId, error }, 'strategy symbol reconciliation manual recovery failed')
-            return c.json(errorBody('INTERNAL_ERROR', 'failed to recover symbol reconciliation state'), 500)
         }
     })
 
