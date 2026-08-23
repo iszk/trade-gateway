@@ -22,4 +22,14 @@ export class DummyClient {
             },
         ]
     }
+
+    /** Dummy positions are already a complete in-memory snapshot. */
+    async getPositionsStrict(): Promise<Position[]> {
+        return this.getPositions()
+    }
+
+    /** Alias used by reconciliation adapters. */
+    async getPositionsForReconciliation(): Promise<Position[]> {
+        return this.getPositionsStrict()
+    }
 }

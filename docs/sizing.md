@@ -110,9 +110,17 @@ entry の約定同期は `orders_v2.id = reservation.event_id = reservation.orde
 - cancel/expire: 約定済み `d` を移した後、`reserved_delta - executed_delta` だけ pending から解放して `SETTLED`
 - fill なしの confirmed `FAILED`: 全 `reserved_delta` を pending から解放して `SETTLED`
 
-同一 snapshot の再適用、10分同期と hourly reconciliation の重複、transaction retry は `executed_delta` との差分計算で no-op になる。requested/reserved size 超過、identity・side・数量の矛盾、同一数量で価格・時刻・commission・metadata が矛盾する snapshot、終端 reservation 後の新規約定は数量を推測修復せず、pending を保持して `MANUAL_REVIEW` とする。非有限値、符号不一致、overflow、破損した保存値も fail-closed とし、orders_v2・reservation・position の一部だけを成功させない。broker aggregate mismatch と backfill は後続タスクで扱う。
+同一 snapshot の再適用、10分同期と hourly reconciliation の重複、transaction retry は `executed_delta` との差分計算で no-op になる。requested/reserved size 超過、identity・side・数量の矛盾、同一数量で価格・時刻・commission・metadata が矛盾する snapshot、終端 reservation 後の新規約定は数量を推測修復せず、pending を保持して `MANUAL_REVIEW` とする。非有限値、符号不一致、overflow、破損した保存値も fail-closed とし、orders_v2・reservation・position の一部だけを成功させない。
 
 policy、symbol の制約、position が存在しない、または保存済み document が壊れている場合は 0 や既定値へ補完せず fail-closed とする。
+
+## broker × symbol position reconciliation
+
+10分 cron の約定同期後に、broker の完全な実positionと strategy ごとの `confirmed_position` を symbol 単位で net 集約する。`pending_delta` は未約定 reservation の監査値として別集約し、broker position との一致判定には混ぜない。複数 strategy の相殺・複数 broker leg は symbol net だけを比較し、帰属不明の差分を任意 strategy に補正しない。
+
+`quantity_step` に依存した ULP 誤差だけを許容するため、`0.1 + 0.2` と `0.3` は一致するが、step=0.1 の経済的な 0.06 差は `MISMATCH` とする。broker 取得失敗、認証欠落、partial response、不正な side/size、保存状態の破損は 0 position に補完せず未判定とする。
+
+MISMATCH では symbol の pause と `READY` position の `MISMATCH` 遷移を適用し、縮小注文を含む全 webhook dispatch を抑止する。複数 strategy の相殺や帰属不明差分があるため、strategy-local な縮小が broker 全体のリスクを必ず減らすとは証明できない。confirmed/pending は変更せず、強制解消注文も発行しない。通常 MATCH は write せず、MISMATCH の解消は fresh broker snapshot、pending の step 許容ゼロ、MANUAL_REVIEW 不在を確認する `POST /api/symbols/:symbol_id/reconciliation/recover` でのみ行う。reconciliation 所有 pause だけを active に戻し、operator pause は維持する。
 
 ## 浮動小数点と fail-closed
 

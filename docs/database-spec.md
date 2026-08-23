@@ -228,6 +228,14 @@ strategy × symbol ごとの仮想 position を保持する runtime state。poli
 
 `MANUAL_REVIEW` は dispatch 結果不明等の状態であり、pending を保持する。`MISMATCH` は broker aggregate との差分を表す停止状態で、差分を strategy へ推測配分しない。
 
+### broker × symbol reconciliation
+
+10分 cron は broker の完全な position snapshot と `strategy_symbol_positions` を symbol 単位で集約する。BUY/long を正、SELL/short を負とし、`strategy_confirmed_total`、`strategy_pending_total`、`strategy_effective_total`（confirmed + pending）、`broker_position_total` を監査用に算出する。複数 strategy / broker leg は net 集約し、差分を個別 strategy へ配分しない。
+
+約定済み broker position と比較するのは confirmed のみで、`delta = broker_position_total - strategy_confirmed_total` とする。`quantity_step` に依存した IEEE 754 の ULP 誤差だけを `compareQuantities` で許容し、半 step の丸めや暗黙補正は行わない。正常に完了した空 snapshot のみ broker position 0 とし、認証欠落、取得失敗、partial snapshot、不正な side/size、symbol/制約/position の破損は未判定として扱う。symbol の identity、broker/ticker、trade-control status が検証できる場合は、timestamp 等の補助フィールドが破損していても数量を推測修復せず、現在時刻の最小 pause 更新だけを適用する。
+
+MISMATCH のときは symbol の `trade_control` を `paused` にし、`READY` position だけを `MISMATCH` に遷移する。`MANUAL_REVIEW`、confirmed、pending、operator 所有の pause は上書きしない。同じ mismatch の再検出は write せず冪等にする。通常の MATCH は position、symbol、数量、timestamp を含めて write しない。MATCH になった MISMATCH は自動復旧せず、API secret 必須の手動復旧で fresh snapshot、pending の step 許容ゼロ、MANUAL_REVIEW 不在、保存値の妥当性を再確認してから `READY` に戻す。reconciliation 所有の pause だけ active に戻し、operator pause は維持する。snapshot collection は追加せず、構造化集約ログを監査の正とする。
+
 ## 7. `strategy_symbol_reservations`
 event 単位の注文 reservation。position document 内の配列や subcollection ではなく、常に top-level の個別 document として保存する。
 

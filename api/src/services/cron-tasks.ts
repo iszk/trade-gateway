@@ -19,6 +19,7 @@ import type {
     ApplyStrategySymbolExecutionSyncFn,
     ApplyStrategySymbolExecutionSyncOutcome,
 } from './strategy-symbol-execution-sync.js'
+import type { ReconciliationRunSummary, RunStrategySymbolReconciliationFn } from './strategy-symbol-reconciliation.js'
 
 type Logger = {
     info(obj: Record<string, unknown>, msg?: string): void
@@ -58,6 +59,8 @@ export type CronContext = {
     addOrderV2?: AddOrderV2Fn
     getOrderV2?: GetOrderV2Fn
     getActiveIfdOrdersV2?: GetActiveIfdOrdersV2Fn
+    /** broker実positionとstrategy仮想positionのsymbol集約照合 */
+    runStrategySymbolReconciliation?: RunStrategySymbolReconciliationFn
 }
 
 const resolveExecutedAt = (order: Pick<OrderV2, 'created_at' | 'executed_at'>, execution: ExecutionSyncInfo): Date => (
@@ -615,6 +618,24 @@ export const executeTenMinutelyTask = async (ctx: CronContext): Promise<void> =>
             getOrderV2: ctx.getOrderV2,
             closingExecutionFetchers: ctx.closingExecutionFetchers,
         })
+    }
+
+    if (ctx.runStrategySymbolReconciliation) {
+        try {
+            const summary: ReconciliationRunSummary = await ctx.runStrategySymbolReconciliation()
+            ctx.logger.info(
+                { event: 'cron:strategy_symbol_reconciliation_completed', ...summary },
+                'strategy symbol reconciliation completed after execution sync',
+            )
+        } catch (error) {
+            // Reconciliation is a safety side task.  A fetch or Firestore
+            // failure must not turn the existing 10-minute execution sync
+            // into a failed cron invocation.
+            ctx.logger.warn(
+                { event: 'cron:strategy_symbol_reconciliation_failed', error },
+                'strategy symbol reconciliation failed',
+            )
+        }
     }
 }
 

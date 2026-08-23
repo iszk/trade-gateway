@@ -1942,3 +1942,43 @@ test('executeTenMinutelyTask: policy-backed entry は atomic execution applier �
     assert.equal(calls.length, 1)
     assert.equal(calls[0]?.orderId, order.id)
 })
+
+test('executeTenMinutelyTask: execution sync後にsymbol reconciliationを呼び、失敗を隔離する', async () => {
+    const order: any = {
+        id: 'reconciliation-cron-entry',
+        strategy: 'cron-strategy',
+        broker: 'bitflyer',
+        ticker: 'BTC_JPY',
+        side: 'BUY',
+        order_type: 'MARKET',
+        requested_size: 1,
+        executed_size: 0,
+        executed_price: null,
+        status: 'PENDING',
+        provider_order_ids: ['provider-reconciliation-cron'],
+        created_at: new Date('2026-01-01T00:00:00.000Z'),
+        updated_at: new Date('2026-01-01T00:00:00.000Z'),
+    }
+    const calls: string[] = []
+    const { logger, logs } = makeLogger()
+    await executeTenMinutelyTask(makeBaseCtx({
+        logger,
+        getPendingOrdersV2: async () => {
+            calls.push('execution-sync')
+            return [order]
+        },
+        updateOrderV2: async () => { },
+        executionPriceFetchers: {
+            bitflyer: {
+                getExecutionPriceForOrderV2: async () => ({ execution: null }),
+            },
+        },
+        runStrategySymbolReconciliation: async () => {
+            calls.push('reconciliation')
+            throw new Error('reconciliation unavailable')
+        },
+    }))
+
+    assert.deepEqual(calls, ['execution-sync', 'reconciliation'])
+    assert.equal(logs.some((log) => log.event === 'cron:strategy_symbol_reconciliation_failed'), true)
+})

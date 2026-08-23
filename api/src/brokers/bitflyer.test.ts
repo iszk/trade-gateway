@@ -292,6 +292,26 @@ test('BitflyerClient.getPositions fetches each requested product code', async ()
     assert.deepEqual(result.map((position) => position.ticker), ['FX_BTC_JPY', 'BTC_JPY'])
 })
 
+test('BitflyerClient.getPositionsStrict propagates a partial ticker failure', async () => {
+    let requestCount = 0
+    const client = new BitflyerClient({
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => {
+            requestCount += 1
+            if (requestCount === 2) return new Response('temporary failure', { status: 503 })
+            return new Response(JSON.stringify([]), { status: 200 })
+        },
+    })
+
+    await assert.rejects(
+        client.getPositionsStrict(['FX_BTC_JPY', 'BTC_JPY']),
+        /503/,
+    )
+    assert.equal(requestCount, 2)
+})
+
 test('BitflyerClient uses IFD when stopLoss is provided with price', async () => {
     let capturedUrl = ''
     let capturedBody = ''
