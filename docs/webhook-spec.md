@@ -194,6 +194,8 @@ decision の拒否は `400`、抑止は `202` で、いずれも `event_id` と 
 
 `strategy_id` がない場合、legacy `strategy` の前後空白を除去し、連続 whitespace を `_` に変換した値を policy lookup に使用する。どちらもない場合は `unknown` を使用する。legacy `strategy` は orders の表示値として保持し、event ID 生成規則には `strategy_id` を追加しない。
 
+policy-backed dispatch で保存する `orders_v2` には、表示用 `strategy` と別に解決済みの `effective_strategy_id` を保存する。execution sync はこの値を優先し、欠落した legacy order だけ同じ trim / whitespace normalization を適用する。explicit ID と legacy 表示値が異なる既存 order を自動推測・書き換えしない。
+
 policy 未登録時は `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK=true`（既定値）の間だけ、正の `size` を必須とする既存 dispatch path を使用する。この fallback は sizing mode ではない。`false` にすると `POLICY_NOT_FOUND` を返して発注しない。環境変数は `true` または `false` 以外を許可しない。
 
 ## ログ仕様
