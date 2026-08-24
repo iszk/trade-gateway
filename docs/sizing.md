@@ -110,7 +110,7 @@ entry の約定同期は `orders_v2.id = reservation.event_id = reservation.orde
 - cancel/expire: 約定済み `d` を移した後、`reserved_delta - executed_delta` だけ pending から解放して `SETTLED`
 - fill なしの confirmed `FAILED`: 全 `reserved_delta` を pending から解放して `SETTLED`
 
-同一 snapshot の再適用、10分同期と hourly reconciliation の重複、transaction retry は `executed_delta` との差分計算で no-op になる。requested/reserved size 超過、identity・side・数量の矛盾、同一数量で価格・時刻・commission・metadata が矛盾する snapshot、終端 reservation 後の新規約定は数量を推測修復せず、pending を保持して `MANUAL_REVIEW` とする。非有限値、符号不一致、overflow、破損した保存値も fail-closed とし、orders_v2・reservation・position の一部だけを成功させない。
+同一 snapshot の再適用、10分の entry execution 同期と Saxo の hourly execution reconciliation の重複、transaction retry は `executed_delta` との差分計算で no-op になる。requested/reserved size 超過、identity・side・数量の矛盾、同一数量で価格・時刻・commission・metadata が矛盾する snapshot、終端 reservation 後の新規約定は数量を推測修復せず、pending を保持して `MANUAL_REVIEW` とする。非有限値、符号不一致、overflow、破損した保存値も fail-closed とし、orders_v2・reservation・position の一部だけを成功させない。
 
 policy、symbol の制約、position が存在しない、または保存済み document が壊れている場合は 0 や既定値へ補完せず fail-closed とする。
 

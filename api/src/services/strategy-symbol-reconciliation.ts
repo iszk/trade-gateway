@@ -38,6 +38,13 @@ type ReconciliationFailureReason =
     | 'POSITION_INVALID'
     | 'ARITHMETIC_OVERFLOW'
 
+type AggregationFailureReason =
+    | 'BROKER_SNAPSHOT_INVALID'
+    | 'SYMBOL_INVALID'
+    | 'SYMBOL_CONSTRAINTS_INVALID'
+    | 'POSITION_INVALID'
+    | 'ARITHMETIC_OVERFLOW'
+
 export type ReconciliationTotals = {
     symbolId: string
     broker: BrokerName
@@ -86,6 +93,7 @@ type ReconciliationMismatchDetail = {
 }
 
 export type ReconciliationRunSummary = {
+    /** Counts evaluated symbols; matched + mismatched + indeterminate equals checked. */
     checked: number
     matched: number
     mismatched: number
@@ -263,85 +271,121 @@ const emptyStatusCounts = (): Record<StrategySymbolPositionStatus, number> => ({
     MISMATCH: 0,
 })
 
-/** Aggregate strategy and broker quantities for one broker symbol. */
-export const aggregateSymbolReconciliation = (
+type ReconciliationAggregationResult =
+    | { ok: true; totals: ReconciliationTotals }
+    | { ok: false; reason: AggregationFailureReason }
+
+/** Aggregate strategy and broker quantities for one broker symbol with a failure reason. */
+const aggregateSymbolReconciliationResult = (
     input: StrategySymbolReconciliationInput,
-): ReconciliationTotals | null => {
-    const parsedId = parseSymbolId(input.symbol.id)
+): ReconciliationAggregationResult => {
+    const symbol = input?.symbol
+    if (!isRecord(symbol) || typeof symbol.id !== 'string') {
+        return { ok: false, reason: 'SYMBOL_INVALID' }
+    }
+
+    const parsedId = parseSymbolId(symbol.id)
     if (
         parsedId === null ||
-        !isBrokerName(input.symbol.broker) ||
-        parsedId.broker !== input.symbol.broker ||
-        parsedId.ticker !== input.symbol.ticker ||
-        !isValidTicker(input.symbol.ticker) ||
-        !isValidConstraints(input.symbol.order_constraints)
-    ) return null
+        !isBrokerName(symbol.broker) ||
+        parsedId.broker !== symbol.broker ||
+        !isValidTicker(symbol.ticker) ||
+        parsedId.ticker !== symbol.ticker
+    ) return { ok: false, reason: 'SYMBOL_INVALID' }
+    if (!isValidConstraints(symbol.order_constraints)) {
+        return { ok: false, reason: 'SYMBOL_CONSTRAINTS_INVALID' }
+    }
+
+    if (!Array.isArray(input?.strategyPositions)) {
+        return { ok: false, reason: 'POSITION_INVALID' }
+    }
 
     let confirmedTotal = 0
     let pendingTotal = 0
     const statusCounts = emptyStatusCounts()
     for (const position of input.strategyPositions) {
+        if (!isRecord(position)) return { ok: false, reason: 'POSITION_INVALID' }
         if (
-            position.symbol_id !== input.symbol.id ||
+            position.symbol_id !== symbol.id ||
             typeof position.strategy_id !== 'string' ||
             position.strategy_id.trim().length === 0 ||
             !isFiniteQuantity(position.confirmed_position) ||
             !isFiniteQuantity(position.pending_delta) ||
             !isPositionStatus(position.status)
-        ) return null
+        ) return { ok: false, reason: 'POSITION_INVALID' }
         const nextConfirmed = addQuantities(confirmedTotal, position.confirmed_position)
         const nextPending = addQuantities(pendingTotal, position.pending_delta)
-        if (nextConfirmed === null || nextPending === null) return null
+        if (nextConfirmed === null || nextPending === null) {
+            return { ok: false, reason: 'ARITHMETIC_OVERFLOW' }
+        }
         confirmedTotal = nextConfirmed
         pendingTotal = nextPending
         statusCounts[position.status] += 1
+    }
+
+    if (!Array.isArray(input?.brokerPositions)) {
+        return { ok: false, reason: 'BROKER_SNAPSHOT_INVALID' }
     }
 
     let brokerTotal = 0
     for (const position of input.brokerPositions) {
         if (
             !isRecord(position) ||
-            position.broker !== input.symbol.broker ||
+            position.broker !== symbol.broker ||
             !isValidTicker(position.ticker) ||
             (position.side !== 'BUY' && position.side !== 'SELL') ||
             !isFiniteQuantity(position.size) ||
             position.size < 0
-        ) return null
-        if (position.ticker !== input.symbol.ticker) continue
+        ) return { ok: false, reason: 'BROKER_SNAPSHOT_INVALID' }
+        if (position.ticker !== symbol.ticker) continue
         const signed = signedSize(position.size, position.side)
-        if (signed === null) return null
+        if (signed === null) return { ok: false, reason: 'BROKER_SNAPSHOT_INVALID' }
         const nextBroker = addQuantities(brokerTotal, signed)
-        if (nextBroker === null) return null
+        if (nextBroker === null) return { ok: false, reason: 'ARITHMETIC_OVERFLOW' }
         brokerTotal = nextBroker
     }
 
     const effectiveTotal = addQuantities(confirmedTotal, pendingTotal)
     const delta = subtractQuantities(brokerTotal, confirmedTotal)
-    if (effectiveTotal === null || delta === null) return null
+    if (effectiveTotal === null || delta === null) {
+        return { ok: false, reason: 'ARITHMETIC_OVERFLOW' }
+    }
 
     return {
-        symbolId: input.symbol.id,
-        broker: input.symbol.broker,
-        ticker: input.symbol.ticker,
-        quantityStep: input.symbol.order_constraints.quantity_step,
-        strategyConfirmedTotal: confirmedTotal,
-        strategyPendingTotal: pendingTotal,
-        strategyEffectiveTotal: effectiveTotal,
-        brokerPositionTotal: brokerTotal,
-        delta,
-        strategyCount: input.strategyPositions.length,
-        statusCounts,
+        ok: true,
+        totals: {
+            symbolId: symbol.id,
+            broker: symbol.broker,
+            ticker: symbol.ticker,
+            quantityStep: symbol.order_constraints.quantity_step,
+            strategyConfirmedTotal: confirmedTotal,
+            strategyPendingTotal: pendingTotal,
+            strategyEffectiveTotal: effectiveTotal,
+            brokerPositionTotal: brokerTotal,
+            delta,
+            strategyCount: input.strategyPositions.length,
+            statusCounts,
+        },
     }
+}
+
+/** Aggregate strategy and broker quantities for one broker symbol. */
+export const aggregateSymbolReconciliation = (
+    input: StrategySymbolReconciliationInput,
+): ReconciliationTotals | null => {
+    const result = aggregateSymbolReconciliationResult(input)
+    return result.ok ? result.totals : null
 }
 
 /** Decide MATCH/MISMATCH using only confirmed position; pending is audit data. */
 export const decideSymbolReconciliation = (
     input: StrategySymbolReconciliationInput,
 ): SymbolReconciliationDecision => {
-    const totals = aggregateSymbolReconciliation(input)
-    if (totals === null) {
-        return { kind: 'INDETERMINATE', reason: 'ARITHMETIC_OVERFLOW' }
+    const aggregate = aggregateSymbolReconciliationResult(input)
+    if (!aggregate.ok) {
+        return { kind: 'INDETERMINATE', reason: aggregate.reason }
     }
+    const totals = aggregate.totals
     const comparison = compareQuantities(
         totals.brokerPositionTotal,
         totals.strategyConfirmedTotal,
@@ -461,8 +505,9 @@ const createService = (options: StrategySymbolReconciliationServiceOptions = {})
         try {
             symbols = await listTradableSymbols()
         } catch (error) {
-            summary.indeterminate += 1
-            logger.warn({ event: 'strategy_symbol_reconciliation:run_summary', reason: 'SYMBOL_LIST_FAILED', error }, 'symbol reconciliation could not list symbols')
+            // No symbol was observed, so per-symbol counters remain zero. The
+            // collection-level failure reason is carried by the warning log.
+            logger.warn({ event: 'strategy_symbol_reconciliation:run_summary', reason: 'SYMBOL_LIST_FAILED', ...summary, error }, 'symbol reconciliation could not list symbols')
             return summary
         }
 
@@ -470,8 +515,9 @@ const createService = (options: StrategySymbolReconciliationServiceOptions = {})
         try {
             storedPositions = await readStoredPositions(db)
         } catch (error) {
+            summary.checked = symbols.length
             summary.indeterminate += symbols.length
-            logger.warn({ event: 'strategy_symbol_reconciliation:run_summary', reason: 'POSITION_LIST_FAILED', error }, 'symbol reconciliation could not list positions')
+            logger.warn({ event: 'strategy_symbol_reconciliation:run_summary', reason: 'POSITION_LIST_FAILED', ...summary, error }, 'symbol reconciliation could not list positions')
             return summary
         }
 

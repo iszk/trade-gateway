@@ -274,7 +274,7 @@ dispatch outcome の更新も reservation と position を同一 transaction で
 
 ### entry execution の反映
 
-`orders_v2.id`、reservation の `event_id` / `order_id` が同じ event ID であることを関連付けの正とする。10分同期、Saxo の hourly reconciliation、IFDOCO metadata recovery 後の execution は `strategy-symbol-execution-sync` の同一 transaction を通り、transaction 内で再読込した最新の `orders_v2`、reservation、position をまとめて更新する。reservation がない legacy/fallback 注文は従来どおり `orders_v2` だけを更新する。
+`orders_v2.id`、reservation の `event_id` / `order_id` が同じ event ID であることを関連付けの正とする。10分の entry execution 同期、Saxo の hourly execution reconciliation、IFDOCO metadata recovery 後の execution は `strategy-symbol-execution-sync` の同一 transaction を通り、transaction 内で再読込した最新の `orders_v2`、reservation、position をまとめて更新する。reservation がない legacy/fallback 注文は従来どおり `orders_v2` だけを更新する。
 
 約定量は snapshot の累積 `executed_size` を reservation の符号へ変換し、`executed_delta` との差分だけを適用する。差分 `d` に対して `confirmed_position += d`、`pending_delta -= d` とし、partial fill は `DISPATCHED` のまま未約定分を保持する。full fill は `SETTLED` とし、cancel/expire/failed は適用済み約定を確定したうえで `reserved_delta - executed_delta` を pending から解放して `SETTLED` とする。重複・stale snapshot は最大適用済み累積量から再計算し、cron の再実行や transaction retry で二重加算しない。
 
