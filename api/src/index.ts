@@ -41,6 +41,12 @@ import {
 import type {
     ApplyStrategySymbolExecutionSyncFn,
 } from './services/strategy-symbol-execution-sync.js'
+import {
+    createDefaultRunStrategySymbolReconciliationFn,
+} from './services/strategy-symbol-reconciliation.js'
+import type {
+    RunStrategySymbolReconciliationFn,
+} from './services/strategy-symbol-reconciliation.js'
 
 import { defaultLogger, type Logger } from './logger.js'
 
@@ -226,6 +232,7 @@ const extractTraceContext = (headers: Headers): Record<string, unknown> => {
 
 type PositionFetcherLike = {
     fetchAllPositions(broker?: BrokerName): Promise<Position[]>
+    fetchPositionsForReconciliation?(broker: BrokerName): Promise<Position[]>
 }
 
 type SaxoPortfolioSnapshotClient = Pick<SaxoClient, 'getPortfolioSnapshot'>
@@ -278,6 +285,7 @@ type CreateAppOptions = {
     putStrategySymbolPolicy?: PutStrategySymbolPolicyFn
     reserveStrategySymbolOrder?: ReserveStrategySymbolOrderFn
     applyStrategySymbolDispatchOutcome?: ApplyStrategySymbolDispatchOutcomeFn
+    runStrategySymbolReconciliation?: RunStrategySymbolReconciliationFn
     allowUnregisteredStrategyPolicyFallback?: boolean
 }
 
@@ -319,7 +327,14 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const applyStrategySymbolDispatchOutcome = options.applyStrategySymbolDispatchOutcome ?? createDefaultApplyStrategySymbolDispatchOutcomeFn()
     const allowUnregisteredStrategyPolicyFallback = options.allowUnregisteredStrategyPolicyFallback
         ?? config.webhook.allowUnregisteredStrategyPolicyFallback
-
+    const runStrategySymbolReconciliation = options.runStrategySymbolReconciliation
+        ?? createDefaultRunStrategySymbolReconciliationFn({
+            ...(options.listTradableSymbols === undefined ? {} : { listTradableSymbols }),
+            ...(positionFetcher.fetchPositionsForReconciliation === undefined
+                ? {}
+                : { fetchPositionsForReconciliation: positionFetcher.fetchPositionsForReconciliation.bind(positionFetcher) }),
+            logger,
+        })
     const bitflyerClient = new BitflyerClient({
         apiKey: bitflyerConfig.apiKey,
         apiSecret: bitflyerConfig.apiSecret,
@@ -351,6 +366,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
         addOrderV2,
         getOrderV2,
         getActiveIfdOrdersV2,
+        runStrategySymbolReconciliation,
     }
 
     const logWebhook = (

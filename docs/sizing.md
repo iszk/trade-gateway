@@ -110,9 +110,17 @@ entry の約定同期は `orders_v2.id = reservation.event_id = reservation.orde
 - cancel/expire: 約定済み `d` を移した後、`reserved_delta - executed_delta` だけ pending から解放して `SETTLED`
 - fill なしの confirmed `FAILED`: 全 `reserved_delta` を pending から解放して `SETTLED`
 
-同一 snapshot の再適用、10分同期と hourly reconciliation の重複、transaction retry は `executed_delta` との差分計算で no-op になる。requested/reserved size 超過、identity・side・数量の矛盾、同一数量で価格・時刻・commission・metadata が矛盾する snapshot、終端 reservation 後の新規約定は数量を推測修復せず、pending を保持して `MANUAL_REVIEW` とする。非有限値、符号不一致、overflow、破損した保存値も fail-closed とし、orders_v2・reservation・position の一部だけを成功させない。broker aggregate mismatch と backfill は後続タスクで扱う。
+同一 snapshot の再適用、10分の entry execution 同期と Saxo の hourly execution reconciliation の重複、transaction retry は `executed_delta` との差分計算で no-op になる。requested/reserved size 超過、identity・side・数量の矛盾、同一数量で価格・時刻・commission・metadata が矛盾する snapshot、終端 reservation 後の新規約定は数量を推測修復せず、pending を保持して `MANUAL_REVIEW` とする。非有限値、符号不一致、overflow、破損した保存値も fail-closed とし、orders_v2・reservation・position の一部だけを成功させない。
 
 policy、symbol の制約、position が存在しない、または保存済み document が壊れている場合は 0 や既定値へ補完せず fail-closed とする。
+
+## broker × symbol position reconciliation
+
+10分 cron の約定同期後に、broker の完全な実positionと strategy ごとの `confirmed_position` を symbol 単位で net 集約する。`pending_delta` は未約定 reservation の監査値として別集約し、broker position との一致判定には混ぜない。複数 strategy の相殺・複数 broker leg は symbol net だけを比較し、帰属不明の差分を任意 strategy に補正しない。
+
+`quantity_step` に依存した ULP 誤差だけを許容するため、`0.1 + 0.2` と `0.3` は一致するが、step=0.1 の経済的な 0.06 差は `MISMATCH` とする。broker 取得失敗、認証欠落、partial response、不正な side/size、保存状態の破損は 0 position に補完せず未判定とする。
+
+MISMATCH、INDETERMINATE、broker fetch failure は警告ログだけを残し、symbol pause、position status/quantity、reservation、orders、webhook dispatch を変更しない。手動売買による broker excess/shortage も同じ MISMATCH として集約し、差分の配分や自動解消注文は行わない。通常 MATCH も write せず、復旧 API や reconciliation 所有の pause は設けない。
 
 ## 浮動小数点と fail-closed
 

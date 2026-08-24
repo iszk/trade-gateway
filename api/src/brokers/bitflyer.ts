@@ -559,6 +559,41 @@ export class BitflyerClient {
         return positions
     }
 
+    /**
+     * Return an all-or-nothing position snapshot for reconciliation.
+     *
+     * `getPositions` intentionally keeps the legacy best-effort behaviour used
+     * by the positions API.  A reconciliation snapshot must never silently
+     * omit one product code, so the first provider error is propagated and no
+     * partial array is returned.
+     */
+    async getPositionsStrict(productCodes: string[] = DEFAULT_POSITION_PRODUCT_CODES): Promise<Position[]> {
+        const uniqueProductCodes = [...new Set(productCodes.map((code) => code.trim()).filter((code) => code.length > 0))]
+        const targets = uniqueProductCodes.length > 0 ? uniqueProductCodes : DEFAULT_POSITION_PRODUCT_CODES
+        const positions: Position[] = []
+
+        for (const productCode of targets) {
+            const path = `${GET_POSITIONS_PATH}?product_code=${encodeURIComponent(productCode)}`
+            const results = await this.callApi<BitflyerPositionResponse[]>('GET', path)
+
+            positions.push(...results.map((res) => ({
+                broker: 'bitflyer' as const,
+                ticker: res.product_code,
+                side: res.side as Position['side'],
+                size: res.size,
+                price: res.price,
+                pnl: res.pnl,
+            })))
+        }
+
+        return positions
+    }
+
+    /** Alias used by reconciliation adapters. */
+    async getPositionsForReconciliation(productCodes: string[] = DEFAULT_POSITION_PRODUCT_CODES): Promise<Position[]> {
+        return this.getPositionsStrict(productCodes)
+    }
+
     async getBalances(): Promise<BitflyerBalanceResponse[]> {
         try {
             return await this.callApi<BitflyerBalanceResponse[]>('GET', GET_BALANCE_PATH)

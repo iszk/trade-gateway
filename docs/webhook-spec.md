@@ -176,6 +176,8 @@ alert(json.stringify(
 - `order_dispatch_logs.error_code`: `SYMBOL_PAUSED`
 - レスポンス: `202 Accepted`
 
+broker × symbol reconciliation は read-only の監視であり、差分や取得失敗を検出しても symbol pause、`POSITION_NOT_READY`、縮小を含む webhook 抑止を追加しない。手動売買による broker excess/shortage も同じ MISMATCH 集約ログへ残るが、Webhook の受付・dispatch は既存の trade-control と sizing policy の契約に従う。保存状態が不正な場合も reconciliation は write せず、警告ログだけを残す。
+
 ### Sizing policy による webhook 判定
 
 symbol が active で strategy-symbol policy が登録されている場合、Webhook は strategy、symbol、position、同一 event の reservation を atomic reservation transaction で読み、同じ snapshot の `calculateOrderSize` の decision を発注承認に使用する。`DISPATCH` のときだけ reservation の作成と position の `pending_delta` 加算を commit し、transaction が返した `effective_size` を broker、`orders_v2`、dispatch log のすべてに渡す。独立 read した position や webhook の `size` を発注数量として再利用しない。

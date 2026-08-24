@@ -501,6 +501,42 @@ test('SaxoClient.getBalances returns empty list when auth token is unavailable',
     assert.deepEqual(result, [])
 })
 
+test('SaxoClient.getPositionsStrict rejects missing authentication instead of returning zero positions', async () => {
+    const client = new SaxoClient({ db: mockFirestore() })
+    await assert.rejects(client.getPositionsStrict(), /access token is unavailable/)
+})
+
+test('SaxoClient.getPositionsStrict returns a complete net-position snapshot', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': {
+            accessToken: 'valid-token',
+            refreshToken: 'refresh-token',
+            accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+            refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        },
+    })
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async () => new Response(JSON.stringify({
+            Data: [{
+                NetPositionId: 'FxSpot:21__account-1',
+                NetPositionBase: { Amount: 2, OpeningDirection: 'Sell' },
+                NetPositionView: { AverageOpenPrice: 1.2, ProfitLossOnTrade: -3 },
+            }],
+        }), { status: 200 }),
+    })
+
+    assert.deepEqual(await client.getPositionsStrict(), [{
+        broker: 'saxo',
+        ticker: 'FxSpot:21',
+        side: 'SELL',
+        size: 2,
+        price: 1.2,
+        pnl: -3,
+    }])
+})
+
 test('SaxoClient.getPortfolioSnapshot maps CFD value to equity contribution and caches instruments per client', async () => {
     const db = mockFirestore({
         'saxo_auth_data/saxo_auth': {

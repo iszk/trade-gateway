@@ -96,3 +96,64 @@ test('PositionFetcher skips bitflyer positions when no bitflyer symbols are conf
     assert.deepEqual(requestedProductCodes, [])
     assert.deepEqual(positions, [])
 })
+
+test('PositionFetcher reconciliation path propagates Bitflyer strict snapshot failures', async () => {
+    const fetcher = new PositionFetcher({
+        bitflyerClient: {
+            getPositions: async () => [],
+            getPositionsForReconciliation: async () => { throw new Error('second ticker failed') },
+        },
+        dummyClient: { getPositions: async () => [] },
+        saxoClient: { getPositions: async () => [] },
+        listTradableSymbols: async () => [makeSymbol('BTC_JPY')],
+    })
+
+    await assert.rejects(
+        fetcher.fetchPositionsForReconciliation('bitflyer'),
+        /second ticker failed/,
+    )
+})
+
+test('PositionFetcher reconciliation path does not turn symbol-list failure into an empty snapshot', async () => {
+    const fetcher = new PositionFetcher({
+        bitflyerClient: {
+            getPositions: async () => [],
+        },
+        dummyClient: { getPositions: async () => [] },
+        saxoClient: { getPositions: async () => [] },
+        listTradableSymbols: async () => { throw new Error('firestore unavailable') },
+    })
+
+    await assert.rejects(
+        fetcher.fetchPositionsForReconciliation('bitflyer'),
+        /firestore unavailable/,
+    )
+})
+
+test('PositionFetcher does not fallback to Bitflyer best-effort positions without a strict seam', async () => {
+    const fetcher = new PositionFetcher({
+        bitflyerClient: { getPositions: async () => [{ broker: 'bitflyer', ticker: 'BTC_JPY', side: 'BUY', size: 1 }] },
+        dummyClient: { getPositions: async () => [] },
+        saxoClient: { getPositions: async () => [] },
+        listTradableSymbols: async () => [makeSymbol('BTC_JPY')],
+    })
+
+    await assert.rejects(
+        fetcher.fetchPositionsForReconciliation('bitflyer'),
+        /bitflyer reconciliation strict position seam is unavailable/,
+    )
+})
+
+test('PositionFetcher does not fallback to Saxo best-effort positions without a strict seam', async () => {
+    const fetcher = new PositionFetcher({
+        bitflyerClient: { getPositions: async () => [] },
+        dummyClient: { getPositions: async () => [] },
+        saxoClient: { getPositions: async () => [{ broker: 'saxo', ticker: 'EURUSD', side: 'BUY', size: 1 }] },
+        listTradableSymbols: async () => [makeSymbol('EURUSD', 'saxo')],
+    })
+
+    await assert.rejects(
+        fetcher.fetchPositionsForReconciliation('saxo'),
+        /saxo reconciliation strict position seam is unavailable/,
+    )
+})

@@ -2406,6 +2406,66 @@ export class SaxoClient {
         }))
     }
 
+    /**
+     * Return a complete position snapshot for reconciliation.
+     *
+     * The public positions endpoint historically treats a missing Saxo token
+     * as an empty result.  That is unsafe for aggregate reconciliation, where
+     * an absent token must not be interpreted as a flat account.  This seam
+     * therefore propagates authentication and HTTP failures to the caller.
+     */
+    async getPositionsStrict(): Promise<Position[]> {
+        const accessToken = await this.getValidAccessToken()
+        if (!accessToken) {
+            throw new Error('Saxo access token is unavailable')
+        }
+
+        const response = await this.fetchImpl(`${this.baseUrl}/port/v1/netpositions/me`, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+            },
+        })
+
+        if (!response.ok) {
+            const body = await response.text()
+            throw new Error(`Failed to fetch Saxo positions: ${response.status} ${body}`)
+        }
+
+        const data = (await response.json()) as SaxoNetPositionsResponse
+        if (!data || !Array.isArray(data.Data)) {
+            throw new Error('Invalid Saxo positions response')
+        }
+
+        for (const item of data.Data) {
+            if (!item ||
+                typeof item.NetPositionId !== 'string' ||
+                item.NetPositionId.trim().length === 0 ||
+                !item.NetPositionBase ||
+                (item.NetPositionBase.OpeningDirection !== 'Buy' && item.NetPositionBase.OpeningDirection !== 'Sell') ||
+                typeof item.NetPositionBase.Amount !== 'number' ||
+                !Number.isFinite(item.NetPositionBase.Amount) ||
+                item.NetPositionBase.Amount < 0 ||
+                !item.NetPositionView ||
+                typeof item.NetPositionView !== 'object') {
+                throw new Error('Invalid Saxo positions response')
+            }
+        }
+
+        return data.Data.map((item) => ({
+            broker: 'saxo' as const,
+            ticker: item.NetPositionId.split('__')[0] ?? item.NetPositionId,
+            side: item.NetPositionBase.OpeningDirection === 'Buy' ? 'BUY' : 'SELL',
+            size: item.NetPositionBase.Amount,
+            price: item.NetPositionView.AverageOpenPrice,
+            pnl: item.NetPositionView.ProfitLossOnTrade,
+        }))
+    }
+
+    /** Alias used by reconciliation adapters. */
+    async getPositionsForReconciliation(): Promise<Position[]> {
+        return this.getPositionsStrict()
+    }
+
     async getBalances(): Promise<Balance[]> {
         const accessToken = await this.getValidAccessToken()
         if (!accessToken) {
