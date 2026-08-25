@@ -188,6 +188,31 @@ test('SELL execution keeps the reservation and position signs symmetric', async 
     assert.equal(read<RawData>(db, 'strategy_symbol_reservations', reservation.id).executed_delta, -0.4)
 })
 
+test('execution sync follows persisted effective strategy ID instead of display strategy', async () => {
+    const db = makeFirestoreMock()
+    const effectiveStrategyId = 'effective-execution'
+    const effectivePositionId = createStrategySymbolPositionId(effectiveStrategyId, symbolId)
+    const order = makeOrder({
+        strategy: 'Display Name',
+        effective_strategy_id: effectiveStrategyId,
+    })
+    const reservation = makeReservation({
+        id: createStrategySymbolReservationId(effectiveStrategyId, symbolId, order.id),
+        position_id: effectivePositionId,
+        strategy_id: effectiveStrategyId,
+    })
+    const position = makePosition({
+        id: effectivePositionId,
+        strategy_id: effectiveStrategyId,
+    })
+    seed(db, order, reservation, position)
+
+    const result = await createApplyStrategySymbolExecutionSyncFn(db)(order, applyResult(0.4))
+    assert.equal(result.reservation, 'UPDATED')
+    assert.equal(read<RawData>(db, 'strategy_symbol_positions', effectivePositionId).confirmed_position, 0.4)
+    assert.equal(read<RawData>(db, 'strategy_symbol_positions', positionId), undefined)
+})
+
 test('stale execution does not roll back the latest order or virtual position', async () => {
     const db = makeFirestoreMock()
     seed(db)

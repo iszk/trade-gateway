@@ -1812,6 +1812,7 @@ test('POST /api/webhooks/tradingview policy-backed DISPATCH propagates effective
     assert.equal(fixture.dispatchCalls[0]?.size, 0.1)
     assert.equal(fixture.addedOrders.length, 1)
     assert.equal((fixture.addedOrders[0] as { requested_size?: number }).requested_size, 0.1)
+    assert.equal((fixture.addedOrders[0] as { effective_strategy_id?: string }).effective_strategy_id, 'alpha')
     assert.equal(fixture.logs.length, 1)
     assert.equal(fixture.logs[0]?.size, 0.1)
     assert.equal(fixture.logs[0]?.effective_size, 0.1)

@@ -25,8 +25,13 @@ export type SaxoIfdocoRecoveryState = {
 type BaseOrderV2 = {
     /** 注文のユニークID（WebhookのeventIdなど） */
     id: string
-    /** 集計の唯一の軸となる戦略名 */
+    /** 既存画面・統計へ表示する legacy 戦略値 */
     strategy: string
+    /**
+     * policy/reservation が使用した正規化済み strategy ID。
+     * legacy 注文では欠落するため optional とし、表示用の strategy は変更しない。
+     */
+    effective_strategy_id?: string
     /** 取引所名 */
     broker: BrokerName
     /** 取引ペア */

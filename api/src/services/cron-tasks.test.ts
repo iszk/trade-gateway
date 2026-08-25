@@ -1833,6 +1833,7 @@ test('executeTenMinutelyTask: Saxo の closingExecutionFetcher で exit レコ�
     const order: any = {
         id: 'v2-saxo-ifd',
         strategy: 'saxo-strategy',
+        effective_strategy_id: 'saxo_policy',
         broker: 'saxo',
         ticker: 'FxSpot:21',
         side: 'BUY',
@@ -1864,6 +1865,7 @@ test('executeTenMinutelyTask: Saxo の closingExecutionFetcher で exit レコ�
     assert.equal(addedOrders.length, 1)
     assert.equal(addedOrders[0].id, 'v2-saxo-ifd-exit')
     assert.equal(addedOrders[0].broker, 'saxo')
+    assert.equal(addedOrders[0].effective_strategy_id, 'saxo_policy')
     assert.equal(addedOrders[0].executed_price, 105)
     assert.deepEqual(updatedOrders[0], { id: 'v2-saxo-ifd', exit_sync_status: 'COMPLETED' })
 })

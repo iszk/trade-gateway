@@ -141,3 +141,9 @@ Webhook route は登録済み policy の strategy、symbol 制約、仮想 posit
 broker 成功後に `orders_v2` または dispatch log の保存が失敗しても HTTP は `202` を維持する。provider order ID、event / order / reservation ID、effective size を構造化ログへ残し、orders 保存失敗は reservation を release せず `UNKNOWN` / `MANUAL_REVIEW` とする。明確な broker 拒否だけを `CONFIRMED_FAILURE` として release し、成功かつ追跡保存完了時だけ `CONFIRMED_SUCCESS` として `DISPATCHED` にする。policy-backed dry-run は atomic reservation / sizing と実 payload 検証を行うが `orders_v2` を作成せず、dispatch log に `dry_run: true`、`DRY_RUN`、effective size と sizing 監査情報を保存して reservation を `CONFIRMED_FAILURE` / `RELEASED` に戻す。dry-run dispatcher が UNKNOWN を返しても外部送信なしが保証されるため同じ release を適用し、release 失敗時は安全側に保持して構造化ログを残す。policy 未登録時の既存 dispatch は `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK` による互換経路として維持し、policy 専用監査 field は optional とする。
 
 policy が未登録の場合の既存 dispatch は、移行用 `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK` が `true` のときだけ許可する。これは第三の sizing mode ではなく、policy 登録までの互換 fallback である。
+
+## 既存 orders_v2 の identity と移行
+
+`orders_v2.strategy` は既存画面・統計との互換性のため表示値として保持する。policy-backed の新規注文だけは、webhook で解決した正規化済み ID を optional な `effective_strategy_id` に保存し、reservation・position・execution sync の identity に使用する。既存注文でこの値が欠落している場合、execution sync は legacy `strategy` を trim し、連続 whitespace を `_` に置換して `[A-Za-z0-9_-]+` を満たす場合だけ解決する。明示 ID と legacy 表示値が一致しない既存注文を推測で補正しない。
+
+既存データの backfill は [sizing-migration.md](./sizing-migration.md) の検証付き CLI を使用する。CLI は既定で dry-run であり、`orders_v2` を全件 strict 検証して strategy × symbol の confirmed / pending を再構築する。`PENDING` ごとに reservation 候補を作るが、strategy 未設定・unknown・invalid・manifest 未登録、破損数量、broker snapshot 不明、broker 差分、既存 state conflict がある symbol は policy を有効化せず BLOCKED とする。broker の実 position と照合する際は pending を含めず、差分を `manual_trade_candidate` として報告するだけで strategy へ配分しない。

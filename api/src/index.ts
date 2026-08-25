@@ -47,6 +47,7 @@ import {
 import type {
     RunStrategySymbolReconciliationFn,
 } from './services/strategy-symbol-reconciliation.js'
+import { resolveEffectiveStrategyId } from './services/strategy-ids.js'
 
 import { defaultLogger, type Logger } from './logger.js'
 
@@ -892,14 +893,16 @@ export const createApp = (options: CreateAppOptions = {}) => {
         }
 
         const explicitStrategyId = payload.strategy_id !== undefined
-        const rawStrategyId = explicitStrategyId
-            ? payload.strategy_id
-            : payload.strategy === undefined
-                ? 'unknown'
-                : payload.strategy.trim().replace(/\s+/g, '_')
-        const effectiveStrategyId = rawStrategyId !== undefined && isValidStrategyId(rawStrategyId)
-            ? rawStrategyId
-            : undefined
+        const strategyResolution = resolveEffectiveStrategyId({
+            explicitStrategyId: payload.strategy_id,
+            legacyStrategy: payload.strategy,
+        })
+        // Keep the established webhook lookup behavior for a completely
+        // missing strategy while the shared resolver still reports MISSING to
+        // migration/reconciliation callers.  `unknown` is never synthesized
+        // for blank or invalid values.
+        const effectiveStrategyId = strategyResolution.effectiveStrategyId
+            ?? (strategyResolution.reason === 'MISSING' ? 'unknown' : undefined)
 
         // Explicit strategy_id is a strict contract.  Only an invalid legacy
         // strategy name may use the migration fallback.
@@ -1338,6 +1341,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 await addOrderV2({
                     id: effectiveEventId,
                     strategy: payload.strategy ?? 'unknown',
+                    ...(policyReservation !== undefined && effectiveStrategyId !== undefined
+                        ? { effective_strategy_id: effectiveStrategyId }
+                        : {}),
                     broker: payload.broker as BrokerName,
                     ticker: payload.ticker,
                     side: payload.side,
@@ -2036,6 +2042,43 @@ export type OrderUpdatesResponse = {
 }
 
 export type { OrderUpdate } from './services/orders-v2.js'
+
+export {
+    reconstructSizingState,
+    runSizingMigration,
+    createSizingMigrationService,
+    validateSizingMigrationManifest,
+    SIZING_MIGRATION_MAX_TRANSACTION_WRITES,
+} from './services/sizing-migration.js'
+export type {
+    SizingMigrationManifest,
+    SizingMigrationPolicyManifest,
+    SizingMigrationSymbolManifest,
+    SizingMigrationOrderRecord,
+    SizingMigrationIssue,
+    SizingMigrationWarning,
+    SizingMigrationPendingReservation,
+    SizingMigrationAggregate,
+    OrderSourceProjection,
+    SizingMigrationReconstruction,
+    SizingMigrationSymbolStatus,
+    SizingMigrationSymbolResult,
+    SizingMigrationReport,
+    SizingMigrationServiceOptions,
+    SizingMigrationService,
+} from './services/sizing-migration.js'
+export {
+    normalizeLegacyStrategyId,
+    resolveLegacyStrategyId,
+    resolveEffectiveStrategyId,
+    isCanonicalStrategyId,
+    STRATEGY_ID_PATTERN,
+} from './services/strategy-ids.js'
+export type {
+    StrategyIdResolutionReason,
+    StrategyIdResolution,
+    ResolveEffectiveStrategyIdInput,
+} from './services/strategy-ids.js'
 
 export type SymbolsResponse = {
     symbols: TradableSymbol[]

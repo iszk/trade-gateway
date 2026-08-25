@@ -12,6 +12,7 @@
     "build": "npm run build --workspace @trade-gateway/api --workspace @trade-gateway/ui --if-present",
     "test": "npm run test --workspace @trade-gateway/api --workspace @trade-gateway/ui --if-present",
     "typecheck": "npm run typecheck --workspace @trade-gateway/api --workspace @trade-gateway/ui --if-present",
+    "migrate:sizing": "npm run migrate:sizing --workspace @trade-gateway/api",
     "lint:unused": "knip --no-progress",
     "dev:api": "npm run dev --workspace @trade-gateway/api",
     "dev:ui": "npm run dev --workspace @trade-gateway/ui",

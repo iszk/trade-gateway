@@ -35,6 +35,7 @@ import {
     serializeStrategySymbolReservation,
 } from './strategy-symbol-reservations.js'
 import { createSymbolId } from './tradable-symbols.js'
+import { isCanonicalStrategyId, resolveEffectiveStrategyId } from './strategy-ids.js'
 
 const ORDERS_COLLECTION = 'orders_v2'
 const POSITIONS_COLLECTION = 'strategy_symbol_positions'
@@ -137,6 +138,7 @@ const isValidStoredOrderQuantity = (order: OrderV2): boolean => (
 
 const isValidStoredOrderState = (order: OrderV2): boolean => (
     isValidStoredOrderQuantity(order) &&
+    (order.effective_strategy_id === undefined || isCanonicalStrategyId(order.effective_strategy_id)) &&
     (order.broker === 'bitflyer' || order.broker === 'dummy' || order.broker === 'saxo') &&
     (order.side === 'BUY' || order.side === 'SELL') &&
     (order.order_type === 'MARKET' ||
@@ -212,15 +214,21 @@ const tryReservationIdentity = (
     db: Firestore,
     order: OrderV2,
 ): ReservationIdentity | null => {
-    if (!isNonEmptyString(order.id) || !isNonEmptyString(order.strategy) || !isNonEmptyString(order.ticker)) {
+    if (!isNonEmptyString(order.id) || !isNonEmptyString(order.ticker)) {
         return null
     }
+    const strategyResolution = resolveEffectiveStrategyId({
+        effectiveStrategyId: order.effective_strategy_id,
+        legacyStrategy: order.strategy,
+    })
+    const strategyId = strategyResolution.effectiveStrategyId
+    if (strategyId === undefined) return null
     try {
         const symbolId = createSymbolId(order.broker, order.ticker)
-        const positionId = createStrategySymbolPositionId(order.strategy, symbolId)
-        const reservationId = createStrategySymbolReservationId(order.strategy, symbolId, order.id)
+        const positionId = createStrategySymbolPositionId(strategyId, symbolId)
+        const reservationId = createStrategySymbolReservationId(strategyId, symbolId, order.id)
         return {
-            strategyId: order.strategy,
+            strategyId,
             symbolId,
             eventId: order.id,
             positionId,
@@ -246,7 +254,7 @@ const reservationIdentityMatches = (
     reservation.id === identity.reservationId &&
     reservation.event_id === order.id &&
     reservation.order_id === order.id &&
-    reservation.strategy_id === order.strategy &&
+    reservation.strategy_id === identity.strategyId &&
     reservation.symbol_id === identity.symbolId &&
     reservation.position_id === identity.positionId &&
     reservationSideMatches(reservation, order) &&

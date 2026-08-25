@@ -95,6 +95,7 @@ policy-backed webhook の `DISPATCH` は atomic reservation transaction によ�
 ### フィールド
 - `id` (string, required)
 - `strategy` (string, required)
+- `effective_strategy_id` (string, optional) — policy-backed注文が reservation / position identity に使用した正規化済み strategy ID。legacy注文では欠落し得る。表示・統計用の `strategy` は変更しない
 - `broker` (string, required)
 - `ticker` (string, required)
 - `side` (string, required) — `BUY` | `SELL`

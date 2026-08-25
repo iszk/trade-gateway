@@ -976,6 +976,9 @@ const syncExecutionsForExecutedIfdOrders = async (ctx: {
                 await ctx.addOrderV2({
                     id: exitId,
                     strategy: order.strategy,
+                    ...(order.effective_strategy_id === undefined
+                        ? {}
+                        : { effective_strategy_id: order.effective_strategy_id }),
                     broker: order.broker,
                     ticker: order.ticker,
                     side: order.side === 'BUY' ? 'SELL' : 'BUY',
