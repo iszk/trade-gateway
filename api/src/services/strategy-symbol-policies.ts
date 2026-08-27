@@ -50,6 +50,16 @@ export class SymbolConstraintsRequiredError extends Error {
     }
 }
 
+/** PUT is update-only; creation is provided by the fresh-start endpoint. */
+export class StrategySymbolPolicyNotFoundError extends Error {
+    readonly code = 'POLICY_NOT_FOUND'
+
+    constructor(strategyId: string, symbolId: string) {
+        super(`strategy-symbol policy is not found: ${strategyId}:${symbolId}`)
+        this.name = 'StrategySymbolPolicyNotFoundError'
+    }
+}
+
 /** A policy document was present but did not satisfy the persisted contract. */
 export class InvalidStoredStrategySymbolPolicyError extends Error {
     readonly code = 'INVALID_STORED_POLICY'
@@ -424,31 +434,33 @@ export const createPutStrategySymbolPolicyFn = (
             }
             const constraints = assertValidOrderConstraints(symbolData.order_constraints, input.symbol_id)
 
-            const currentPolicy = currentPolicySnapshot.exists
-                ? (() => {
-                    const actualDocumentId = getSnapshotId(currentPolicySnapshot, policyId)
-                    if (actualDocumentId !== policyId) {
-                        throw new InvalidStoredStrategySymbolPolicyError('policy document ID does not match its requested path')
-                    }
-                    return assertStoredPolicy(
-                        getSnapshotData(currentPolicySnapshot),
-                        policyId,
-                        input.strategy_id,
-                        input.symbol_id,
-                    )
-                })()
-                : null
+            if (!currentPolicySnapshot.exists) {
+                throw new StrategySymbolPolicyNotFoundError(input.strategy_id, input.symbol_id)
+            }
+
+            const currentPolicy = (() => {
+                const actualDocumentId = getSnapshotId(currentPolicySnapshot, policyId)
+                if (actualDocumentId !== policyId) {
+                    throw new InvalidStoredStrategySymbolPolicyError('policy document ID does not match its requested path')
+                }
+                return assertStoredPolicy(
+                    getSnapshotData(currentPolicySnapshot),
+                    policyId,
+                    input.strategy_id,
+                    input.symbol_id,
+                )
+            })()
 
             validateStrategySymbolPolicyInput(input, constraints)
 
             const now = new Date()
-            if (currentPolicy && currentPolicy.version >= Number.MAX_SAFE_INTEGER) {
+            if (currentPolicy.version >= Number.MAX_SAFE_INTEGER) {
                 throw new InvalidStoredStrategySymbolPolicyError('policy version cannot be incremented safely')
             }
-            const updatedAt = currentPolicy && now.getTime() <= currentPolicy.updated_at.getTime()
+            const updatedAt = now.getTime() <= currentPolicy.updated_at.getTime()
                 ? new Date(currentPolicy.updated_at.getTime() + 1)
                 : now
-            const version = currentPolicy ? currentPolicy.version + 1 : 1
+            const version = currentPolicy.version + 1
             const policy: StrategySymbolPolicy = input.sizing_mode === 'MANAGED'
                 ? {
                     id: policyId,
@@ -461,7 +473,7 @@ export const createPutStrategySymbolPolicyFn = (
                     base_order_size: input.base_order_size,
                     taper_strength: input.taper_strength,
                     version,
-                    created_at: currentPolicy?.created_at ?? now,
+                    created_at: currentPolicy.created_at,
                     updated_at: updatedAt,
                 }
                 : {
@@ -473,7 +485,7 @@ export const createPutStrategySymbolPolicyFn = (
                     max_abs_position: input.max_abs_position,
                     no_flip: input.no_flip,
                     version,
-                    created_at: currentPolicy?.created_at ?? now,
+                    created_at: currentPolicy.created_at,
                     updated_at: updatedAt,
                 }
 

@@ -7,6 +7,7 @@ import {
     createStrategySymbolPolicyId,
     InvalidStoredStrategySymbolPolicyError,
     InvalidStrategySymbolPolicyError,
+    StrategySymbolPolicyNotFoundError,
     SymbolConstraintsRequiredError,
     SymbolNotFoundError,
     validateStrategySymbolPolicyInput,
@@ -79,6 +80,28 @@ const seedSymbol = (
     }
 }
 
+const seedPolicy = (
+    db: ReturnType<typeof makeFirestoreMock>,
+    overrides: Record<string, unknown> = {},
+) => {
+    db.collections.strategy_symbol_policies ??= {}
+    db.collections.strategy_symbol_policies[createStrategySymbolPolicyId('strategy-1', symbolId)] = {
+        id: createStrategySymbolPolicyId('strategy-1', symbolId),
+        strategy_id: 'strategy-1',
+        symbol_id: symbolId,
+        sizing_mode: 'MANAGED',
+        enabled: true,
+        max_abs_position: 1,
+        no_flip: true,
+        base_order_size: 0.3,
+        taper_strength: 0.5,
+        version: 1,
+        created_at: new Date('2026-01-01T00:00:00.000Z'),
+        updated_at: new Date('2026-01-01T00:00:00.000Z'),
+        ...overrides,
+    }
+}
+
 test('createStrategySymbolPolicyId validates strategy and symbol IDs', () => {
     assert.equal(createStrategySymbolPolicyId('strategy-1', 'saxo:FX:NAS100'), 'strategy-1:saxo:FX:NAS100')
     assert.throws(() => createStrategySymbolPolicyId('strategy/1', symbolId), InvalidStrategySymbolPolicyError)
@@ -89,17 +112,18 @@ test('createStrategySymbolPolicyId validates strategy and symbol IDs', () => {
 test('PUT/GET persists a managed policy with version and Date fields', async () => {
     const db = makeFirestoreMock()
     seedSymbol(db)
+    seedPolicy(db)
     const put = createPutStrategySymbolPolicyFn(db)
     const get = createGetStrategySymbolPolicyFn(db)
 
     const first = await put(putInput)
-    assert.equal(first.version, 1)
+    assert.equal(first.version, 2)
     assert.ok(first.created_at instanceof Date)
     assert.ok(first.updated_at instanceof Date)
     assert.deepEqual(await get('strategy-1', symbolId), first)
 
     const second = await put({ ...putInput, base_order_size: 0.4 })
-    assert.equal(second.version, 2)
+    assert.equal(second.version, 3)
     assert.equal(second.created_at.getTime(), first.created_at.getTime())
     assert.ok(second.updated_at.getTime() > first.updated_at.getTime())
     assert.equal(db.writes.length, 2)
@@ -151,6 +175,11 @@ test('repository validates 0.001 steps, taper boundaries, numeric ranges, and ma
     }
     const db = makeFirestoreMock()
     seedSymbol(db, stepConstraints)
+    seedPolicy(db, {
+        max_abs_position: 1,
+        base_order_size: 0.1,
+        taper_strength: 0,
+    })
     const put = createPutStrategySymbolPolicyFn(db)
     const validManaged = {
         ...putInput,
@@ -201,6 +230,10 @@ test('repository rejects a large step ratio instead of accepting a fractional qu
         quantity_step: 0.001,
         min_order_size: 0.001,
     })
+    seedPolicy(db, {
+        max_abs_position: 1,
+        base_order_size: 0.001,
+    })
     const put = createPutStrategySymbolPolicyFn(db)
 
     for (const max_abs_position of [
@@ -231,11 +264,24 @@ test('PUT fails closed for missing symbols, missing constraints, and invalid pol
 
     const invalidPolicyDb = makeFirestoreMock()
     seedSymbol(invalidPolicyDb)
+    seedPolicy(invalidPolicyDb)
     await assert.rejects(createPutStrategySymbolPolicyFn(invalidPolicyDb)({
         ...putInput,
         max_abs_position: 0.05,
     }), InvalidStrategySymbolPolicyError)
     assert.equal(invalidPolicyDb.writes.length, 0)
+})
+
+test('PUT does not create an unregistered policy', async () => {
+    const db = makeFirestoreMock()
+    seedSymbol(db)
+
+    await assert.rejects(
+        createPutStrategySymbolPolicyFn(db)(putInput),
+        StrategySymbolPolicyNotFoundError,
+    )
+    assert.equal(db.writes.length, 0)
+    assert.equal(db.collections.strategy_symbol_policies, undefined)
 })
 
 test('GET rejects a corrupted stored document instead of normalizing it', async () => {

@@ -179,6 +179,8 @@ broker + ticker のメタデータと、symbol 単位の売買停止状態を保
 ## 5. `strategy_symbol_policies`
 strategy と tradable symbol の組み合わせごとに、数量計算で使用する固定 sizing policy を保持する。仮想 position、reservation、注文状態はこのコレクションへ保存しない。
 
+新規の strategy × symbol は fresh-start API の単一 transaction で policy とゼロ positionを同時作成する。fresh-start は broker position や既存注文をこの ledgerへ移管せず、既存 policy / position / 対象 reservation / 対象注文履歴がある場合は作成しない。既存 policy の PUT は更新専用である。
+
 ### ドキュメント ID
 - `{strategy_id}:{symbol_id}`
 - 例: `mean_reversion:bitflyer:BTC_JPY`

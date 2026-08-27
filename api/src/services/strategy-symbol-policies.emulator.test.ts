@@ -57,6 +57,31 @@ test('strategy-symbol policy transaction preserves versions and unrelated positi
         marker: 'must-not-change',
         updated_at: positionCreatedAt,
     })
+    const policyCreatedAt = new Date('2026-01-01T00:00:00.000Z')
+    await db.collection('strategy_symbol_policies').doc(policyIds[0]!).set({
+        id: policyIds[0],
+        strategy_id: strategyId,
+        symbol_id: symbolId,
+        sizing_mode: 'WEBHOOK_CAPPED',
+        enabled: true,
+        max_abs_position: 1,
+        no_flip: true,
+        version: 1,
+        created_at: policyCreatedAt,
+        updated_at: policyCreatedAt,
+    })
+    await db.collection('strategy_symbol_policies').doc(policyIds[1]!).set({
+        id: policyIds[1],
+        strategy_id: secondStrategyId,
+        symbol_id: symbolId,
+        sizing_mode: 'WEBHOOK_CAPPED',
+        enabled: true,
+        max_abs_position: 1,
+        no_flip: true,
+        version: 1,
+        created_at: policyCreatedAt,
+        updated_at: policyCreatedAt,
+    })
     const positionBefore = await positionRef.get()
     const positionBeforeData = positionBefore.data()
     const positionBeforeUpdateTime = positionBefore.updateTime?.toMillis()
@@ -82,8 +107,8 @@ test('strategy-symbol policy transaction preserves versions and unrelated positi
         base_order_size: 0.2,
         taper_strength: 1,
     })
-    assert.equal(first.version, 1)
-    assert.equal(other.version, 1)
+    assert.equal(first.version, 2)
+    assert.equal(other.version, 2)
     assert.equal((await get(strategyId, symbolId))?.id, policyIds[0])
     assert.equal((await get(secondStrategyId, symbolId))?.id, policyIds[1])
 
@@ -185,9 +210,9 @@ test('strategy-symbol policy transaction preserves versions and unrelated positi
             no_flip: false,
         }),
     ])
-    assert.deepEqual(updates.map((policy) => policy.version).sort((a, b) => a - b), [2, 3])
+    assert.deepEqual(updates.map((policy) => policy.version).sort((a, b) => a - b), [3, 4])
     const latest = await get(strategyId, symbolId)
-    assert.equal(latest?.version, 3)
+    assert.equal(latest?.version, 4)
     assert.equal(latest?.created_at.getTime(), first.created_at.getTime())
     assert.ok(latest)
     assert.ok(latest.updated_at.getTime() > policyBeforeUpdates.updated_at.getTime())

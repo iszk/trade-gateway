@@ -2,6 +2,8 @@
 
 既存 bot の TradingView payload を変更せず、既存 `orders_v2` から strategy × symbol の virtual position と pending reservation を再構築し、`WEBHOOK_CAPPED` policy へ段階移行する手順である。本番 manifest や broker token は repository に保存しない。
 
+既存注文履歴を持たない新しい strategy × symbol の初期化は、この履歴 migration CLIではなく、[sizing仕様](./sizing.md#新しい-strategy-の-fresh-start-運用) の fresh-start API を使用する。fresh-start は broker 建玉を取り込まず、1リクエスト1組を対象とする。migration CLIの既定 dry-run、broker照合、履歴再構築、既存状態の再実行 `NO_OP` 契約は変更しない。
+
 ## 事前条件
 
 1. 対象 symbol の `order_constraints` を Symbols UI または認証付き `PUT /api/symbols/:symbol_id` で登録する。
