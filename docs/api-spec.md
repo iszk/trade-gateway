@@ -377,7 +377,7 @@ OpenAPI は全 endpoint を一括で定義していない。機械可読な契�
 ### 14. Strategy × symbol policy 更新
 - Method/Path: `PUT /api/strategy-symbol-policies/:strategy_id/:symbol_id`
 - 認証: 必要（`API_SECRET` の Bearer トークン）
-- 補足: `symbol_id` は `broker:ticker` を URL encode した値。body に ID、version、日時は指定しない。body は strict な mode 別 union とする
+- 補足: `symbol_id` は `broker:ticker` を URL encode した値。body に ID、version、日時は指定しない。body は strict な mode 別 union とする。既存 policy の更新専用であり、未登録 policy は作成しない
 
 #### リクエスト（WEBHOOK_CAPPED）
 
@@ -406,16 +406,70 @@ OpenAPI は全 endpoint を一括で定義していない。機械可読な契�
 数量は有限の正数、`taper_strength` は `0` 以上 `1` 以下とする。対象 symbol の `order_constraints` を基準に `min_order_size` / `quantity_step` / `max_order_size` を検証し、無効 policy は保存しない。`enabled=false` も検証を省略しない。
 
 #### 成功レスポンス
-- `200 OK`: body は GET と同じ `{ "policy": ... }` envelope。新規は `version=1`、更新は version が1増加する
+- `200 OK`: body は GET と同じ `{ "policy": ... }` envelope。version が1増加する。現在の strategy position は変更しない（上限を下げても自動決済しない）
 
 #### エラーレスポンス
 - `400 INVALID_REQUEST`: path/body、mode 別 field、数量範囲、step 整合性が不正
 - `401 UNAUTHORIZED`: Bearer トークン不足・不正
 - `404 SYMBOL_NOT_FOUND`: 対象 symbol が未登録
+- `404 POLICY_NOT_FOUND`: 対象 policy が未登録。新規作成には fresh-start API を使用する
 - `409 SYMBOL_CONSTRAINTS_REQUIRED`: symbol は存在するが注文数量制約が未設定
 - `500 INTERNAL_ERROR`: Firestore 障害または保存済み document の破損
 
-### 15. Saxo portfolio snapshot 取得
+### 15. Strategy × symbol sizing ledger fresh-start
+- Method/Path: `POST /api/strategy-symbol-policies/:strategy_id/:symbol_id/fresh-start`
+- 認証: 必要（`API_SECRET` の Bearer トークン）
+- 役割: 未使用の1 strategy × symbolに `WEBHOOK_CAPPED` policyとゼロの仮想 positionを初期化する。broker口座の既存建玉、手動売買、他 strategy の state / 注文は取り込まない
+- 補足: `symbol_id` は `broker:ticker` を URL encode した値。1リクエストで扱う対象は1組だけ。bodyに ID、`enabled`、project、`order_constraints`、version、日時は指定しない
+
+#### リクエスト
+
+```http
+POST /api/strategy-symbol-policies/strategy-b/dummy%3ABTC/fresh-start?apply=true
+Authorization: Bearer ...
+X-Confirm-Project: trade-gateway-prod
+Content-Type: application/json
+
+{
+  "sizing_mode": "WEBHOOK_CAPPED",
+  "max_abs_position": 2,
+  "no_flip": true
+}
+```
+
+`apply=true` がないリクエストは dry-run であり、Firestore write は発生しない。dry-run は symbol が `active` でも実行でき、結果の `status` は `CREATE`、`requires_pause` は `true` となる。apply前に symbol を `paused` に変更し、in-flight webhook / 注文同期の完了を確認する。applyには `X-Confirm-Project` が必須で、実行中APIの GCP project IDと完全一致しなければならない。
+
+#### 成功レスポンス
+
+dry-run:
+
+```json
+{
+  "status": "CREATE",
+  "mode": "DRY_RUN",
+  "strategy_id": "strategy-b",
+  "symbol_id": "dummy:BTC",
+  "sizing_mode": "WEBHOOK_CAPPED",
+  "max_abs_position": 2,
+  "no_flip": true,
+  "symbol_status": "paused",
+  "requires_pause": false,
+  "issues": []
+}
+```
+
+apply成功は `status=APPLIED`, `mode=APPLY` となり、同一 transaction で作成した `{ "policy": ..., "position": ... }` を含む。positionは `confirmed_position=0`, `pending_delta=0`, `status=READY`, `policy_version=1` で、broker positionは参照しない。
+
+#### エラーレスポンス
+- `400 INVALID_REQUEST`: canonicalでない path、strict body、mode、数量範囲、step整合性が不正
+- `401 UNAUTHORIZED`: Bearer トークン不足・不正
+- `404 SYMBOL_NOT_FOUND`: 対象 symbol が未登録
+- `409 PROJECT_CONFIRMATION_REQUIRED` / `PROJECT_MISMATCH` / `PROJECT_ID_UNAVAILABLE`: applyのproject guard不成立
+- `409 SYMBOL_NOT_PAUSED`: apply対象 symbol が active
+- `409 ALREADY_EXISTS`: policyとpositionが完全に初期状態でも再実行は成功扱いにしない
+- `409 CONFLICT`: policy/positionの部分欠落・不一致・破損、対象 strategy の注文履歴（`PENDING`を含む）、reservation、symbol constraints破損など。`issues[].reason` で理由を確認する
+
+### 16. Saxo portfolio snapshot 取得
 - Method/Path: `GET /api/saxo/portfolio-snapshot`
 - 認証: 必要（Bearerトークン）
 - 役割: Saxo の現在の口座・現金残高・建玉を `portfolio-snapshot.v1` 形式で返す。

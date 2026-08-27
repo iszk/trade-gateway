@@ -16,8 +16,21 @@ import { createDefaultOrderDispatchLogFn } from './services/order-dispatch-logs.
 import type { CreateOrderDispatchLogFn } from './services/order-dispatch-logs.js'
 import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, createDefaultListTradableSymbolsFn, createDefaultUpdateTradeControlFn, createDefaultUpsertTradableSymbolFn, createSymbolId, InvalidStoredTradableSymbolError, parseSymbolId } from './services/tradable-symbols.js'
 import type { EnsureTradableSymbolFn, GetTradableSymbolFn, ListTradableSymbolsFn, UpdateTradeControlFn, UpsertTradableSymbolFn } from './services/tradable-symbols.js'
-import { createDefaultGetStrategySymbolPolicyFn, createDefaultPutStrategySymbolPolicyFn, InvalidStoredStrategySymbolPolicyError, InvalidStrategySymbolPolicyError, SymbolConstraintsRequiredError, SymbolNotFoundError, isValidStrategyId } from './services/strategy-symbol-policies.js'
+import { createDefaultGetStrategySymbolPolicyFn, createDefaultPutStrategySymbolPolicyFn, InvalidStoredStrategySymbolPolicyError, InvalidStrategySymbolPolicyError, StrategySymbolPolicyNotFoundError, SymbolConstraintsRequiredError, SymbolNotFoundError, isValidStrategyId } from './services/strategy-symbol-policies.js'
 import type { GetStrategySymbolPolicyFn, PutStrategySymbolPolicyFn } from './services/strategy-symbol-policies.js'
+import {
+    createDefaultFreshStartStrategySymbolFn,
+    FreshStartAlreadyExistsError,
+    FreshStartConflictError,
+    FreshStartProjectConfirmationError,
+    FreshStartSymbolNotFoundError,
+    FreshStartSymbolNotPausedError,
+    InvalidFreshStartPolicyError,
+    InvalidFreshStartStrategySymbolInputError,
+} from './services/strategy-symbol-fresh-start.js'
+import type {
+    FreshStartStrategySymbolFn,
+} from './services/strategy-symbol-fresh-start.js'
 import { createDefaultApplyStrategySymbolDispatchOutcomeFn, createDefaultReserveStrategySymbolOrderFn } from './services/strategy-symbol-reservation-service.js'
 import type { ApplyStrategySymbolDispatchOutcomeFn, ReserveStrategySymbolOrderFn, ReserveStrategySymbolOrderResult } from './services/strategy-symbol-reservation-service.js'
 import { createDefaultGetTradeRecordsFn, createDefaultGetTradeStatsFn } from './services/trade-records-v2.js'
@@ -284,6 +297,7 @@ type CreateAppOptions = {
     ensureTradableSymbol?: EnsureTradableSymbolFn
     getStrategySymbolPolicy?: GetStrategySymbolPolicyFn
     putStrategySymbolPolicy?: PutStrategySymbolPolicyFn
+    freshStartStrategySymbol?: FreshStartStrategySymbolFn
     reserveStrategySymbolOrder?: ReserveStrategySymbolOrderFn
     applyStrategySymbolDispatchOutcome?: ApplyStrategySymbolDispatchOutcomeFn
     runStrategySymbolReconciliation?: RunStrategySymbolReconciliationFn
@@ -324,6 +338,7 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const ensureTradableSymbol = options.ensureTradableSymbol ?? createDefaultEnsureTradableSymbolFn()
     const getStrategySymbolPolicy = options.getStrategySymbolPolicy ?? createDefaultGetStrategySymbolPolicyFn()
     const putStrategySymbolPolicy = options.putStrategySymbolPolicy ?? createDefaultPutStrategySymbolPolicyFn()
+    const freshStartStrategySymbol = options.freshStartStrategySymbol ?? createDefaultFreshStartStrategySymbolFn()
     const reserveStrategySymbolOrder = options.reserveStrategySymbolOrder ?? createDefaultReserveStrategySymbolOrderFn()
     const applyStrategySymbolDispatchOutcome = options.applyStrategySymbolDispatchOutcome ?? createDefaultApplyStrategySymbolDispatchOutcomeFn()
     const allowUnregisteredStrategyPolicyFallback = options.allowUnregisteredStrategyPolicyFallback
@@ -496,6 +511,12 @@ export const createApp = (options: CreateAppOptions = {}) => {
         status: z.enum(['active', 'paused']),
         reason: z.string().trim().optional(),
     })
+
+    const freshStartStrategySymbolSchema = z.object({
+        sizing_mode: z.literal('WEBHOOK_CAPPED'),
+        max_abs_position: finitePositiveNumberSchema,
+        no_flip: z.boolean(),
+    }).strict()
 
     const createWebhookHandler = ({
         schema,
@@ -1664,6 +1685,9 @@ export const createApp = (options: CreateAppOptions = {}) => {
             if (err instanceof SymbolConstraintsRequiredError) {
                 return c.json(errorBody('SYMBOL_CONSTRAINTS_REQUIRED', 'symbol order constraints are required'), 409)
             }
+            if (err instanceof StrategySymbolPolicyNotFoundError) {
+                return c.json(errorBody('POLICY_NOT_FOUND', 'policy is not found'), 404)
+            }
 
             logger.warn({
                 event: 'strategy_symbol_policy:upsert_failed',
@@ -1672,6 +1696,81 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 symbol_id: symbolId,
             }, 'failed to upsert strategy-symbol policy')
             return c.json(errorBody('INTERNAL_ERROR', 'failed to upsert strategy-symbol policy'), 500)
+        }
+    })
+
+    app.post('/api/strategy-symbol-policies/:strategy_id/:symbol_id/fresh-start', requireApiSecret, async (c) => {
+        const strategyId = decodeSymbolIdParam(c.req.param('strategy_id'))
+        const symbolId = decodeSymbolIdParam(c.req.param('symbol_id'))
+        if (!isValidStrategyId(strategyId) || !parseValidSymbolId(symbolId)) {
+            return c.json(errorBody('INVALID_REQUEST', 'strategy_id or symbol_id is invalid'), 400)
+        }
+
+        let body: unknown
+        try {
+            body = await c.req.json()
+        } catch {
+            return c.json(errorBody('INVALID_REQUEST', 'invalid JSON body'), 400)
+        }
+
+        const parsedBody = freshStartStrategySymbolSchema.safeParse(body)
+        if (!parsedBody.success) {
+            const message = parsedBody.error.issues
+                .map((issue: z.ZodIssue) => `${issue.path.join('.') || 'body'}: ${issue.message}`)
+                .join('; ')
+            return c.json(errorBody('INVALID_REQUEST', message), 400)
+        }
+
+        const apply = c.req.query('apply') === 'true'
+        try {
+            const result = await freshStartStrategySymbol({
+                strategyId,
+                symbolId,
+                sizingMode: parsedBody.data.sizing_mode,
+                maxAbsPosition: parsedBody.data.max_abs_position,
+                noFlip: parsedBody.data.no_flip,
+                apply,
+                ...(apply ? { confirmProject: c.req.header('X-Confirm-Project') } : {}),
+            })
+            return c.json(result)
+        } catch (err) {
+            if (err instanceof InvalidFreshStartStrategySymbolInputError) {
+                return c.json(errorBody('INVALID_REQUEST', err.message), 400)
+            }
+            if (err instanceof InvalidFreshStartPolicyError) {
+                return c.json(errorBody('INVALID_REQUEST', err.message), 400)
+            }
+            if (err instanceof FreshStartSymbolNotFoundError) {
+                return c.json(errorBody('SYMBOL_NOT_FOUND', 'symbol is not found'), 404)
+            }
+            if (err instanceof FreshStartProjectConfirmationError) {
+                return c.json(errorBody(err.code, err.message), 409)
+            }
+            if (err instanceof FreshStartSymbolNotPausedError) {
+                return c.json(errorBody('SYMBOL_NOT_PAUSED', err.message), 409)
+            }
+            if (err instanceof FreshStartAlreadyExistsError) {
+                return c.json({
+                    ...errorBody('ALREADY_EXISTS', err.message),
+                    issues: err.issues,
+                }, 409)
+            }
+            if (err instanceof FreshStartConflictError) {
+                return c.json({
+                    ...errorBody('CONFLICT', err.message),
+                    issues: err.issues,
+                }, 409)
+            }
+
+            logger.warn({
+                event: 'strategy_symbol_fresh_start:failed',
+                strategy_id: strategyId,
+                symbol_id: symbolId,
+                mode: apply ? 'APPLY' : 'DRY_RUN',
+                result: 'ERROR',
+                reason: err instanceof Error ? err.name : 'UNKNOWN_ERROR',
+            }, 'failed to fresh-start strategy-symbol sizing ledger')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fresh-start strategy-symbol sizing ledger'), 500)
         }
     })
 
@@ -2014,6 +2113,24 @@ export type {
     StrategySymbolSizingMode,
     WebhookCappedStrategySymbolPolicy,
 } from './types/strategy-symbol-policy.js'
+export {
+    createFreshStartStrategySymbolFn,
+    createDefaultFreshStartStrategySymbolFn,
+    FreshStartAlreadyExistsError,
+    FreshStartConflictError,
+    FreshStartProjectConfirmationError,
+    FreshStartSymbolNotFoundError,
+    FreshStartSymbolNotPausedError,
+    InvalidFreshStartPolicyError,
+    InvalidFreshStartStrategySymbolInputError,
+} from './services/strategy-symbol-fresh-start.js'
+export type {
+    FreshStartIssue,
+    FreshStartStrategySymbolInput,
+    FreshStartStrategySymbolResult,
+    FreshStartStrategySymbolFn,
+    FreshStartStrategySymbolServiceOptions,
+} from './services/strategy-symbol-fresh-start.js'
 
 export type OrdersV2StatsResponse = {
     stats: StatsV2[]

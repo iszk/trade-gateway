@@ -2,6 +2,32 @@
 
 `api/src/services/order-size-calculator.ts` の `calculateOrderSize` は、Firestore、Hono、broker などの外部 I/O を持たない同期関数である。strategy-symbol policy、symbol の注文制約、確定 position、未確定注文の差分、side、任意の webhook size から、発注数量を決定する。
 
+## 新しい strategy の fresh-start 運用
+
+新しい strategy × symbol は、既存 policy 更新 API で作成せず、次の専用 API で初期化する。1回のリクエストで指定できるのは1組だけである。初期 position は常にゼロで、broker口座の既存建玉、手動売買、他 strategy の建玉・注文履歴は取り込まない。
+
+1. 対象 symbol を `PATCH /api/symbols/:symbol_id/trade-control` で `paused` にする。
+2. 同一 symbol の in-flight webhook と注文同期が完了するまで待つ。
+3. `POST /api/strategy-symbol-policies/:strategy_id/:symbol_id/fresh-start` を `apply=true` なしで実行し、`status=CREATE`、注文履歴・reservationなし、数量制約に問題がないことを確認する。dry-run は symbol が active でも実行できる。
+4. `X-Confirm-Project` に実行中 API の GCP project IDを指定して `?apply=true` で再実行する。policy とゼロ position は同一 Firestore transaction で作成される。
+5. policy の GET と `strategy_symbol_positions/{strategy_id}:{symbol_id}` の state を確認し、`enabled=true`、`status=READY`、数量ゼロであることを確認してから、symbolを `active` に戻す。
+
+```json
+{
+  "sizing_mode": "WEBHOOK_CAPPED",
+  "max_abs_position": 2,
+  "no_flip": true
+}
+```
+
+既存の strategy-a が同じ symbol を使っていても、strategy-b のみを URL と bodyで指定する。strategy-a の state / policy / order / reservation は変更されない（symbol を一時 pauseする影響だけは共通）。broker既存建玉との自動照合・移管・決済は行わない。
+
+fresh-start は既存 policy / position、対象注文履歴、reservation、部分状態、保存値破損がある場合に作成せず `409` を返す。完全一致状態の再実行も `ALREADY_EXISTS` として扱うため、初期化の再試行はまず state を確認する。
+
+### fresh-start の rollback
+
+active化前に、注文・reservationがなく position がゼロであることを再確認する。そのうえで対象 policy と position だけを同一 transaction で削除する手動手順を用いる。運用開始後は ledger の reset / delete を行わず、symbol を pauseして個別の復旧方針を決める。`orders_v2` は削除せず、broker建玉を自動決済しない。
+
 ## 入力
 
 ```ts
