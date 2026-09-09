@@ -198,6 +198,8 @@ policy-backed dispatch で保存する `orders_v2` には、表示用 `strategy`
 
 policy 未登録時は `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK=true`（既定値）の間だけ、正の `size` を必須とする既存 dispatch path を使用する。この fallback は sizing mode ではない。`false` にすると `POLICY_NOT_FOUND` を返して発注しない。環境変数は `true` または `false` 以外を許可しない。
 
+fallback を実行した場合は、warning の `event = "webhook:unregistered_strategy_policy_fallback"` で判別できる。`fallback_reason` は policy lookup が `null` の場合に `POLICY_NOT_FOUND`、legacy strategy を解決できず lookup 自体を行わなかった場合に `INVALID_LEGACY_STRATEGY` となる。policy lookup を行った場合だけ、検索対象の `policy_id`（`${strategy_id}:${symbol_id}`）を出力し、strategy を解決できない場合は `policy_id` を出力しない。
+
 ## ログ仕様
 - 受信ログ: `event = "webhook:received"`
 - 受理ログ: `event = "webhook:accepted"`

@@ -24,13 +24,18 @@ import type { GetStrategySymbolPositionFn } from './services/strategy-symbol-pos
 
 const createLoggerStub = () => {
     const calls: Record<string, unknown>[] = []
+    const messages: string[] = []
+    const capture = (obj: Record<string, unknown>, msg?: string) => {
+        calls.push(obj)
+        if (msg !== undefined) messages.push(msg)
+    }
     const logger = {
-        info: (obj: Record<string, unknown>) => calls.push(obj),
-        warn: (obj: Record<string, unknown>) => calls.push(obj),
-        error: (obj: Record<string, unknown>) => calls.push(obj),
+        info: capture,
+        warn: capture,
+        error: capture,
         child: (_bindings: Record<string, unknown>) => logger,
     }
-    return { logger, calls }
+    return { logger, calls, messages }
 }
 
 const stringifyLogCalls = (calls: Record<string, unknown>[]): string =>
@@ -212,7 +217,7 @@ const createSizingRouteFixture = (options: SizingRouteFixtureOptions = {}) => {
         }
     const { createWebhookEvent, events } = createWebhookEventStub()
     const { createOrderDispatchLog, logs } = createOrderDispatchLogStub()
-    const { logger, calls: loggerCalls } = createLoggerStub()
+    const { logger, calls: loggerCalls, messages: loggerMessages } = createLoggerStub()
     const addedOrders: unknown[] = []
     const reservationByEvent = new Map<string, Extract<ReserveStrategySymbolOrderResult, { kind: 'DISPATCH' }>>()
     const defaultReserveStrategySymbolOrder = async (input: {
@@ -326,7 +331,7 @@ const createSizingRouteFixture = (options: SizingRouteFixtureOptions = {}) => {
         ...appOptions,
         dispatchOrder: observedDispatchOrder,
     })
-    return { app, dispatchCalls, events, logs, addedOrders, loggerCalls }
+    return { app, dispatchCalls, events, logs, addedOrders, loggerCalls, loggerMessages }
 }
 
 const makeDispatchReservationResult = (
@@ -1556,6 +1561,19 @@ test('POST /api/webhooks/tradingview allows fallback only after an explicit miss
     assert.deepEqual(policyCalls, ['alpha'])
     assert.equal(fixture.dispatchCalls.length, 1)
     assert.equal(fixture.addedOrders.length, 1)
+
+    const fallbackLog = fixture.loggerCalls.find((call) => call.event === 'webhook:unregistered_strategy_policy_fallback')
+    assert.equal(fallbackLog?.event, 'webhook:unregistered_strategy_policy_fallback')
+    assert.equal(fallbackLog?.request_id, res.headers.get('x-request-id'))
+    assert.equal(fallbackLog?.event_id, 'evt-sizing-symbol-missing-fallback-1')
+    assert.equal(fallbackLog?.strategy_id, 'alpha')
+    assert.equal(fallbackLog?.symbol_id, 'bitflyer:BTC_JPY')
+    assert.equal(fallbackLog?.fallback_reason, 'POLICY_NOT_FOUND')
+    assert.equal(fallbackLog?.policy_id, 'alpha:bitflyer:BTC_JPY')
+    assert.equal(fallbackLog?.strategy_resolution_reason, 'VALID')
+    assert.equal(fallbackLog?.strategy_id_source, 'LEGACY')
+    assert.equal('strategy' in (fallbackLog ?? {}), false)
+    assert.equal(fixture.loggerMessages.includes('strategy-symbol policy not found; using webhook size fallback'), true)
 })
 
 test('POST /api/webhooks/tradingview maps corrupt stored symbol constraints to INVALID_STORED_STATE', async () => {
@@ -1768,6 +1786,15 @@ test('POST /api/webhooks/tradingview uses unknown when strategy fields are absen
     assert.deepEqual(policyCalls, ['unknown'])
     assert.equal(fixture.dispatchCalls.length, 1)
     assert.equal(fixture.events[0]?.status, 'accepted')
+
+    const fallbackLog = fixture.loggerCalls.find((call) => call.event === 'webhook:unregistered_strategy_policy_fallback')
+    assert.equal(fallbackLog?.strategy_id, 'unknown')
+    assert.equal(fallbackLog?.symbol_id, 'bitflyer:BTC_JPY')
+    assert.equal(fallbackLog?.fallback_reason, 'POLICY_NOT_FOUND')
+    assert.equal(fallbackLog?.policy_id, 'unknown:bitflyer:BTC_JPY')
+    assert.equal(fallbackLog?.strategy_resolution_reason, 'MISSING')
+    assert.equal(fallbackLog?.strategy_id_source, 'DEFAULT_UNKNOWN')
+    assert.equal(fixture.loggerMessages.includes('strategy-symbol policy not found; using webhook size fallback'), true)
 })
 
 test('POST /api/webhooks/tradingview invalid legacy strategy uses fallback only when enabled', async () => {
@@ -1783,6 +1810,14 @@ test('POST /api/webhooks/tradingview invalid legacy strategy uses fallback only 
 
     assert.equal(enabledResponse.status, 202)
     assert.equal(enabled.dispatchCalls.length, 1)
+
+    const fallbackLog = enabled.loggerCalls.find((call) => call.event === 'webhook:unregistered_strategy_policy_fallback')
+    assert.equal(fallbackLog?.fallback_reason, 'INVALID_LEGACY_STRATEGY')
+    assert.equal(fallbackLog?.strategy_resolution_reason, 'INVALID')
+    assert.equal(fallbackLog?.symbol_id, 'bitflyer:BTC_JPY')
+    assert.equal('policy_id' in (fallbackLog ?? {}), false)
+    assert.equal('strategy_id_source' in (fallbackLog ?? {}), false)
+    assert.equal(enabled.loggerMessages.includes('strategy ID could not be resolved; using webhook size fallback without policy lookup'), true)
 
     const disabled = createSizingRouteFixture({
         allowUnregisteredStrategyPolicyFallback: false,

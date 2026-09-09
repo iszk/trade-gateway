@@ -1002,13 +1002,30 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 )
             }
 
-            logger.warn({
+            const fallbackReason = effectiveStrategyId === undefined
+                ? 'INVALID_LEGACY_STRATEGY' as const
+                : 'POLICY_NOT_FOUND' as const
+            const strategyIdSource = strategyResolution.source === 'EXPLICIT'
+                ? 'EXPLICIT' as const
+                : strategyResolution.source === 'LEGACY'
+                    ? 'LEGACY' as const
+                    : strategyResolution.reason === 'MISSING'
+                        ? 'DEFAULT_UNKNOWN' as const
+                        : undefined
+
+            reqLogger.warn({
                 event: 'webhook:unregistered_strategy_policy_fallback',
                 request_id: requestId,
                 event_id: effectiveEventId,
                 strategy_id: effectiveStrategyId,
                 symbol_id: symbolId,
-            }, 'using unregistered strategy policy fallback')
+                fallback_reason: fallbackReason,
+                strategy_resolution_reason: strategyResolution.reason,
+                ...(strategyIdSource === undefined ? {} : { strategy_id_source: strategyIdSource }),
+                ...(effectiveStrategyId === undefined ? {} : { policy_id: `${effectiveStrategyId}:${symbolId}` }),
+            }, fallbackReason === 'POLICY_NOT_FOUND'
+                ? 'strategy-symbol policy not found; using webhook size fallback'
+                : 'strategy ID could not be resolved; using webhook size fallback without policy lookup')
 
             const duplicateResponse = await createEventOrDuplicate({
                 event_id: effectiveEventId,
