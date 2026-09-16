@@ -6,11 +6,22 @@
 
 新しい strategy × symbol は、既存 policy 更新 API で作成せず、次の専用 API で初期化する。1回のリクエストで指定できるのは1組だけである。初期 position は常にゼロで、broker口座の既存建玉、手動売買、他 strategy の建玉・注文履歴は取り込まない。
 
-1. 対象 symbol を `PATCH /api/symbols/:symbol_id/trade-control` で `paused` にする。
-2. 同一 symbol の in-flight webhook と注文同期が完了するまで待つ。
-3. `POST /api/strategy-symbol-policies/:strategy_id/:symbol_id/fresh-start` を `apply=true` なしで実行し、`status=CREATE`、注文履歴・reservationなし、数量制約に問題がないことを確認する。dry-run は symbol が active でも実行できる。
-4. `X-Confirm-Project` に実行中 API の GCP project IDを指定して `?apply=true` で再実行する。policy とゼロ position は同一 Firestore transaction で作成される。
-5. policy の GET と `strategy_symbol_positions/{strategy_id}:{symbol_id}` の state を確認し、`enabled=true`、`status=READY`、数量ゼロであることを確認してから、symbolを `active` に戻す。
+### UI の自動フロー
+
+`/policies` の追加フォームは、次の順序で API を逐次実行する。
+
+1. symbol の登録状態を検証する。
+2. `POST /api/strategy-symbol-policies/:strategy_id/:symbol_id/fresh-start` を `apply=true` なしで実行し、`status=CREATE`、`issues=[]`、数量制約に問題がないことを確認する。dry-run は symbol が active でも実行できる。
+3. 開始時の symbol が `active` だった場合だけ、`PATCH /api/symbols/:symbol_id/trade-control` で `paused` にする。開始時から `paused` だった場合はその状態を維持する。
+4. `?apply=true` で再実行する。API_SECRET の Bearer 認証を使用する。API_URL の接続先取り違えは project ID では検出しない。接続先 URL と API_SECRET の環境別設定・配布・確認で管理する。policy とゼロ position は同一 Firestore transaction で作成される。
+5. policy 一覧の read-back で、対象 policy が `enabled=true`、`version=1`、position が `status=READY`、`policy_version=1`、confirmed / pending ともにゼロであることを確認する。
+6. 開始時に `active` だった場合、かつ上記全 step が成功した場合だけ symbol を `active` に戻す。resume 通信が失敗した場合は実状態を `unknown` として扱い、再試行や自動 rollback をせず手動確認する。
+
+この UI フロー全体は atomic ではない。maintenance lock や in-flight webhook drain は実装していないため、運用上必要な停止・排出確認は別途行う。pause 後の apply、read-back、resume のいずれかが失敗した場合、symbol を自動再開せず paused のまま維持する（resume 通信失敗時だけ実状態は unknown として手動確認する）。画面には完了 step、失敗 step、失敗時に把握できた symbol 状態を表示する。
+
+### 手動運用手順
+
+UI を使わずに初期化する場合は、運用者が symbol を pause し、必要な in-flight webhook と注文同期の完了を確認してから dry-run、apply、read-back、resume を個別に実行する。これは手動手順であり、上記 UI 自動フローの API 呼び出し順序や、今回追加しない maintenance lock / in-flight drain を UI が保証することを意味しない。
 
 ```json
 {
@@ -26,7 +37,9 @@ fresh-start は既存 policy / position、対象注文履歴、reservation、部
 
 ### fresh-start の rollback
 
-active化前に、注文・reservationがなく position がゼロであることを再確認する。そのうえで対象 policy と position だけを同一 transaction で削除する手動手順を用いる。運用開始後は ledger の reset / delete を行わず、symbol を pauseして個別の復旧方針を決める。`orders_v2` は削除せず、broker建玉を自動決済しない。
+active化前に、注文・reservationがなく position がゼロであることを再確認する。そのうえで対象 policy と position だけを同一 transaction で削除する手動手順を用いる。運用開始後も、強制削除 API を使えば ledger を物理削除できるが、これは ledger 喪失と後着約定の取り込み不能を伴う破壊操作である。`orders_v2` と reservation は削除せず、broker建玉を自動決済しない。削除時は symbol を paused にし、削除後に自動再開しない。
+
+強制削除後に symbol を再開すると、既定の `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK=true` により、未登録 strategy の webhook が policy の上限・no-flip 制約なしで互換経路へ進む可能性がある。replacement policy と新しい ledger、注文履歴・reservation・broker 建玉を手動確認してから、運用者が明示的に再開すること。
 
 ## 入力
 

@@ -16,11 +16,17 @@ import type { TradableSymbol } from './types/tradable-symbol.js'
 import type { StrategySymbolPolicy } from './types/strategy-symbol-policy.js'
 import type { StrategySymbolPosition } from './types/strategy-symbol-position.js'
 import { InvalidStrategySymbolPolicyError, StrategySymbolPolicyNotFoundError, SymbolConstraintsRequiredError, SymbolNotFoundError } from './services/strategy-symbol-policies.js'
-import { FreshStartAlreadyExistsError, FreshStartConflictError, FreshStartProjectConfirmationError, FreshStartSymbolNotPausedError, type FreshStartStrategySymbolInput, type FreshStartStrategySymbolResult } from './services/strategy-symbol-fresh-start.js'
+import { FreshStartAlreadyExistsError, FreshStartConflictError, FreshStartSymbolNotPausedError, type FreshStartStrategySymbolInput, type FreshStartStrategySymbolResult } from './services/strategy-symbol-fresh-start.js'
 import { InvalidStoredTradableSymbolError } from './services/tradable-symbols.js'
 import { calculateOrderSize } from './services/order-size-calculator.js'
 import type { ReserveStrategySymbolOrderResult } from './services/strategy-symbol-reservation-service.js'
 import type { GetStrategySymbolPositionFn } from './services/strategy-symbol-positions.js'
+import {
+    InvalidStoredStrategySymbolPolicyDeleteSymbolError,
+    StrategySymbolPolicyDeleteNotFoundError,
+    StrategySymbolPolicyDeleteSymbolNotFoundError,
+} from './services/strategy-symbol-policy-delete.js'
+import type { DeleteStrategySymbolPolicyResult } from './services/strategy-symbol-policy-delete.js'
 
 const createLoggerStub = () => {
     const calls: Record<string, unknown>[] = []
@@ -1067,7 +1073,7 @@ test('fresh-start route requires the shared Bearer token and strict body', async
     assert.equal(calls, 0)
 })
 
-test('fresh-start route maps dry-run/apply, project and conflict results', async () => {
+test('fresh-start route maps dry-run/apply without project confirmation and conflict results', async () => {
     const calls: FreshStartStrategySymbolInput[] = []
     const app = createAppForTests({
         apiSecret: 'test-secret',
@@ -1096,19 +1102,32 @@ test('fresh-start route maps dry-run/apply, project and conflict results', async
     const dryRun = await app.request('/api/strategy-symbol-policies/strategy-1/saxo%3AFX%3ANAS100/fresh-start', request)
     assert.equal(dryRun.status, 200)
     assert.equal((await dryRun.json()).status, 'CREATE')
-    assert.equal(calls[0]?.confirmProject, undefined)
+    assert.equal(calls[0]?.apply, false)
 
     const apply = await app.request('/api/strategy-symbol-policies/strategy-1/saxo%3AFX%3ANAS100/fresh-start?apply=true', {
         ...request,
-        headers: { ...request.headers, 'X-Confirm-Project': 'test-project' },
     })
     assert.equal(apply.status, 200)
     assert.equal((await apply.json()).status, 'APPLIED')
     assert.equal(calls[1]?.apply, true)
-    assert.equal(calls[1]?.confirmProject, 'test-project')
+    assert.deepEqual(calls[1], {
+        strategyId: 'strategy-1',
+        symbolId: 'saxo:FX:NAS100',
+        sizingMode: 'WEBHOOK_CAPPED',
+        maxAbsPosition: 2,
+        noFlip: true,
+        apply: true,
+    })
+
+    const wrongProjectHeader = await app.request('/api/strategy-symbol-policies/strategy-1/saxo%3AFX%3ANAS100/fresh-start?apply=true', {
+        ...request,
+        headers: { ...request.headers, 'X-Confirm-Project': 'wrong-project' },
+    })
+    assert.equal(wrongProjectHeader.status, 200)
+    assert.equal(calls.length, 3)
+    assert.equal(calls[2]?.apply, true)
 
     for (const [error, code] of [
-        [new FreshStartProjectConfirmationError('PROJECT_MISMATCH', 'wrong project'), 'PROJECT_MISMATCH'],
         [new FreshStartSymbolNotPausedError('bitflyer:BTC_JPY'), 'SYMBOL_NOT_PAUSED'],
         [new FreshStartAlreadyExistsError([]), 'ALREADY_EXISTS'],
         [new FreshStartConflictError([]), 'CONFLICT'],
@@ -3532,4 +3551,182 @@ test('POST /api/webhooks/tradingview: stop_loss_pct + take_profit_pct 両方あ�
     assert.equal(res.status, 202)
     assert.equal(addedOrdersV2[0]?.order_type, 'IFDOCO')
     assert.equal(addedOrdersV2[0]?.exit_sync_status, 'MONITORING')
+})
+
+test('GET /api/strategy-symbol-policies returns the dashboard read model with Bearer auth', async () => {
+    const dashboard = {
+        entries: [{
+            id: 'alpha:bitflyer:BTC_JPY',
+            strategy_id: 'alpha',
+            symbol_id: 'bitflyer:BTC_JPY',
+            ledger_health: 'READY' as const,
+        }],
+        updated_at: 123,
+    }
+    let calls = 0
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        listStrategySymbolPolicyDashboard: async () => {
+            calls += 1
+            return dashboard
+        },
+    })
+
+    const unauthorized = await app.request('/api/strategy-symbol-policies')
+    assert.equal(unauthorized.status, 401)
+    const success = await app.request('/api/strategy-symbol-policies', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+    assert.equal(success.status, 200)
+    assert.deepEqual(await success.json(), dashboard)
+    assert.equal(calls, 1)
+})
+
+test('GET /api/strategy-symbol-policies returns 500 when the dashboard service fails', async () => {
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        listStrategySymbolPolicyDashboard: async () => {
+            throw new Error('firestore unavailable')
+        },
+    })
+
+    const response = await app.request('/api/strategy-symbol-policies', {
+        headers: { Authorization: 'Bearer test-secret' },
+    })
+    assert.equal(response.status, 500)
+    assert.deepEqual(await response.json(), {
+        error: {
+            code: 'INTERNAL_ERROR',
+            message: 'failed to fetch strategy-symbol policies',
+        },
+    })
+})
+
+test('DELETE /api/strategy-symbol-policies requires force and exact target confirmation', async () => {
+    const calls: unknown[] = []
+    const result: DeleteStrategySymbolPolicyResult = {
+        strategy_id: 'alpha',
+        symbol_id: 'bitflyer:BTC_JPY',
+        policy_deleted: true,
+        position_deleted: true,
+        symbol_status: 'paused',
+    }
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        deleteStrategySymbolPolicy: async (input) => {
+            calls.push(input)
+            return result
+        },
+    })
+    const baseRequest = {
+        method: 'DELETE',
+        headers: {
+            Authorization: 'Bearer test-secret',
+            'content-type': 'application/json',
+        },
+    }
+
+    const notForced = await app.request('/api/strategy-symbol-policies/alpha/bitflyer%3ABTC_JPY', baseRequest)
+    assert.equal(notForced.status, 400)
+    assert.equal(calls.length, 0)
+
+    const incomplete = await app.request('/api/strategy-symbol-policies/alpha/bitflyer%3ABTC_JPY?force=true', baseRequest)
+    assert.equal(incomplete.status, 400)
+    assert.equal(calls.length, 0)
+
+    const success = await app.request('/api/strategy-symbol-policies/alpha/bitflyer%3ABTC_JPY?force=true', {
+        ...baseRequest,
+        body: JSON.stringify({ confirmation: 'alpha:bitflyer:BTC_JPY' }),
+    })
+    assert.equal(success.status, 200)
+    assert.deepEqual(await success.json(), result)
+    assert.deepEqual(calls[0], {
+        strategyId: 'alpha',
+        symbolId: 'bitflyer:BTC_JPY',
+        confirmTarget: 'alpha:bitflyer:BTC_JPY',
+        requestId: calls[0] && (calls[0] as { requestId: string }).requestId,
+    })
+
+    const wrongProjectHeader = await app.request('/api/strategy-symbol-policies/alpha/bitflyer%3ABTC_JPY?force=true', {
+        ...baseRequest,
+        headers: { ...baseRequest.headers, 'X-Confirm-Project': 'wrong-project' },
+        body: JSON.stringify({ confirmation: 'alpha:bitflyer:BTC_JPY' }),
+    })
+    assert.equal(wrongProjectHeader.status, 200)
+    assert.equal(calls.length, 2)
+    const secondCall = calls[1] as Record<string, unknown>
+    assert.deepEqual(Object.fromEntries(Object.entries(secondCall).filter(([key]) => key !== 'requestId')), {
+        strategyId: 'alpha',
+        symbolId: 'bitflyer:BTC_JPY',
+        confirmTarget: 'alpha:bitflyer:BTC_JPY',
+    })
+})
+
+test('DELETE /api/strategy-symbol-policies maps auth, not-found, and internal failures', async () => {
+    const path = '/api/strategy-symbol-policies/alpha/bitflyer%3ABTC_JPY?force=true'
+    const request = {
+        method: 'DELETE',
+        headers: {
+            Authorization: 'Bearer test-secret',
+            'content-type': 'application/json',
+        },
+        body: JSON.stringify({ confirmation: 'alpha:bitflyer:BTC_JPY' }),
+    }
+
+    const unauthorized = await createAppForTests({ apiSecret: 'test-secret' }).request(path, {
+        ...request,
+        headers: { ...request.headers, Authorization: 'Bearer wrong-secret' },
+    })
+    assert.equal(unauthorized.status, 401)
+
+    const cases: Array<{ error: Error; status: number; code: string }> = [
+        {
+            error: new StrategySymbolPolicyDeleteSymbolNotFoundError('bitflyer:BTC_JPY'),
+            status: 404,
+            code: 'SYMBOL_NOT_FOUND',
+        },
+        {
+            error: new StrategySymbolPolicyDeleteNotFoundError('alpha', 'bitflyer:BTC_JPY'),
+            status: 404,
+            code: 'POLICY_NOT_FOUND',
+        },
+        {
+            error: new InvalidStoredStrategySymbolPolicyDeleteSymbolError('stored symbol invalid'),
+            status: 500,
+            code: 'INTERNAL_ERROR',
+        },
+        {
+            error: new Error('unexpected failure'),
+            status: 500,
+            code: 'INTERNAL_ERROR',
+        },
+    ]
+
+    for (const testCase of cases) {
+        const app = createAppForTests({
+            apiSecret: 'test-secret',
+            deleteStrategySymbolPolicy: async () => { throw testCase.error },
+        })
+        const response = await app.request(path, request)
+        assert.equal(response.status, testCase.status)
+        const body = await response.json() as { error: { code: string } }
+        assert.equal(body.error.code, testCase.code)
+    }
+})
+
+test('DELETE /api/strategy-symbol-policies logs rejected request without confirmation values', async () => {
+    const { logger, calls } = createLoggerStub()
+    const app = createAppForTests({ apiSecret: 'test-secret', logger })
+    const response = await app.request('/api/strategy-symbol-policies/alpha/bitflyer%3ABTC_JPY?force=true', {
+        method: 'DELETE',
+        headers: {
+            Authorization: 'Bearer test-secret',
+            'content-type': 'application/json',
+        },
+        body: JSON.stringify({ unexpected: 'secret-value' }),
+    })
+    assert.equal(response.status, 400)
+    const serialized = stringifyLogCalls(calls)
+    assert.match(serialized, /strategy_symbol_policy:force_delete_rejected/)
+    assert.doesNotMatch(serialized, /secret-value|wrong-project/)
 })

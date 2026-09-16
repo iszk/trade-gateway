@@ -427,7 +427,6 @@ OpenAPI は全 endpoint を一括で定義していない。機械可読な契�
 ```http
 POST /api/strategy-symbol-policies/strategy-b/dummy%3ABTC/fresh-start?apply=true
 Authorization: Bearer ...
-X-Confirm-Project: trade-gateway-prod
 Content-Type: application/json
 
 {
@@ -437,7 +436,7 @@ Content-Type: application/json
 }
 ```
 
-`apply=true` がないリクエストは dry-run であり、Firestore write は発生しない。dry-run は symbol が `active` でも実行でき、結果の `status` は `CREATE`、`requires_pause` は `true` となる。apply前に symbol を `paused` に変更し、in-flight webhook / 注文同期の完了を確認する。applyには `X-Confirm-Project` が必須で、実行中APIの GCP project IDと完全一致しなければならない。
+`apply=true` がないリクエストは dry-run であり、Firestore write は発生しない。dry-run は symbol が `active` でも実行でき、結果の `status` は `CREATE`、`requires_pause` は `true` となる。apply前に symbol を `paused` に変更し、in-flight webhook / 注文同期の完了を確認する。applyは API_SECRET の Bearer 認証を使用する。API_URL の接続先取り違えは project ID では検出しない。接続先 URL と API_SECRET の環境別設定・配布・確認で管理する。
 
 #### 成功レスポンス
 
@@ -464,12 +463,67 @@ apply成功は `status=APPLIED`, `mode=APPLY` となり、同一 transaction で
 - `400 INVALID_REQUEST`: canonicalでない path、strict body、mode、数量範囲、step整合性が不正
 - `401 UNAUTHORIZED`: Bearer トークン不足・不正
 - `404 SYMBOL_NOT_FOUND`: 対象 symbol が未登録
-- `409 PROJECT_CONFIRMATION_REQUIRED` / `PROJECT_MISMATCH` / `PROJECT_ID_UNAVAILABLE`: applyのproject guard不成立
 - `409 SYMBOL_NOT_PAUSED`: apply対象 symbol が active
 - `409 ALREADY_EXISTS`: policyとpositionが完全に初期状態でも再実行は成功扱いにしない
 - `409 CONFLICT`: policy/positionの部分欠落・不一致・破損、対象 strategy の注文履歴（`PENDING`を含む）、reservation、symbol constraints破損など。`issues[].reason` で理由を確認する
 
-### 16. Saxo portfolio snapshot 取得
+### 16. Strategy × symbol policy / 仮想 position 一覧
+
+- Method/Path: `GET /api/strategy-symbol-policies`
+- 認証: 必要（`API_SECRET` の Bearer トークン）
+- 役割: `strategy_symbol_policies` と `strategy_symbol_positions` を document ID（`strategy_id:symbol_id`）で対応付け、broker の実ポジションを含めずに返す。全件取得であり、画面側で strategy / symbol 順に表示する。
+
+```json
+{
+  "entries": [
+    {
+      "id": "mean_reversion:bitflyer:BTC_JPY",
+      "strategy_id": "mean_reversion",
+      "symbol_id": "bitflyer:BTC_JPY",
+      "policy": { "...": "validated policy document" },
+      "position": { "...": "validated virtual position document" },
+      "ledger_health": "READY"
+    }
+  ],
+  "updated_at": 1710000000000
+}
+```
+
+`ledger_health` は `READY`、`MISSING_POSITION`、`ORPHAN_POSITION`、`VERSION_MISMATCH`、`INVALID_POLICY`、`INVALID_POSITION` のいずれかである。不正 document は数量や identity をゼロ値・既定値で補完せず、安全に検証できる document ID 由来の情報と異常状態だけを返す。`READY` 以外も画面全体を失敗させず、手動確認対象として表示する。
+
+#### エラーレスポンス
+
+- `401 UNAUTHORIZED`: Bearer トークン不足・不正
+- `500 INTERNAL_ERROR`: Firestore 障害
+
+### 17. Strategy × symbol policy / 仮想 position 強制削除
+
+- Method/Path: `DELETE /api/strategy-symbol-policies/:strategy_id/:symbol_id?force=true`
+- 認証: 必要（`API_SECRET` の Bearer トークン）
+- 役割: 強い破壊操作として、対象 symbol を `paused` に更新し、同一 Firestore transaction で対象 policy と仮想 position を物理削除する。`orders_v2` と `strategy_symbol_reservations` は参照・変更・削除しない。保存内容が不正でも document path で対象を確定し、存在する document を削除する。
+- body の完全な `confirmation`（`strategy_id:symbol_id`）が必須。削除後に symbol を自動再開しない。API_URL の接続先取り違えは project ID では検出しない。接続先 URL と API_SECRET の環境別設定・配布・確認で管理する。
+
+```http
+DELETE /api/strategy-symbol-policies/strategy-b/bitflyer%3ABTC_JPY?force=true
+Authorization: Bearer ...
+Content-Type: application/json
+
+{ "confirmation": "strategy-b:bitflyer:BTC_JPY" }
+```
+
+成功レスポンスには `policy_deleted`、`position_deleted`、最終 `symbol_status=paused` を含む。検証可能な position の場合だけ削除前の `confirmed_position`、`pending_delta`、`status`、`policy_version` 要約を返す。不正 position の数量は返さない。
+
+#### エラーレスポンス
+
+- `400 FORCE_REQUIRED` / `INVALID_REQUEST`: `force=true`、path、JSON、確認値が不正
+- `401 UNAUTHORIZED`: Bearer トークン不足・不正
+- `404 SYMBOL_NOT_FOUND`: symbol が存在しない
+- `404 POLICY_NOT_FOUND`: policy と仮想 position の両方が存在しない
+- `500 INTERNAL_ERROR`: symbol の保存値または Firestore 障害
+
+削除成功・失敗は strategy ID、symbol ID、request ID、対象 document の存在有無、symbol 最終状態を構造化 warning log に残す。確認入力値や token は log に出さない。API_SECRET は Bearer 認証にのみ使用する。
+
+### 18. Saxo portfolio snapshot 取得
 - Method/Path: `GET /api/saxo/portfolio-snapshot`
 - 認証: 必要（Bearerトークン）
 - 役割: Saxo の現在の口座・現金残高・建玉を `portfolio-snapshot.v1` 形式で返す。
