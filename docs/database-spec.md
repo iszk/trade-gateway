@@ -231,6 +231,14 @@ strategy × symbol ごとの仮想 position を保持する runtime state。poli
 
 `MANUAL_REVIEW` は dispatch 結果不明等の状態であり、pending を保持する。`MISMATCH` は broker aggregate との差分を表す調査状態として利用できるが、reconciliation はこの status を変更せず、差分を strategy へ推測配分しない。
 
+### policy / position dashboard と強制削除
+
+管理画面の一覧は policy と同じ document ID の position だけを対応付ける。broker の実ポジションや別 strategy の状態を position に補完しない。policy または position が欠落・破損している場合も、数量を `0` や既定値へ置き換えず、`MISSING_POSITION`、`ORPHAN_POSITION`、`INVALID_POLICY`、`INVALID_POSITION` などの ledger health を返す。両方が検証できても `policy.version` と `position.policy_version` が一致しなければ `VERSION_MISMATCH` とする。
+
+強制削除は routine な reset ではなく、`force=true`、API_SECRET の Bearer 認証、完全な `{strategy_id}:{symbol_id}` の再入力を要求する。API_URL の接続先取り違えは project ID では検出しない。接続先 URL と API_SECRET の環境別設定・配布・確認で管理する。Firestore transaction 内で symbol を paused にしてから対象 policy / position を delete するため、symbol の pause と ledger deletion は同時に commit される。注文履歴（`orders_v2`）、reservation、broker position は変更しない。削除対象 document が破損していても path を正とし、position の要約は strict 検証できた場合だけ返す。
+
+削除後は symbol を paused のまま維持する。現在の `ALLOW_UNREGISTERED_STRATEGY_POLICY_FALLBACK=true` では、削除後に symbol を active に戻すと未登録 strategy の webhook が policy 制約なしの互換経路で発注され得る。また後着約定の execution sync は削除済み ledger を更新できないため、削除前の pending / broker 状態を自動復旧できない。再開する場合は replacement policy と新しい zero ledger の作成、および broker / order / reservation の手動確認を完了してから行う。
+
 ### broker × symbol reconciliation
 
 10分 cron は broker の完全な position snapshot と `strategy_symbol_positions` を symbol 単位で集約する。BUY/long を正、SELL/short を負とし、`strategy_confirmed_total`、`strategy_pending_total`、`strategy_effective_total`（confirmed + pending）、`broker_position_total` を監査用に算出する。複数 strategy / broker leg は net 集約し、差分を個別 strategy へ配分しない。

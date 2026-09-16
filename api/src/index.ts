@@ -18,11 +18,21 @@ import { createDefaultEnsureTradableSymbolFn, createDefaultGetTradableSymbolFn, 
 import type { EnsureTradableSymbolFn, GetTradableSymbolFn, ListTradableSymbolsFn, UpdateTradeControlFn, UpsertTradableSymbolFn } from './services/tradable-symbols.js'
 import { createDefaultGetStrategySymbolPolicyFn, createDefaultPutStrategySymbolPolicyFn, InvalidStoredStrategySymbolPolicyError, InvalidStrategySymbolPolicyError, StrategySymbolPolicyNotFoundError, SymbolConstraintsRequiredError, SymbolNotFoundError, isValidStrategyId } from './services/strategy-symbol-policies.js'
 import type { GetStrategySymbolPolicyFn, PutStrategySymbolPolicyFn } from './services/strategy-symbol-policies.js'
+import { createDefaultListStrategySymbolPolicyDashboardFn } from './services/strategy-symbol-policy-dashboard.js'
+import type { ListStrategySymbolPolicyDashboardFn } from './services/strategy-symbol-policy-dashboard.js'
+import {
+    createDefaultDeleteStrategySymbolPolicyFn,
+    InvalidStoredStrategySymbolPolicyDeleteSymbolError,
+    InvalidStrategySymbolPolicyDeleteInputError,
+    StrategySymbolPolicyDeleteNotFoundError,
+    StrategySymbolPolicyDeleteSymbolNotFoundError,
+    StrategySymbolPolicyDeleteTargetConfirmationError,
+} from './services/strategy-symbol-policy-delete.js'
+import type { DeleteStrategySymbolPolicyFn } from './services/strategy-symbol-policy-delete.js'
 import {
     createDefaultFreshStartStrategySymbolFn,
     FreshStartAlreadyExistsError,
     FreshStartConflictError,
-    FreshStartProjectConfirmationError,
     FreshStartSymbolNotFoundError,
     FreshStartSymbolNotPausedError,
     InvalidFreshStartPolicyError,
@@ -297,6 +307,8 @@ type CreateAppOptions = {
     ensureTradableSymbol?: EnsureTradableSymbolFn
     getStrategySymbolPolicy?: GetStrategySymbolPolicyFn
     putStrategySymbolPolicy?: PutStrategySymbolPolicyFn
+    listStrategySymbolPolicyDashboard?: ListStrategySymbolPolicyDashboardFn
+    deleteStrategySymbolPolicy?: DeleteStrategySymbolPolicyFn
     freshStartStrategySymbol?: FreshStartStrategySymbolFn
     reserveStrategySymbolOrder?: ReserveStrategySymbolOrderFn
     applyStrategySymbolDispatchOutcome?: ApplyStrategySymbolDispatchOutcomeFn
@@ -338,6 +350,10 @@ export const createApp = (options: CreateAppOptions = {}) => {
     const ensureTradableSymbol = options.ensureTradableSymbol ?? createDefaultEnsureTradableSymbolFn()
     const getStrategySymbolPolicy = options.getStrategySymbolPolicy ?? createDefaultGetStrategySymbolPolicyFn()
     const putStrategySymbolPolicy = options.putStrategySymbolPolicy ?? createDefaultPutStrategySymbolPolicyFn()
+    const listStrategySymbolPolicyDashboard = options.listStrategySymbolPolicyDashboard
+        ?? createDefaultListStrategySymbolPolicyDashboardFn()
+    const deleteStrategySymbolPolicy = options.deleteStrategySymbolPolicy
+        ?? createDefaultDeleteStrategySymbolPolicyFn()
     const freshStartStrategySymbol = options.freshStartStrategySymbol ?? createDefaultFreshStartStrategySymbolFn()
     const reserveStrategySymbolOrder = options.reserveStrategySymbolOrder ?? createDefaultReserveStrategySymbolOrderFn()
     const applyStrategySymbolDispatchOutcome = options.applyStrategySymbolDispatchOutcome ?? createDefaultApplyStrategySymbolDispatchOutcomeFn()
@@ -516,6 +532,14 @@ export const createApp = (options: CreateAppOptions = {}) => {
         sizing_mode: z.literal('WEBHOOK_CAPPED'),
         max_abs_position: finitePositiveNumberSchema,
         no_flip: z.boolean(),
+    }).strict()
+
+    // Force deletion is intentionally explicit and cannot be triggered by a
+    // browser-side confirm dialog alone. `confirmation` must be the complete
+    // strategy_id:symbol_id value shown on the server-rendered confirmation
+    // page.
+    const forceDeleteStrategySymbolSchema = z.object({
+        confirmation: z.string().min(1),
     }).strict()
 
     const createWebhookHandler = ({
@@ -1747,7 +1771,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 maxAbsPosition: parsedBody.data.max_abs_position,
                 noFlip: parsedBody.data.no_flip,
                 apply,
-                ...(apply ? { confirmProject: c.req.header('X-Confirm-Project') } : {}),
             })
             return c.json(result)
         } catch (err) {
@@ -1759,9 +1782,6 @@ export const createApp = (options: CreateAppOptions = {}) => {
             }
             if (err instanceof FreshStartSymbolNotFoundError) {
                 return c.json(errorBody('SYMBOL_NOT_FOUND', 'symbol is not found'), 404)
-            }
-            if (err instanceof FreshStartProjectConfirmationError) {
-                return c.json(errorBody(err.code, err.message), 409)
             }
             if (err instanceof FreshStartSymbolNotPausedError) {
                 return c.json(errorBody('SYMBOL_NOT_PAUSED', err.message), 409)
@@ -1788,6 +1808,92 @@ export const createApp = (options: CreateAppOptions = {}) => {
                 reason: err instanceof Error ? err.name : 'UNKNOWN_ERROR',
             }, 'failed to fresh-start strategy-symbol sizing ledger')
             return c.json(errorBody('INTERNAL_ERROR', 'failed to fresh-start strategy-symbol sizing ledger'), 500)
+        }
+    })
+
+    app.get('/api/strategy-symbol-policies', requireApiSecret, async (c) => {
+        try {
+            return c.json(await listStrategySymbolPolicyDashboard())
+        } catch (err) {
+            logger.warn({
+                event: 'strategy_symbol_policy_dashboard:fetch_failed',
+                error: err instanceof Error ? err.name : err,
+            }, 'failed to fetch strategy-symbol policy dashboard')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch strategy-symbol policies'), 500)
+        }
+    })
+
+    app.delete('/api/strategy-symbol-policies/:strategy_id/:symbol_id', requireApiSecret, async (c) => {
+        const requestId = getRequestId(c.req.raw.headers)
+        c.header('x-request-id', requestId)
+        const strategyId = decodeSymbolIdParam(c.req.param('strategy_id'))
+        const symbolId = decodeSymbolIdParam(c.req.param('symbol_id'))
+        const logRejectedRequest = (reason: string): void => {
+            logger.warn({
+                event: 'strategy_symbol_policy:force_delete_rejected',
+                request_id: requestId,
+                ...(isValidStrategyId(strategyId) ? { strategy_id: strategyId } : {}),
+                ...(parseValidSymbolId(symbolId) ? { symbol_id: symbolId } : {}),
+                reason,
+            }, 'force-delete request was rejected before deletion')
+        }
+        if (!isValidStrategyId(strategyId) || !parseValidSymbolId(symbolId)) {
+            logRejectedRequest('INVALID_PATH')
+            return c.json(errorBody('INVALID_REQUEST', 'strategy_id or symbol_id is invalid'), 400)
+        }
+        if (c.req.query('force') !== 'true') {
+            logRejectedRequest('FORCE_REQUIRED')
+            return c.json(errorBody('FORCE_REQUIRED', 'force=true is required for policy deletion'), 400)
+        }
+
+        let body: unknown
+        try {
+            body = await c.req.json()
+        } catch {
+            logRejectedRequest('INVALID_JSON')
+            return c.json(errorBody('INVALID_REQUEST', 'invalid JSON body'), 400)
+        }
+
+        const parsedBody = forceDeleteStrategySymbolSchema.safeParse(body)
+        if (!parsedBody.success) {
+            const message = parsedBody.error.issues
+                .map((issue: z.ZodIssue) => `${issue.path.join('.') || 'body'}: ${issue.message}`)
+                .join('; ')
+            logRejectedRequest('INVALID_CONFIRMATION_BODY')
+            return c.json(errorBody('INVALID_REQUEST', message), 400)
+        }
+
+        try {
+            const result = await deleteStrategySymbolPolicy({
+                strategyId,
+                symbolId,
+                confirmTarget: parsedBody.data.confirmation,
+                requestId,
+            })
+            return c.json(result)
+        } catch (err) {
+            if (err instanceof InvalidStrategySymbolPolicyDeleteInputError ||
+                err instanceof StrategySymbolPolicyDeleteTargetConfirmationError) {
+                return c.json(errorBody('INVALID_REQUEST', err.message), 400)
+            }
+            if (err instanceof StrategySymbolPolicyDeleteSymbolNotFoundError) {
+                return c.json(errorBody('SYMBOL_NOT_FOUND', 'symbol is not found'), 404)
+            }
+            if (err instanceof StrategySymbolPolicyDeleteNotFoundError) {
+                return c.json(errorBody('POLICY_NOT_FOUND', 'policy and virtual position are not found'), 404)
+            }
+            if (err instanceof InvalidStoredStrategySymbolPolicyDeleteSymbolError) {
+                return c.json(errorBody('INTERNAL_ERROR', 'stored symbol is invalid'), 500)
+            }
+
+            logger.warn({
+                event: 'strategy_symbol_policy:force_delete_route_failed',
+                request_id: requestId,
+                strategy_id: strategyId,
+                symbol_id: symbolId,
+                error: err instanceof Error ? err.name : err,
+            }, 'failed to force-delete strategy-symbol policy')
+            return c.json(errorBody('INTERNAL_ERROR', 'failed to delete strategy-symbol policy'), 500)
         }
     })
 
@@ -2130,12 +2236,41 @@ export type {
     StrategySymbolSizingMode,
     WebhookCappedStrategySymbolPolicy,
 } from './types/strategy-symbol-policy.js'
+export type {
+    StrategySymbolPolicyDashboardEntry,
+    StrategySymbolPolicyDashboardResponse,
+    StrategySymbolPolicyLedgerHealth,
+} from './types/strategy-symbol-policy-dashboard.js'
+export type { StrategySymbolPosition, StrategySymbolPositionStatus } from './types/strategy-symbol-position.js'
+export {
+    createListStrategySymbolPolicyDashboardFn,
+    createDefaultListStrategySymbolPolicyDashboardFn,
+} from './services/strategy-symbol-policy-dashboard.js'
+export type {
+    ListStrategySymbolPolicyDashboardFn,
+    StrategySymbolPolicyDashboardServiceOptions,
+} from './services/strategy-symbol-policy-dashboard.js'
+export {
+    createDeleteStrategySymbolPolicyFn,
+    createDefaultDeleteStrategySymbolPolicyFn,
+    InvalidStoredStrategySymbolPolicyDeleteSymbolError,
+    InvalidStrategySymbolPolicyDeleteInputError,
+    StrategySymbolPolicyDeleteNotFoundError,
+    StrategySymbolPolicyDeleteSymbolNotFoundError,
+    StrategySymbolPolicyDeleteTargetConfirmationError,
+} from './services/strategy-symbol-policy-delete.js'
+export type {
+    DeleteStrategySymbolPolicyFn,
+    DeleteStrategySymbolPolicyInput,
+    DeleteStrategySymbolPolicyResult,
+    DeletedPositionSummary,
+    StrategySymbolPolicyDeleteServiceOptions,
+} from './services/strategy-symbol-policy-delete.js'
 export {
     createFreshStartStrategySymbolFn,
     createDefaultFreshStartStrategySymbolFn,
     FreshStartAlreadyExistsError,
     FreshStartConflictError,
-    FreshStartProjectConfirmationError,
     FreshStartSymbolNotFoundError,
     FreshStartSymbolNotPausedError,
     InvalidFreshStartPolicyError,

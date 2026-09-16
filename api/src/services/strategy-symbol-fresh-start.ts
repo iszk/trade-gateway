@@ -41,7 +41,6 @@ export type FreshStartStrategySymbolInput = {
     maxAbsPosition: number
     noFlip: boolean
     apply?: boolean
-    confirmProject?: string
 }
 
 export type FreshStartIssue = {
@@ -75,7 +74,6 @@ export type FreshStartStrategySymbolFn = (
 
 export type FreshStartStrategySymbolServiceOptions = {
     db?: Firestore
-    projectId?: string
     now?: () => Date
 }
 
@@ -94,16 +92,6 @@ export class FreshStartSymbolNotFoundError extends Error {
     constructor(symbolId: string) {
         super(`symbol is not found: ${symbolId}`)
         this.name = 'FreshStartSymbolNotFoundError'
-    }
-}
-
-export class FreshStartProjectConfirmationError extends Error {
-    readonly code: 'PROJECT_CONFIRMATION_REQUIRED' | 'PROJECT_MISMATCH' | 'PROJECT_ID_UNAVAILABLE'
-
-    constructor(code: 'PROJECT_CONFIRMATION_REQUIRED' | 'PROJECT_MISMATCH' | 'PROJECT_ID_UNAVAILABLE', message: string) {
-        super(message)
-        this.name = 'FreshStartProjectConfirmationError'
-        this.code = code
     }
 }
 
@@ -218,9 +206,6 @@ const assertInput = (input: FreshStartStrategySymbolInput): void => {
     }
     if (input.apply !== undefined && typeof input.apply !== 'boolean') {
         throw new InvalidFreshStartStrategySymbolInputError('apply is invalid')
-    }
-    if (input.confirmProject !== undefined && typeof input.confirmProject !== 'string') {
-        throw new InvalidFreshStartStrategySymbolInputError('confirmProject is invalid')
     }
 }
 
@@ -659,23 +644,11 @@ const runApply = async (
 
 const createService = (options: FreshStartStrategySymbolServiceOptions): FreshStartStrategySymbolFn => {
     const db = options.db ?? getFirestoreClient()
-    const projectId = options.projectId ?? process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT
     const now = options.now ?? (() => new Date())
 
     return async (input) => {
         assertInput(input)
         const apply = input.apply === true
-        if (apply) {
-            if (input.confirmProject === undefined || input.confirmProject.length === 0) {
-                throw new FreshStartProjectConfirmationError('PROJECT_CONFIRMATION_REQUIRED', 'X-Confirm-Project is required for apply')
-            }
-            if (!projectId) {
-                throw new FreshStartProjectConfirmationError('PROJECT_ID_UNAVAILABLE', 'runtime project id is unavailable')
-            }
-            if (input.confirmProject !== projectId) {
-                throw new FreshStartProjectConfirmationError('PROJECT_MISMATCH', 'X-Confirm-Project does not match the runtime project')
-            }
-        }
 
         const state = await readState({
             get: (ref) => ref.get() as unknown as Promise<SnapshotLike | QuerySnapshotLike>,

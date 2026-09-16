@@ -31,7 +31,6 @@ test('fresh-start emulator flow creates atomically, reruns fail-closed, and igno
     const now = new Date('2026-08-20T00:00:00.000Z')
     const freshStart = createFreshStartStrategySymbolFn({
         db,
-        projectId: process.env.GOOGLE_CLOUD_PROJECT ?? 'trade-gateway-test',
         now: () => now,
     })
 
@@ -89,7 +88,6 @@ test('fresh-start emulator flow creates atomically, reruns fail-closed, and igno
         maxAbsPosition: 2,
         noFlip: true,
         apply: true,
-        confirmProject: process.env.GOOGLE_CLOUD_PROJECT ?? 'trade-gateway-test',
     })
     assert.equal(applied.status, 'APPLIED')
     assert.equal((await db.collection('strategy_symbol_positions').doc(positionId).get()).data()?.confirmed_position, 0)
@@ -116,17 +114,13 @@ test('fresh-start emulator flow creates atomically, reruns fail-closed, and igno
         updated_at: now,
     })
     t.after(() => db.collection('tradable_symbols').doc(activeSymbolId).delete())
-    await assert.rejects(createFreshStartStrategySymbolFn({
-        db,
-        projectId: process.env.GOOGLE_CLOUD_PROJECT ?? 'trade-gateway-test',
-    })({
+    await assert.rejects(createFreshStartStrategySymbolFn({ db })({
         strategyId,
         symbolId: activeSymbolId,
         sizingMode: 'WEBHOOK_CAPPED',
         maxAbsPosition: 2,
         noFlip: true,
         apply: true,
-        confirmProject: process.env.GOOGLE_CLOUD_PROJECT ?? 'trade-gateway-test',
     }), FreshStartSymbolNotPausedError)
 
     await db.collection('strategy_symbol_positions').doc(positionId).delete()

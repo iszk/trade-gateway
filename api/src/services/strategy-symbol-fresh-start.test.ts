@@ -148,7 +148,7 @@ const seedSymbol = (
 test('fresh-start rejects noncanonical service input before reading Firestore', async () => {
     const db = makeFirestoreMock()
     seedSymbol(db)
-    const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project' })
+    const freshStart = createFreshStartStrategySymbolFn({ db })
     const invalidInputs = [
         input({ strategyId: ' fresh_strategy' }),
         input({ symbolId: 'dummy:FRESH/JPY' }),
@@ -166,7 +166,7 @@ test('fresh-start rejects noncanonical service input before reading Firestore', 
 test('fresh-start defaults to a read-only CREATE dry-run', async () => {
     const db = makeFirestoreMock()
     seedSymbol(db, 'active')
-    const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project', now: () => now })
+    const freshStart = createFreshStartStrategySymbolFn({ db, now: () => now })
 
     const result = await freshStart(input())
     assert.equal(result.status, 'CREATE')
@@ -181,9 +181,9 @@ test('fresh-start defaults to a read-only CREATE dry-run', async () => {
 test('fresh-start apply creates policy and zero position atomically without broker state', async () => {
     const db = makeFirestoreMock()
     seedSymbol(db)
-    const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project', now: () => now })
+    const freshStart = createFreshStartStrategySymbolFn({ db, now: () => now })
 
-    const result = await freshStart(input({ apply: true, confirmProject: 'test-project' }))
+    const result = await freshStart(input({ apply: true }))
     assert.equal(result.status, 'APPLIED')
     assert.equal(result.policy?.enabled, true)
     assert.equal(result.policy?.version, 1)
@@ -196,24 +196,15 @@ test('fresh-start apply creates policy and zero position atomically without brok
     assert.deepEqual(Object.keys(db.docs.strategy_symbol_positions ?? {}), [createStrategySymbolPositionId(strategyId, symbolId)])
 })
 
-test('fresh-start requires project confirmation and pauses only for apply', async () => {
+test('fresh-start pauses only for apply without project confirmation', async () => {
     const db = makeFirestoreMock()
     seedSymbol(db)
-    const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project' })
-
-    await assert.rejects(freshStart(input({ apply: true })), (error: unknown) => (
-        error instanceof Error && 'code' in error && error.code === 'PROJECT_CONFIRMATION_REQUIRED'
-    ))
-    await assert.rejects(freshStart(input({ apply: true, confirmProject: 'wrong-project' })), (error: unknown) => (
-        error instanceof Error && 'code' in error && error.code === 'PROJECT_MISMATCH'
-    ))
-    assert.equal(db.writes.length, 0)
 
     const activeDb = makeFirestoreMock()
     seedSymbol(activeDb, 'active')
-    const activeFreshStart = createFreshStartStrategySymbolFn({ db: activeDb, projectId: 'test-project' })
+    const activeFreshStart = createFreshStartStrategySymbolFn({ db: activeDb })
     await assert.rejects(
-        activeFreshStart(input({ apply: true, confirmProject: 'test-project' })),
+        activeFreshStart(input({ apply: true })),
         FreshStartSymbolNotPausedError,
     )
     assert.equal(activeDb.writes.length, 0)
@@ -222,8 +213,8 @@ test('fresh-start requires project confirmation and pauses only for apply', asyn
 test('fresh-start returns ALREADY_EXISTS for a complete initial state and CONFLICT for partial state', async () => {
     const db = makeFirestoreMock()
     seedSymbol(db)
-    const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project', now: () => now })
-    await freshStart(input({ apply: true, confirmProject: 'test-project' }))
+    const freshStart = createFreshStartStrategySymbolFn({ db, now: () => now })
+    await freshStart(input({ apply: true }))
 
     await assert.rejects(freshStart(input()), FreshStartAlreadyExistsError)
 
@@ -232,7 +223,7 @@ test('fresh-start returns ALREADY_EXISTS for a complete initial state and CONFLI
     partialDb.docs.strategy_symbol_policies = {
         [createStrategySymbolPolicyId(strategyId, symbolId)]: db.docs.strategy_symbol_policies![createStrategySymbolPolicyId(strategyId, symbolId)]!,
     }
-    const partialFreshStart = createFreshStartStrategySymbolFn({ db: partialDb, projectId: 'test-project' })
+    const partialFreshStart = createFreshStartStrategySymbolFn({ db: partialDb })
     await assert.rejects(partialFreshStart(input()), FreshStartConflictError)
     assert.equal(partialDb.writes.length, 0)
 })
@@ -256,7 +247,7 @@ test('fresh-start blocks target history and reservation but ignores another stra
             status: 'PENDING',
         },
     }
-    const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project' })
+    const freshStart = createFreshStartStrategySymbolFn({ db })
     await assert.rejects(freshStart(input()), (error: unknown) => (
         error instanceof FreshStartConflictError && error.issues.some((entry) => entry.reason === 'PENDING_ORDER')
     ))
@@ -289,7 +280,7 @@ test('fresh-start uses persisted effective identity before the legacy display va
             status: 'EXECUTED',
         },
     }
-    const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project' })
+    const freshStart = createFreshStartStrategySymbolFn({ db })
     await assert.rejects(freshStart(input()), (error: unknown) => (
         error instanceof FreshStartConflictError && error.issues.some((entry) => entry.reason === 'ORDER_HISTORY')
     ))
@@ -333,7 +324,7 @@ test('fresh-start fails closed on conflicting order symbol identity and scopes o
                 status: 'PENDING',
             },
         }
-        const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project' })
+        const freshStart = createFreshStartStrategySymbolFn({ db })
         assert.equal((await freshStart(input())).status, 'CREATE')
 
         db.docs.orders_v2.conflictingSymbol = {
@@ -356,14 +347,14 @@ test('fresh-start fails closed on conflicting order symbol identity and scopes o
 test('fresh-start validates stored constraints through the policy validator', async () => {
     const db = makeFirestoreMock()
     seedSymbol(db, 'paused', { quantity_step: 0.1, min_order_size: 0.1 })
-    const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project' })
+    const freshStart = createFreshStartStrategySymbolFn({ db })
 
     await assert.rejects(freshStart(input({ maxAbsPosition: 0.15 })), InvalidFreshStartPolicyError)
     assert.equal(db.writes.length, 0)
 
     const invalidConstraintsDb = makeFirestoreMock()
     seedSymbol(invalidConstraintsDb, 'paused', { quantity_step: 0, min_order_size: 0.1 })
-    const invalidConstraintsFreshStart = createFreshStartStrategySymbolFn({ db: invalidConstraintsDb, projectId: 'test-project' })
+    const invalidConstraintsFreshStart = createFreshStartStrategySymbolFn({ db: invalidConstraintsDb })
     await assert.rejects(invalidConstraintsFreshStart(input()), FreshStartConflictError)
     assert.equal(invalidConstraintsDb.writes.length, 0)
 })
@@ -445,12 +436,12 @@ test('fresh-start apply re-reads state and refuses races without partial creates
         let applyMutation: (() => void) | undefined
         const db = makeFirestoreMock({ beforeTransaction: () => applyMutation?.() })
         seedSymbol(db)
-        const freshStart = createFreshStartStrategySymbolFn({ db, projectId: 'test-project', now: () => now })
+        const freshStart = createFreshStartStrategySymbolFn({ db, now: () => now })
         assert.equal((await freshStart(input())).status, 'CREATE', mutation.name)
         applyMutation = () => mutation.mutate(db)
 
         await assert.rejects(
-            freshStart(input({ apply: true, confirmProject: 'test-project' })),
+            freshStart(input({ apply: true })),
             (error: unknown) => error instanceof FreshStartConflictError || error instanceof FreshStartSymbolNotPausedError,
             mutation.name,
         )
