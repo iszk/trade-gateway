@@ -35,6 +35,10 @@ COPY api/package*.json ./api/
 # update npm
 RUN npm install -g npm@latest
 
+# ビルドログに node のバージョンを出力
+RUN node -v
+RUN npm -v
+
 # Install only production dependencies
 RUN npm ci --omit=dev
 

@@ -15,7 +15,11 @@ setup:
 
 # すべてデプロイする
 deploy:
+    just gcloud-auth
     just api deploy
+
+gcloud-auth:
+    gcloud auth activate-service-account --key-file=gcloud.key.json
 
 test:
     just api test
