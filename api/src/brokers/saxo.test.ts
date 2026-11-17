@@ -5,6 +5,7 @@ import type { Firestore } from 'firebase-admin/firestore'
 import type { SaxoAuthStore } from './saxo-auth-store.js'
 import type { OrderV2 } from '../types/order-v2.js'
 import { SaxoClient as ProductionSaxoClient } from './saxo.js'
+import { SaxoSnapshotDiagnosticError } from './saxo-diagnostics.js'
 
 const TEST_TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64')
 
@@ -54,6 +55,21 @@ const mockFirestore = (data: Record<string, any> = {}) => {
     }
     return db as unknown as Firestore & { _getStoredData: () => Record<string, unknown> }
 }
+
+const createSnapshotAuthDocument = (overrides: Record<string, unknown> = {}) => ({
+    accessToken: 'valid-snapshot-token',
+    refreshToken: 'valid-snapshot-refresh-token',
+    accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+    refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    accounts: [{
+        accountKey: 'snapshot-account',
+        clientKey: 'snapshot-client',
+        legalAssetTypes: ['Stock'],
+        currency: 'JPY',
+        displayName: 'Snapshot account',
+    }],
+    ...overrides,
+})
 
 const createCapturingLogger = () => {
     const infoLogs: Array<{ obj: Record<string, unknown>, msg?: string }> = []
@@ -350,6 +366,114 @@ test('SaxoClient.getValidAccessToken は active refresh lease の待機 timeout 
     )
 })
 
+test('SaxoClient は refresh 待機中に一時的な auth null があっても復旧を待つ', async (t) => {
+    const now = Date.now()
+    const expiredAuth = createSnapshotAuthDocument({
+        accessToken: 'expired-access-token',
+        accessTokenExpiresAt: now - 1_000,
+        refreshTokenExpiresAt: now + 86_400_000,
+    })
+    const freshAuth = createSnapshotAuthDocument({
+        accessToken: 'recovered-access-token',
+        accessTokenExpiresAt: now + 3_600_000,
+        refreshTokenExpiresAt: now + 86_400_000,
+    })
+    const createAlreadyRefreshingStore = (getAuth: () => Promise<unknown>) => ({
+        getAuth,
+        acquireRefreshLease: async () => ({ status: 'already-refreshing' as const }),
+    }) as unknown as SaxoAuthStore
+
+    await t.test('non-strict token API は途中の null 後に有効 token を返す', async () => {
+        let readCount = 0
+        const authStore = createAlreadyRefreshingStore(async () => {
+            readCount += 1
+            if (readCount === 1) return expiredAuth
+            if (readCount === 2) return null
+            return freshAuth
+        })
+        const client = new SaxoClient({ authStore, refreshWaitIntervalMs: 0 })
+
+        assert.equal(await client.getValidAccessToken(), 'recovered-access-token')
+        assert.equal(readCount, 3)
+    })
+
+    await t.test('strict snapshot API は途中の null 後に有効 token で snapshot を返す', async () => {
+        let readCount = 0
+        const authStore = createAlreadyRefreshingStore(async () => {
+            readCount += 1
+            if (readCount === 1) return expiredAuth
+            if (readCount === 2) return null
+            return freshAuth
+        })
+        const client = new SaxoClient({
+            authStore,
+            refreshWaitIntervalMs: 0,
+            baseUrl: 'https://example.com',
+            fetchImpl: async (input) => {
+                const path = new URL(String(input)).pathname
+                if (path === '/port/v1/balances/me') {
+                    return new Response(JSON.stringify({ CashBalance: 0, Currency: 'JPY' }), { status: 200 })
+                }
+                if (path === '/port/v1/netpositions/me') {
+                    return new Response(JSON.stringify({ Data: [] }), { status: 200 })
+                }
+                return new Response('{}', { status: 404 })
+            },
+        })
+
+        const snapshot = await client.getPortfolioSnapshot()
+
+        assert.equal(snapshot.schemaVersion, 'portfolio-snapshot.v1')
+        assert.equal(readCount, 4)
+    })
+})
+
+test('SaxoClient の refresh 待機は auth null が続いても規定回数まで読み直して timeout する', async (t) => {
+    const expiredAuth = createSnapshotAuthDocument({
+        accessToken: 'expired-access-token',
+        accessTokenExpiresAt: Date.now() - 1_000,
+        refreshTokenExpiresAt: Date.now() + 86_400_000,
+    })
+    const createAlreadyRefreshingStore = (getAuth: () => Promise<unknown>) => ({
+        getAuth,
+        acquireRefreshLease: async () => ({ status: 'already-refreshing' as const }),
+    }) as unknown as SaxoAuthStore
+
+    await t.test('non-strict API は 15 回待機し timeout warning を維持する', async () => {
+        let readCount = 0
+        const { logger, warnLogs } = createCapturingLogger()
+        const authStore = createAlreadyRefreshingStore(async () => {
+            readCount += 1
+            return readCount === 1 ? expiredAuth : null
+        })
+        const client = new SaxoClient({ authStore, logger, refreshWaitIntervalMs: 0 })
+
+        assert.equal(await client.getValidAccessToken(), null)
+        assert.equal(readCount, 16)
+        assert.equal(warnLogs.filter(({ obj }) => obj.event === 'saxo:token_refresh_timeout').length, 1)
+    })
+
+    await t.test('strict snapshot API は 15 回待機後に refresh_wait_timeout を返す', async () => {
+        let readCount = 0
+        const { logger, warnLogs } = createCapturingLogger()
+        const authStore = createAlreadyRefreshingStore(async () => {
+            readCount += 1
+            return readCount === 1 ? expiredAuth : null
+        })
+        const client = new SaxoClient({ authStore, logger, refreshWaitIntervalMs: 0 })
+
+        await assert.rejects(client.getPortfolioSnapshot(), (error: unknown) => {
+            assert.ok(error instanceof SaxoSnapshotDiagnosticError)
+            assert.equal(error.diagnostic.stage, 'auth_refresh')
+            assert.equal(error.diagnostic.reason, 'refresh_wait_timeout')
+            assert.equal(error.diagnostic.operation, 'wait_for_refresh')
+            return true
+        })
+        assert.equal(readCount, 16)
+        assert.equal(warnLogs.some(({ obj }) => obj.event === 'saxo:token_refresh_timeout'), false)
+    })
+})
+
 test('SaxoClient.getValidAccessToken は refresh 失敗後に lease を解放して再取得できる', async () => {
     const failedResponseSecrets = [
         'failed-refresh-access-token',
@@ -450,6 +574,251 @@ test('SaxoClient.getValidAccessToken は lease 取得後に refresh token が期
 
     assert.equal(await client.getValidAccessToken(), null)
     assert.equal(releaseCount, 1)
+})
+
+test('SaxoClient.getPortfolioSnapshot は auth の未設定・期限切れ・refresh timeout・失敗を区別する', async (t) => {
+    const now = Date.now()
+    const cases = [
+        {
+            name: 'auth document missing',
+            auth: undefined,
+            reason: 'auth_missing',
+            stage: 'auth_read',
+        },
+        {
+            name: 'refresh token expired',
+            auth: createSnapshotAuthDocument({
+                accessTokenExpiresAt: now - 1,
+                refreshTokenExpiresAt: now - 1,
+            }),
+            reason: 'refresh_token_expired',
+            stage: 'auth_refresh',
+        },
+        {
+            name: 'wait for refresh timeout',
+            auth: createSnapshotAuthDocument({
+                accessTokenExpiresAt: now - 1,
+                refreshTokenExpiresAt: now + 3_600_000,
+                refreshingUntil: now + 30_000,
+            }),
+            reason: 'refresh_wait_timeout',
+            stage: 'auth_refresh',
+        },
+        {
+            name: 'refresh endpoint failure',
+            auth: createSnapshotAuthDocument({
+                accessTokenExpiresAt: now - 1,
+                refreshTokenExpiresAt: now + 3_600_000,
+            }),
+            reason: 'refresh_failed',
+            stage: 'auth_refresh',
+        },
+    ] as const
+
+    for (const scenario of cases) {
+        await t.test(scenario.name, async () => {
+            const db = scenario.auth === undefined
+                ? mockFirestore()
+                : mockFirestore({ 'saxo_auth_data/saxo_auth': scenario.auth })
+            const secret = 'refresh-response-secret'
+            const client = new SaxoClient({
+                db,
+                baseUrl: 'https://example.com',
+                authBaseUrl: 'https://auth.example.com',
+                appKey: 'app-key',
+                appSecret: 'app-secret',
+                refreshWaitIntervalMs: 0,
+                fetchImpl: async (input) => {
+                    if (String(input).endsWith('/token')) {
+                        return new Response(secret, { status: 503 })
+                    }
+                    return new Response('{}', { status: 404 })
+                },
+            })
+
+            await assert.rejects(client.getPortfolioSnapshot(), (error: unknown) => {
+                assert.ok(error instanceof SaxoSnapshotDiagnosticError)
+                assert.equal(error.diagnostic.stage, scenario.stage)
+                assert.equal(error.diagnostic.reason, scenario.reason)
+                assert.equal(JSON.stringify(error.diagnostic).includes(secret), false)
+                if (scenario.name === 'refresh endpoint failure') {
+                    assert.equal(error.diagnostic.upstream_path, '/token')
+                    assert.equal(error.diagnostic.upstream_status, 503)
+                }
+                return true
+            })
+        })
+    }
+})
+
+test('SaxoClient.getPortfolioSnapshot は refresh と lease release の連続失敗を両方記録する', async () => {
+    const sensitiveValue = 'refresh-and-release-secret'
+    const now = Date.now()
+    const auth = createSnapshotAuthDocument({
+        accessTokenExpiresAt: now - 1,
+        refreshTokenExpiresAt: now + 3_600_000,
+    })
+    const authStore = {
+        getAuth: async () => auth,
+        acquireRefreshLease: async () => ({ status: 'acquired' as const, auth }),
+        releaseRefreshLease: async () => {
+            throw new Error(`lease release failed ${sensitiveValue}`)
+        },
+    } as unknown as SaxoAuthStore
+    const client = new SaxoClient({
+        authStore,
+        appKey: 'app-key',
+        appSecret: 'app-secret',
+        authBaseUrl: 'https://auth.example.com',
+        fetchImpl: async () => {
+            throw new Error(`refresh failed ${sensitiveValue}`)
+        },
+    })
+
+    await assert.rejects(client.getPortfolioSnapshot(), (error: unknown) => {
+        assert.ok(error instanceof SaxoSnapshotDiagnosticError)
+        assert.equal(error.diagnostic.operation, 'release_refresh_lease')
+        assert.equal(error.diagnostic.reason, 'firestore_error')
+        assert.deepEqual(error.diagnostic.cause_summary, {
+            name: 'SaxoSnapshotDiagnosticError',
+            stage: 'auth_refresh',
+            reason: 'refresh_failed',
+            operation: 'refresh_token',
+        })
+        assert.deepEqual(error.diagnostic.secondary_cause_summary, { name: 'Error' })
+        assert.equal(JSON.stringify(error.diagnostic).includes(sensitiveValue), false)
+        return true
+    })
+})
+
+test('SaxoClient.getPortfolioSnapshot は account・balance・net positions の失敗段階と理由を返す', async (t) => {
+    const secret = 'response-body-secret'
+    const accounts = [{
+        AccountKey: 'snapshot-account',
+        ClientKey: 'snapshot-client',
+        LegalAssetTypes: ['Stock'],
+        Currency: 'JPY',
+        DisplayName: 'Snapshot account',
+    }]
+    const cases = [
+        { stage: 'accounts', path: '/port/v1/accounts/me', failure: 'http', status: 503, reason: 'http_error' },
+        { stage: 'accounts', path: '/port/v1/accounts/me', failure: 'network', reason: 'network_error' },
+        { stage: 'accounts', path: '/port/v1/accounts/me', failure: 'read', reason: 'network_error' },
+        { stage: 'accounts', path: '/port/v1/accounts/me', failure: 'json', reason: 'invalid_json' },
+        { stage: 'accounts', path: '/port/v1/accounts/me', failure: 'shape', reason: 'invalid_response', fieldPath: 'Data' },
+        { stage: 'accounts', path: '/port/v1/accounts/me', failure: 'empty', reason: 'no_accounts' },
+        { stage: 'balance', path: '/port/v1/balances/me', failure: 'http', status: 502, reason: 'http_error' },
+        { stage: 'balance', path: '/port/v1/balances/me', failure: 'network', reason: 'network_error' },
+        { stage: 'balance', path: '/port/v1/balances/me', failure: 'read', reason: 'network_error' },
+        { stage: 'balance', path: '/port/v1/balances/me', failure: 'json', reason: 'invalid_json' },
+        { stage: 'balance', path: '/port/v1/balances/me', failure: 'shape', reason: 'invalid_response', fieldPath: 'CashBalance' },
+        { stage: 'net_positions', path: '/port/v1/netpositions/me', failure: 'http', status: 504, reason: 'http_error' },
+        { stage: 'net_positions', path: '/port/v1/netpositions/me', failure: 'network', reason: 'network_error' },
+        { stage: 'net_positions', path: '/port/v1/netpositions/me', failure: 'read', reason: 'network_error' },
+        { stage: 'net_positions', path: '/port/v1/netpositions/me', failure: 'json', reason: 'invalid_json' },
+        { stage: 'net_positions', path: '/port/v1/netpositions/me', failure: 'shape', reason: 'invalid_response', fieldPath: 'Data[0].NetPositionBase.Amount' },
+    ] as const
+
+    for (const scenario of cases) {
+        await t.test(`${scenario.stage}: ${scenario.failure}`, async () => {
+            const authDocument = scenario.stage === 'accounts'
+                ? createSnapshotAuthDocument({ accounts: undefined })
+                : createSnapshotAuthDocument()
+            const client = new SaxoClient({
+                db: mockFirestore({ 'saxo_auth_data/saxo_auth': authDocument }),
+                baseUrl: 'https://example.com',
+                fetchImpl: async (input) => {
+                    const path = new URL(String(input)).pathname
+                    if (path === scenario.path) {
+                        if (scenario.failure === 'network') throw new Error(`network failure ${secret}`)
+                        if (scenario.failure === 'http') return new Response(secret, { status: scenario.status })
+                        if (scenario.failure === 'read') {
+                            return new Response(new ReadableStream({
+                                start(controller) {
+                                    controller.error(new Error(`body read failure ${secret}`))
+                                },
+                            }), { status: 200 })
+                        }
+                        if (scenario.failure === 'json') return new Response(secret, { status: 200 })
+                        if (scenario.failure === 'empty') return new Response(JSON.stringify({ Data: [] }), { status: 200 })
+                        const invalidBody = scenario.stage === 'accounts'
+                            ? { Data: secret }
+                            : scenario.stage === 'balance'
+                                ? { CashBalance: secret }
+                                : {
+                                    Data: [{
+                                        NetPositionId: 'Stock:123',
+                                        NetPositionBase: { AssetType: 'Stock', Uic: 123 },
+                                        NetPositionView: { MarketValue: 100 },
+                                    }],
+                                }
+                        return new Response(JSON.stringify(invalidBody), { status: 200 })
+                    }
+                    if (path === '/port/v1/accounts/me') {
+                        return new Response(JSON.stringify({ Data: accounts }), { status: 200 })
+                    }
+                    if (path === '/port/v1/balances/me') {
+                        return new Response(JSON.stringify({ CashBalance: 100, Currency: 'JPY' }), { status: 200 })
+                    }
+                    if (path === '/port/v1/netpositions/me') {
+                        return new Response(JSON.stringify({ Data: [] }), { status: 200 })
+                    }
+                    return new Response('{}', { status: 404 })
+                },
+            })
+
+            await assert.rejects(client.getPortfolioSnapshot(), (error: unknown) => {
+                assert.ok(error instanceof SaxoSnapshotDiagnosticError)
+                assert.equal(error.diagnostic.stage, scenario.stage)
+                assert.equal(error.diagnostic.reason, scenario.reason)
+                assert.equal(error.diagnostic.upstream_path, scenario.path)
+                if ('status' in scenario) assert.equal(error.diagnostic.upstream_status, scenario.status)
+                if ('fieldPath' in scenario) assert.equal(error.diagnostic.field_path, scenario.fieldPath)
+                const serialized = JSON.stringify(error.diagnostic)
+                assert.equal(serialized.includes(secret), false)
+                assert.equal(serialized.includes('snapshot-account'), false)
+                return true
+            })
+        })
+    }
+})
+
+test('SaxoClient.getPortfolioSnapshot は変換中の例外を route まで伝える', async () => {
+    const client = new SaxoClient({
+        db: mockFirestore({
+            'saxo_auth_data/saxo_auth': createSnapshotAuthDocument(),
+        }),
+        baseUrl: 'https://example.com',
+        fetchImpl: async (input) => {
+            const path = new URL(String(input)).pathname
+            if (path === '/port/v1/balances/me') {
+                return new Response(JSON.stringify({ CashBalance: 0, Currency: 'JPY' }), { status: 200 })
+            }
+            if (path === '/port/v1/netpositions/me') {
+                return new Response(JSON.stringify({
+                    Data: [{
+                        NetPositionId: 'Stock:123__snapshot-account',
+                        NetPositionBase: {
+                            Amount: 1e308,
+                            OpeningDirection: 'Buy',
+                            AssetType: 'Stock',
+                            Uic: 123,
+                        },
+                        NetPositionView: {
+                            CurrentPrice: 1e308,
+                            Currency: 'JPY',
+                        },
+                    }],
+                }), { status: 200 })
+            }
+            if (path === '/ref/v1/instruments/details/123/Stock') {
+                return new Response(JSON.stringify({ Uic: 123, AssetType: 'Stock', Symbol: 'TEST' }), { status: 200 })
+            }
+            return new Response('{}', { status: 404 })
+        },
+    })
+
+    await assert.rejects(client.getPortfolioSnapshot(), /invalid decimal value/)
 })
 
 test('SaxoClient.getBalances fetches logged-in account balance and filters zero values', async () => {
@@ -699,6 +1068,166 @@ test('SaxoClient.getPortfolioSnapshot maps CFD value to equity contribution and 
     await anotherClient.getPortfolioSnapshot()
     assert.equal(instrumentDetailFetchCount, 4)
     assert.equal(requestedUrls.filter((url) => url.includes('/ref/v1/instruments/details/')).length, 4)
+})
+
+test('SaxoClient.getPortfolioSnapshot skips unused malformed positions and preserves nullish fallbacks', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': createSnapshotAuthDocument({
+            accounts: [
+                {
+                    accountKey: 'snapshot-account',
+                    clientKey: 'snapshot-client',
+                    legalAssetTypes: ['Stock'],
+                    currency: 'JPY',
+                    displayName: 'Snapshot account',
+                },
+                {
+                    accountKey: 'secondary-account',
+                    clientKey: 'secondary-client',
+                    legalAssetTypes: ['Stock'],
+                    currency: 'USD',
+                    displayName: 'Secondary account',
+                },
+            ],
+        }),
+    })
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (input) => {
+            const path = new URL(String(input)).pathname
+            if (path === '/port/v1/balances/me') {
+                return new Response(JSON.stringify({
+                    Currency: null,
+                    CashBalance: null,
+                    CashAvailableForTrading: null,
+                    TotalValue: null,
+                    NetEquity: null,
+                }), { status: 200 })
+            }
+            if (path === '/port/v1/netpositions/me') {
+                return new Response(JSON.stringify({
+                    Data: [
+                        {
+                            NetPositionId: 'opaque-missing-reference',
+                        },
+                        {
+                            NetPositionId: 'unsupported-position',
+                            NetPositionBase: { AssetType: 'Crypto', Uic: 55 },
+                        },
+                        {
+                            NetPositionId: 'supported-position',
+                            AccountKey: 'secondary-account',
+                            AssetType: 'Stock',
+                            Uic: 123,
+                            NetPositionBase: {
+                                AccountKey: null,
+                                AssetType: null,
+                                Uic: null,
+                                Amount: 2,
+                                OpeningDirection: 'Buy',
+                            },
+                            NetPositionView: {
+                                CurrentPrice: null,
+                                Price: 12,
+                                AverageOpenPrice: 10,
+                                Currency: null,
+                                ProfitLossOnTradeInBaseCurrency: null,
+                                ProfitLossOnTrade: 2,
+                                MarketValue: null,
+                                PositionValue: 24,
+                            },
+                        },
+                    ],
+                }), { status: 200 })
+            }
+            if (path === '/ref/v1/instruments/details/123/Stock') {
+                return new Response(JSON.stringify({
+                    Uic: 123,
+                    AssetType: 'Stock',
+                    Symbol: null,
+                    Description: null,
+                    CurrencyCode: null,
+                    DisplayAndFormat: {
+                        Symbol: null,
+                        Description: null,
+                        Currency: null,
+                    },
+                }), { status: 200 })
+            }
+            return new Response('{}', { status: 404 })
+        },
+    })
+
+    const snapshot = await client.getPortfolioSnapshot()
+
+    assert.deepEqual(snapshot.sourceMetadata?.skippedPositions, [
+        {
+            sourcePositionId: 'opaque-missing-reference',
+            reason: 'missing_instrument_reference',
+        },
+        {
+            sourcePositionId: 'unsupported-position',
+            reason: 'unsupported_asset_type',
+            assetType: 'Crypto',
+            uic: 55,
+        },
+    ])
+    assert.deepEqual(snapshot.cashBalances, [])
+    assert.equal(snapshot.sourceMetadata?.reportedCurrency, undefined)
+    assert.equal(snapshot.sourceMetadata?.balance, undefined)
+
+    const position = snapshot.positions[0]
+    assert.equal(position?.sourceAccountId, 'secondary-account')
+    assert.equal(position?.sourceInstrumentId, 'Stock:123')
+    assert.equal(position?.symbol, 'Stock:123')
+    assert.equal(position?.price, '12')
+    assert.equal(position?.priceCurrency, 'USD')
+    assert.equal(position?.valueJpy, '3840')
+    assert.equal(position?.unrealizedPnlJpy, '320')
+    assert.equal(position?.sourceMetadata?.instrumentLookupStatus, 'hit')
+})
+
+test('SaxoClient.getPortfolioSnapshot preserves missing account currency fallback when fetching accounts', async () => {
+    const db = mockFirestore({
+        'saxo_auth_data/saxo_auth': createSnapshotAuthDocument({ accounts: undefined }),
+    })
+    let accountFetchCount = 0
+    const client = new SaxoClient({
+        db,
+        baseUrl: 'https://example.com',
+        tokenEncryptionKey: TEST_TOKEN_ENCRYPTION_KEY,
+        fetchImpl: async (input) => {
+            const path = new URL(String(input)).pathname
+            if (path === '/port/v1/accounts/me') {
+                accountFetchCount += 1
+                return new Response(JSON.stringify({
+                    Data: [{
+                        AccountKey: 'snapshot-account',
+                        ClientKey: 'snapshot-client',
+                        LegalAssetTypes: ['Stock'],
+                        Currency: null,
+                        DisplayName: 'Snapshot account',
+                    }],
+                }), { status: 200 })
+            }
+            if (path === '/port/v1/balances/me') {
+                return new Response(JSON.stringify({ CashBalance: 100, Currency: null }), { status: 200 })
+            }
+            if (path === '/port/v1/netpositions/me') {
+                return new Response(JSON.stringify({ Data: [] }), { status: 200 })
+            }
+            return new Response('{}', { status: 404 })
+        },
+    })
+
+    const firstSnapshot = await client.getPortfolioSnapshot()
+    const secondSnapshot = await client.getPortfolioSnapshot()
+
+    assert.equal(firstSnapshot.accounts[0]?.baseCurrency, undefined)
+    assert.equal(secondSnapshot.accounts[0]?.baseCurrency, undefined)
+    assert.equal(firstSnapshot.cashBalances[0]?.currency, 'JPY')
+    assert.equal(accountFetchCount, 1)
 })
 
 test('SaxoClient.getPortfolioSnapshot skips unsupported FX currencies without failing snapshot', async () => {
@@ -1107,6 +1636,28 @@ test('SaxoClient.getPortfolioSnapshot falls back when instrument details fetch o
                                     Currency: 'JPY',
                                 },
                             },
+                            {
+                                NetPositionId: 'Stock:333333__account-1',
+                                NetPositionBase: {
+                                    AccountKey: 'account-1',
+                                    AssetType: 'Stock',
+                                    Uic: 333333,
+                                    Amount: 1,
+                                    OpeningDirection: 'Buy',
+                                },
+                                NetPositionView: { MarketValue: 3000, Currency: 'JPY' },
+                            },
+                            {
+                                NetPositionId: 'Stock:444444__account-1',
+                                NetPositionBase: {
+                                    AccountKey: 'account-1',
+                                    AssetType: 'Stock',
+                                    Uic: 444444,
+                                    Amount: 1,
+                                    OpeningDirection: 'Buy',
+                                },
+                                NetPositionView: { MarketValue: 4000, Currency: 'JPY' },
+                            },
                         ],
                     }),
                     { status: 200, headers: { 'content-type': 'application/json' } },
@@ -1117,6 +1668,12 @@ test('SaxoClient.getPortfolioSnapshot falls back when instrument details fetch o
             }
             if (urlString.endsWith('/ref/v1/instruments/details/999999/Stock')) {
                 return new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } })
+            }
+            if (urlString.endsWith('/ref/v1/instruments/details/333333/Stock')) {
+                return new Response('response-body-secret', { status: 403 })
+            }
+            if (urlString.endsWith('/ref/v1/instruments/details/444444/Stock')) {
+                return new Response(JSON.stringify({ Data: 'response-body-secret' }), { status: 200 })
             }
             return new Response('Not Found', { status: 404 })
         },
@@ -1132,14 +1689,42 @@ test('SaxoClient.getPortfolioSnapshot falls back when instrument details fetch o
     assert.equal(parseFailedPosition?.symbol, 'Stock:999999')
     assert.equal(parseFailedPosition?.sourceMetadata?.instrumentLookupStatus, 'fallback')
 
+    for (const sourceInstrumentId of ['Stock:333333', 'Stock:444444']) {
+        const fallbackPosition = snapshot.positions.find((position) => position.sourceInstrumentId === sourceInstrumentId)
+        assert.equal(fallbackPosition?.symbol, sourceInstrumentId)
+        assert.equal(fallbackPosition?.sourceMetadata?.instrumentLookupStatus, 'fallback')
+    }
+
     assert.equal(
-        warnLogs.some((log) => log.obj.event === 'saxo:instrument_details_failed' && log.obj.uic === 888888),
+        warnLogs.some((log) =>
+            log.obj.event === 'saxo:instrument_details_failed' &&
+            log.obj.stage === 'instrument_details' &&
+            log.obj.reason === 'network_error' &&
+            log.obj.upstream_path === '/ref/v1/instruments/details/{uic}/{assetType}'),
         true,
     )
     assert.equal(
-        warnLogs.some((log) => log.obj.event === 'saxo:instrument_details_parse_failed' && log.obj.uic === 999999),
+        warnLogs.some((log) =>
+            log.obj.event === 'saxo:instrument_details_parse_failed' &&
+            log.obj.stage === 'instrument_details' &&
+            log.obj.reason === 'invalid_json'),
         true,
     )
+    assert.equal(
+        warnLogs.some((log) =>
+            log.obj.event === 'saxo:instrument_details_failed' &&
+            log.obj.reason === 'http_error' &&
+            log.obj.upstream_status === 403),
+        true,
+    )
+    assert.equal(
+        warnLogs.some((log) =>
+            log.obj.event === 'saxo:instrument_details_parse_failed' &&
+            log.obj.reason === 'invalid_response' &&
+            log.obj.field_path === 'Data'),
+        true,
+    )
+    assert.equal(stringifyCapturedLogs(warnLogs).includes('response-body-secret'), false)
 })
 
 test('SaxoClient.getPortfolioSnapshot limits concurrent instrument detail fetches', async () => {

@@ -4,6 +4,11 @@ import { setFirestoreDocument, updateFirestoreDocument } from '../firestore.js'
 import type { Logger } from '../logger.js'
 import { omitUndefinedFields } from '../omit-undefined-fields.js'
 import { createTokenEncryptionCodec, type TokenEncryptionCodec } from '../security/token-encryption.js'
+import {
+    createSaxoSnapshotDiagnosticError,
+    SaxoSnapshotDiagnosticError,
+    toSaxoSnapshotDiagnosticError,
+} from './saxo-diagnostics.js'
 
 const FIRESTORE_COLLECTION = 'saxo_auth_data'
 const FIRESTORE_DOC = 'saxo_auth'
@@ -50,20 +55,31 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const parseFiniteNumber = (value: unknown): number | null =>
     typeof value === 'number' && Number.isFinite(value) ? value : null
 
+const invalidAuthDocument = (fieldPath?: string, expectedType?: string): SaxoSnapshotDiagnosticError =>
+    createSaxoSnapshotDiagnosticError({
+        stage: 'auth_read',
+        reason: 'invalid_auth_document',
+        description: 'Invalid Saxo auth document',
+        operation: 'validate_auth_document',
+        ...(fieldPath ? { field_path: fieldPath } : {}),
+        ...(expectedType ? { expected_type: expectedType } : {}),
+    })
+
 const parseAccounts = (value: unknown): SaxoAccountInfo[] | undefined => {
     if (value === undefined) return undefined
-    if (!Array.isArray(value)) throw new Error('Invalid Saxo auth document')
+    if (!Array.isArray(value)) throw invalidAuthDocument('accounts', 'array')
 
-    return value.map((account) => {
-        if (!isRecord(account) ||
-            typeof account.accountKey !== 'string' ||
-            typeof account.clientKey !== 'string' ||
-            !Array.isArray(account.legalAssetTypes) ||
-            !account.legalAssetTypes.every((assetType) => typeof assetType === 'string') ||
-            typeof account.currency !== 'string' ||
-            typeof account.displayName !== 'string') {
-            throw new Error('Invalid Saxo auth document')
+    return value.map((account, index) => {
+        const basePath = `accounts[${index}]`
+        if (!isRecord(account)) throw invalidAuthDocument(basePath, 'object')
+        if (typeof account.accountKey !== 'string') throw invalidAuthDocument(`${basePath}.accountKey`, 'string')
+        if (typeof account.clientKey !== 'string') throw invalidAuthDocument(`${basePath}.clientKey`, 'string')
+        if (!Array.isArray(account.legalAssetTypes) ||
+            !account.legalAssetTypes.every((assetType) => typeof assetType === 'string')) {
+            throw invalidAuthDocument(`${basePath}.legalAssetTypes`, 'string[]')
         }
+        if (typeof account.currency !== 'string') throw invalidAuthDocument(`${basePath}.currency`, 'string')
+        if (typeof account.displayName !== 'string') throw invalidAuthDocument(`${basePath}.displayName`, 'string')
 
         return {
             accountKey: account.accountKey,
@@ -82,11 +98,9 @@ const parseMetadata = (document: Record<string, unknown>): SaxoAuthDocumentMetad
         ? undefined
         : parseFiniteNumber(document.refreshingUntil)
 
-    if (accessTokenExpiresAt === null ||
-        refreshTokenExpiresAt === null ||
-        refreshingUntil === null) {
-        throw new Error('Invalid Saxo auth document')
-    }
+    if (accessTokenExpiresAt === null) throw invalidAuthDocument('accessTokenExpiresAt', 'finite number')
+    if (refreshTokenExpiresAt === null) throw invalidAuthDocument('refreshTokenExpiresAt', 'finite number')
+    if (refreshingUntil === null) throw invalidAuthDocument('refreshingUntil', 'finite number')
 
     return {
         accessTokenExpiresAt,
@@ -114,11 +128,22 @@ export class SaxoAuthStore {
         refreshingUntil?: number
     } {
         if ('accessToken' in document || 'refreshToken' in document) {
-            throw new Error('Invalid Saxo auth document')
+            throw invalidAuthDocument('accessToken/refreshToken', 'absent for encrypted document')
         }
 
         const metadata = parseMetadata(document)
-        const tokens = this.codec.decrypt(document.encryptedTokens)
+        let tokens: Pick<SaxoAuthData, 'accessToken' | 'refreshToken'>
+        try {
+            tokens = this.codec.decrypt(document.encryptedTokens)
+        } catch (error) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'decrypt_failed',
+                description: 'Failed to decrypt Saxo auth document',
+                operation: 'decrypt_auth_tokens',
+                cause: error,
+            })
+        }
         return {
             auth: {
                 ...tokens,
@@ -137,7 +162,7 @@ export class SaxoAuthStore {
         if ('encryptedTokens' in document ||
             typeof document.accessToken !== 'string' ||
             typeof document.refreshToken !== 'string') {
-            throw new Error('Invalid Saxo auth document')
+            throw invalidAuthDocument('accessToken/refreshToken', 'string pair for legacy document')
         }
 
         const metadata = parseMetadata(document)
@@ -157,11 +182,23 @@ export class SaxoAuthStore {
         data: SaxoAuthData,
         refreshingUntil?: number,
     ): Record<string, unknown> {
-        return omitUndefinedFields({
-            encryptedTokens: this.codec.encrypt({
+        let encryptedTokens: unknown
+        try {
+            encryptedTokens = this.codec.encrypt({
                 accessToken: data.accessToken,
                 refreshToken: data.refreshToken,
-            }),
+            })
+        } catch (error) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'encrypt_failed',
+                description: 'Failed to encrypt Saxo auth document',
+                operation: 'encrypt_auth_tokens',
+                cause: error,
+            })
+        }
+        return omitUndefinedFields({
+            encryptedTokens,
             accessTokenExpiresAt: data.accessTokenExpiresAt,
             refreshTokenExpiresAt: data.refreshTokenExpiresAt,
             accounts: data.accounts,
@@ -169,9 +206,24 @@ export class SaxoAuthStore {
         })
     }
 
-    private logSafeFailure(event: string, message: string): void {
+    private logSafeFailure(
+        event: string,
+        diagnostic: SaxoSnapshotDiagnosticError,
+        message: string,
+    ): void {
+        const { stage, reason, operation, upstream_path, upstream_status, field_path, expected_type, cause_summary } =
+            diagnostic.diagnostic
         this.logger?.error({
             event,
+            stage,
+            reason,
+            operation,
+            upstream_path,
+            upstream_status,
+            field_path,
+            expected_type,
+            error_name: cause_summary?.name,
+            error_code: cause_summary?.error_code,
             collection: FIRESTORE_COLLECTION,
             doc_id: FIRESTORE_DOC,
         }, message)
@@ -179,19 +231,69 @@ export class SaxoAuthStore {
 
     async getAuth(): Promise<SaxoAuthData | null> {
         const reference = this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC)
-        const snapshot = await reference.get()
+        let snapshot
+        try {
+            snapshot = await reference.get()
+        } catch (error) {
+            const diagnostic = createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'firestore_error',
+                description: 'Failed to read Saxo auth document',
+                operation: 'read_auth_document',
+                cause: error,
+            })
+            this.logSafeFailure('saxo_auth:read_failed', diagnostic, 'failed to read Saxo auth document')
+            throw diagnostic
+        }
         if (!snapshot.exists) return null
 
-        const document = snapshot.data()
+        let document: unknown
+        try {
+            document = snapshot.data()
+        } catch (error) {
+            const diagnostic = createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'firestore_error',
+                description: 'Failed to read Saxo auth document',
+                operation: 'read_auth_document',
+                cause: error,
+            })
+            this.logSafeFailure('saxo_auth:read_failed', diagnostic, 'failed to read Saxo auth document')
+            throw diagnostic
+        }
         if (!isRecord(document)) {
-            throw new Error('Invalid Saxo auth document')
+            const diagnostic = invalidAuthDocument('document', 'object')
+            this.logSafeFailure('saxo_auth:read_failed', diagnostic, 'invalid Saxo auth document')
+            throw diagnostic
         }
 
         if ('encryptedTokens' in document) {
-            return this.parseEncryptedDocument(document).auth
+            try {
+                return this.parseEncryptedDocument(document).auth
+            } catch (error) {
+                const diagnostic = toSaxoSnapshotDiagnosticError(error, {
+                    stage: 'auth_read',
+                    reason: 'decrypt_failed',
+                    description: 'Failed to decrypt Saxo auth document',
+                    operation: 'decrypt_auth_tokens',
+                })
+                this.logSafeFailure('saxo_auth:read_failed', diagnostic, 'failed to read Saxo auth document')
+                throw diagnostic
+            }
         }
 
-        this.parseLegacyDocument(document)
+        try {
+            this.parseLegacyDocument(document)
+        } catch (error) {
+            const diagnostic = toSaxoSnapshotDiagnosticError(error, {
+                stage: 'auth_read',
+                reason: 'invalid_auth_document',
+                description: 'Invalid Saxo auth document',
+                operation: 'validate_legacy_auth_document',
+            })
+            this.logSafeFailure('saxo_auth:read_failed', diagnostic, 'invalid Saxo auth document')
+            throw diagnostic
+        }
         try {
             return await this.db.runTransaction(async (transaction) => {
                 const latestSnapshot = await transaction.get(reference)
@@ -199,7 +301,7 @@ export class SaxoAuthStore {
 
                 const latestDocument = latestSnapshot.data()
                 if (!isRecord(latestDocument)) {
-                    throw new Error('Invalid Saxo auth document')
+                    throw invalidAuthDocument('document', 'object')
                 }
                 if ('encryptedTokens' in latestDocument) {
                     return this.parseEncryptedDocument(latestDocument).auth
@@ -212,61 +314,77 @@ export class SaxoAuthStore {
                 )
                 return legacy.auth
             })
-        } catch {
-            const message = 'Failed to migrate legacy Saxo auth document'
-            this.logSafeFailure('saxo_auth:migration_failed', message)
-            throw new Error(message)
+        } catch (error) {
+            const diagnostic = toSaxoSnapshotDiagnosticError(error, {
+                stage: 'auth_read',
+                reason: 'migration_failed',
+                description: 'Failed to migrate legacy Saxo auth document',
+                operation: 'migrate_legacy_auth_document',
+            })
+            this.logSafeFailure('saxo_auth:migration_failed', diagnostic, 'failed to migrate legacy Saxo auth document')
+            throw diagnostic
         }
     }
 
     async acquireRefreshLease(): Promise<RefreshLeaseResult> {
-        const reference = this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC)
-        return this.db.runTransaction(async (transaction) => {
-            const snapshot = await transaction.get(reference)
-            if (!snapshot.exists) return { status: 'missing' }
+        try {
+            const reference = this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC)
+            return await this.db.runTransaction(async (transaction) => {
+                const snapshot = await transaction.get(reference)
+                if (!snapshot.exists) return { status: 'missing' }
 
-            const document = snapshot.data()
-            if (!isRecord(document)) {
-                throw new Error('Invalid Saxo auth document')
-            }
+                const document = snapshot.data()
+                if (!isRecord(document)) {
+                    throw invalidAuthDocument('document', 'object')
+                }
 
-            const isLegacy = !('encryptedTokens' in document)
-            const parsed = isLegacy
-                ? this.parseLegacyDocument(document)
-                : this.parseEncryptedDocument(document)
-            const now = this.now()
+                const isLegacy = !('encryptedTokens' in document)
+                const parsed = isLegacy
+                    ? this.parseLegacyDocument(document)
+                    : this.parseEncryptedDocument(document)
+                const now = this.now()
 
-            if (parsed.auth.accessTokenExpiresAt >= now + 60_000) {
+                if (parsed.auth.accessTokenExpiresAt >= now + 60_000) {
+                    if (isLegacy) {
+                        transaction.set(
+                            reference,
+                            this.createEncryptedDocument(parsed.auth, parsed.refreshingUntil),
+                        )
+                    }
+                    return { status: 'already-fresh', auth: parsed.auth }
+                }
+
+                if (parsed.refreshingUntil !== undefined && parsed.refreshingUntil > now) {
+                    if (isLegacy) {
+                        transaction.set(
+                            reference,
+                            this.createEncryptedDocument(parsed.auth, parsed.refreshingUntil),
+                        )
+                    }
+                    return { status: 'already-refreshing' }
+                }
+
+                const refreshingUntil = now + 30_000
                 if (isLegacy) {
                     transaction.set(
                         reference,
-                        this.createEncryptedDocument(parsed.auth, parsed.refreshingUntil),
+                        this.createEncryptedDocument(parsed.auth, refreshingUntil),
                     )
+                } else {
+                    transaction.update(reference, { refreshingUntil })
                 }
-                return { status: 'already-fresh', auth: parsed.auth }
-            }
-
-            if (parsed.refreshingUntil !== undefined && parsed.refreshingUntil > now) {
-                if (isLegacy) {
-                    transaction.set(
-                        reference,
-                        this.createEncryptedDocument(parsed.auth, parsed.refreshingUntil),
-                    )
-                }
-                return { status: 'already-refreshing' }
-            }
-
-            const refreshingUntil = now + 30_000
-            if (isLegacy) {
-                transaction.set(
-                    reference,
-                    this.createEncryptedDocument(parsed.auth, refreshingUntil),
-                )
-            } else {
-                transaction.update(reference, { refreshingUntil })
-            }
-            return { status: 'acquired', auth: parsed.auth }
-        })
+                return { status: 'acquired', auth: parsed.auth }
+            })
+        } catch (error) {
+            const diagnostic = toSaxoSnapshotDiagnosticError(error, {
+                stage: 'auth_refresh',
+                reason: 'firestore_error',
+                description: 'Failed to acquire Saxo refresh lease',
+                operation: 'acquire_refresh_lease',
+            })
+            this.logSafeFailure('saxo_auth:refresh_lease_failed', diagnostic, 'failed to acquire Saxo refresh lease')
+            throw diagnostic
+        }
     }
 
     async releaseRefreshLease(): Promise<void> {
@@ -279,27 +397,60 @@ export class SaxoAuthStore {
                     docId: FIRESTORE_DOC,
                     logger: this.logger,
                     redactWriteDetails: true,
+                    isExpectedError: () => true,
                 },
             )
-        } catch {
-            throw new Error('Failed to release Saxo refresh lease')
+        } catch (error) {
+            const diagnostic = createSaxoSnapshotDiagnosticError({
+                stage: 'auth_refresh',
+                reason: 'firestore_error',
+                description: 'Failed to release Saxo refresh lease',
+                operation: 'release_refresh_lease',
+                cause: error,
+            })
+            this.logSafeFailure('saxo_auth:refresh_lease_failed', diagnostic, 'failed to release Saxo refresh lease')
+            throw diagnostic
         }
     }
 
     async saveAuth(data: SaxoAuthData): Promise<void> {
+        let encryptedDocument: Record<string, unknown>
+        try {
+            encryptedDocument = this.createEncryptedDocument(data)
+        } catch (error) {
+            const diagnostic = createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'encrypt_failed',
+                description: 'Failed to encrypt Saxo auth document',
+                operation: 'encrypt_auth_tokens',
+                cause: error,
+            })
+            this.logSafeFailure('saxo_auth:save_failed', diagnostic, 'failed to save Saxo auth document')
+            throw diagnostic
+        }
+
         try {
             await setFirestoreDocument(
                 this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC),
-                this.createEncryptedDocument(data),
+                encryptedDocument,
                 {
                     collection: FIRESTORE_COLLECTION,
                     docId: FIRESTORE_DOC,
                     logger: this.logger,
                     redactWriteDetails: true,
+                    isExpectedError: () => true,
                 },
             )
-        } catch {
-            throw new Error('Failed to save Saxo auth document')
+        } catch (error) {
+            const diagnostic = createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'firestore_error',
+                description: 'Failed to save Saxo auth document',
+                operation: 'save_auth_document',
+                cause: error,
+            })
+            this.logSafeFailure('saxo_auth:save_failed', diagnostic, 'failed to save Saxo auth document')
+            throw diagnostic
         }
     }
 }

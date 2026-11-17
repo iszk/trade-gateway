@@ -91,6 +91,49 @@ legacy document は `accessToken` / `refreshToken` と metadata を検証した�
 
 encrypted/plaintext の混在、不正 schema、鍵の未設定・不正、wrong key、envelope 改ざんでは plaintext fallback しない。migration の parse、暗号化、commit が失敗した場合も legacy document を変更せず request を失敗させる。OAuth token endpoint の失敗では raw response body を破棄し、Error / log には HTTP status と固定メッセージだけを残す。
 
+### portfolio snapshot の失敗調査
+
+認証済み `GET /api/saxo/portfolio-snapshot` は成功時・失敗時とも `x-request-id` response header を返す。500 response の契約は `INTERNAL_ERROR` のままで、詳細は error level の `saxo_portfolio_snapshot:fetch_failed` log に集約する。まず Cloud Logging で次を検索し、問い合わせ時に控えた `x-request-id` と照合する。
+
+```text
+jsonPayload.event="saxo_portfolio_snapshot:fetch_failed"
+jsonPayload.request_id="<x-request-id の値>"
+```
+
+`stage` は処理段階を表す。`reason` は判明した分類で、外部サービス障害などの根本原因を断定するものではない。
+
+| stage | 主な失敗 |
+| --- | --- |
+| `auth_read` | 認証 document の読込・形式検証・復号・移行・保存 |
+| `auth_refresh` | refresh token 期限切れ、refresh API、待機 timeout、refresh lease |
+| `accounts` | Saxo account API または account response の検証 |
+| `balance` | 残高 API または balance response の検証 |
+| `net_positions` | 建玉 API または建玉 response の検証 |
+| `instrument_details` | 銘柄詳細の取得・解析。snapshot は継続し `AssetType:Uic` に fallback |
+| `snapshot_mapping` | 取得データの snapshot 変換 |
+
+代表的な `reason` の意味は次のとおり。API failure の `upstream_path` は固定の endpoint path、`upstream_status` は取得できた HTTP status である。response schema の不備では `field_path` と `expected_type` を確認する。Firestore の read / migration / save / refresh lease failure は `operation` で対象処理を区別する。
+
+| reason | 意味 |
+| --- | --- |
+| `auth_missing` | 認証 document がない、または更新 lease 取得時に見つからない |
+| `refresh_token_expired` | refresh token が期限切れ、または更新可能な有効期間がない |
+| `refresh_wait_timeout` | 他 process の token refresh 完了を規定回数待っても確認できない |
+| `refresh_failed` | token refresh API、response 解析、または認証情報の更新に失敗 |
+| `http_error` | accounts / balance / net positions / instrument details API が非成功 status を返した |
+| `network_error` | upstream request を開始または完了できなかった |
+| `invalid_json` | upstream の成功 response を JSON として解析できなかった |
+| `invalid_response` | JSON の root、必須 field、または field type が期待と異なる |
+| `no_accounts` | account API の `Data` が空、または利用可能な account がない |
+| `firestore_error` | auth document の read / write または refresh lease 操作に失敗 |
+| `invalid_auth_document` | 保存済み auth document の形式が不正 |
+| `decrypt_failed` / `encrypt_failed` | auth token の復号 / 暗号化に失敗 |
+| `migration_failed` | legacy auth document の暗号化移行に失敗 |
+| `mapping_failed` | 残高・建玉を portfolio snapshot に変換できなかった |
+| `unexpected_error` | 銘柄詳細などの補助処理で想定外の例外が発生した |
+
+HTTP status や固定 endpoint path、形式不備の field path を使って次の調査先を決める。認証情報、HTTP body、口座・建玉の値、query 付き URL は log に含めない。銘柄詳細 failure は warning log に記録されるが、成功 response の fallback 動作は変わらない。
+
 ### Rollback と再認証の判断
 
 - 0030-3 の revision だけを戻す場合は、encrypted v1 を読める 0030-2 以降の revision と同じ secret version へ rollback する。

@@ -2,8 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { SaxoClient } from './brokers/saxo.js'
+import type { SaxoAuthStore } from './brokers/saxo-auth-store.js'
 import { config } from './config.js'
 import { createApp } from './index.js'
+import { serializeLogDetails } from './logger.js'
 import type { DispatchOrderFn, BrokerName } from './types/order.js'
 import type { OrderV2 } from './types/order-v2.js'
 import type { Position } from './types/position.js'
@@ -1259,6 +1261,212 @@ test('GET /api/saxo/portfolio-snapshot returns Saxo portfolio snapshot when auth
 
     assert.equal(res.status, 200)
     assert.deepEqual(body, snapshot)
+    assert.ok(res.headers.get('x-request-id'))
+})
+
+test('GET /api/saxo/portfolio-snapshot keeps the API secret authentication requirement', async () => {
+    let calls = 0
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        saxoPortfolioSnapshotClient: {
+            getPortfolioSnapshot: async () => {
+                calls++
+                return {
+                    schemaVersion: 'portfolio-snapshot.v1',
+                    source: { id: 'saxo-bank', provider: 'Saxo Bank' },
+                    generatedAt: '2026-01-01T00:00:00.000Z',
+                    dataAsOf: '2026-01-01T00:00:00.000Z',
+                    baseCurrency: 'JPY',
+                    accounts: [],
+                    cashBalances: [],
+                    positions: [],
+                }
+            },
+        },
+    })
+
+    const res = await app.request('/api/saxo/portfolio-snapshot')
+    const body = await res.json()
+
+    assert.equal(res.status, 401)
+    assert.equal(body.error.code, 'UNAUTHORIZED')
+    assert.equal(calls, 0)
+})
+
+test('GET /api/saxo/portfolio-snapshot は失敗理由を安全に error log へ記録し request id と trace を返す', async () => {
+    const sensitiveValue = 'secret-token-do-not-log'
+    const errors: Record<string, unknown>[] = []
+    const warnings: Record<string, unknown>[] = []
+    const logger = {
+        info: (_obj: Record<string, unknown>) => undefined,
+        warn: (obj: Record<string, unknown>) => warnings.push(obj),
+        error: (obj: Record<string, unknown>) => errors.push(obj),
+        child: () => logger,
+    }
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        logger,
+        saxoPortfolioSnapshotClient: {
+            getPortfolioSnapshot: async () => {
+                const cause = new Error(`upstream rejected ${sensitiveValue}`)
+                throw new Error(`failure included ${sensitiveValue}`, { cause })
+            },
+        },
+    })
+    const oldProjectId = process.env.GOOGLE_CLOUD_PROJECT
+    process.env.GOOGLE_CLOUD_PROJECT = 'test-project'
+    try {
+        const res = await app.request('/api/saxo/portfolio-snapshot', {
+            headers: {
+                Authorization: 'Bearer test-secret',
+                'x-request-id': 'snapshot-request-123',
+                'x-cloud-trace-context': '0123456789abcdef0123456789abcdef/1234567890123456;o=1',
+            },
+        })
+        const body = await res.json()
+        const logged = errors[0]
+        const serialized = serializeLogDetails(logged ?? {})
+        const serializedText = JSON.stringify(serialized)
+
+        assert.equal(res.status, 500)
+        assert.deepEqual(body, {
+            error: {
+                code: 'INTERNAL_ERROR',
+                message: 'failed to fetch Saxo portfolio snapshot',
+            },
+        })
+        assert.equal(res.headers.get('x-request-id'), 'snapshot-request-123')
+        assert.equal(errors.length, 1)
+        assert.equal(warnings.length, 0)
+        assert.equal(logged?.event, 'saxo_portfolio_snapshot:fetch_failed')
+        assert.equal(logged?.request_id, 'snapshot-request-123')
+        assert.equal(logged?.stage, 'snapshot_mapping')
+        assert.equal(logged?.reason, 'mapping_failed')
+        assert.equal(logged?.['logging.googleapis.com/trace'], 'projects/test-project/traces/0123456789abcdef0123456789abcdef')
+        assert.equal(logged?.['logging.googleapis.com/spanId'], '1234567890123456')
+        assert.ok((serialized.error as { message?: string }).message)
+        assert.ok((serialized.error as { stack?: string }).stack)
+        assert.equal(serializedText.includes(sensitiveValue), false)
+        assert.deepEqual((serialized.error as { diagnostic?: unknown }).diagnostic, {
+            stage: 'snapshot_mapping',
+            reason: 'mapping_failed',
+            description: 'Failed to fetch Saxo portfolio snapshot',
+            operation: 'get_portfolio_snapshot',
+            cause_summary: { name: 'Error' },
+        })
+    } finally {
+        if (oldProjectId === undefined) delete process.env.GOOGLE_CLOUD_PROJECT
+        else process.env.GOOGLE_CLOUD_PROJECT = oldProjectId
+    }
+})
+
+test('GET /api/saxo/portfolio-snapshot は非 Error の throw も値を展開せず記録する', async () => {
+    const secret = 'non-error-object-secret'
+    const errors: Record<string, unknown>[] = []
+    const logger = {
+        info: (_obj: Record<string, unknown>) => undefined,
+        warn: (_obj: Record<string, unknown>) => undefined,
+        error: (obj: Record<string, unknown>) => errors.push(obj),
+        child: () => logger,
+    }
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        logger,
+        saxoPortfolioSnapshotClient: {
+            getPortfolioSnapshot: async () => {
+                throw { token: secret, nested: { secret } }
+            },
+        },
+    })
+    const res = await app.request('/api/saxo/portfolio-snapshot', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+            'x-request-id': 'snapshot-non-error-123',
+        },
+    })
+
+    assert.equal(res.status, 500)
+    assert.equal(res.headers.get('x-request-id'), 'snapshot-non-error-123')
+    assert.equal(errors[0]?.stage, 'snapshot_mapping')
+    assert.equal(errors[0]?.reason, 'mapping_failed')
+    assert.deepEqual(
+        (errors[0]?.error as { diagnostic?: { cause_summary?: unknown } }).diagnostic?.cause_summary,
+        { name: 'NonErrorThrow' },
+    )
+    assert.equal(JSON.stringify(serializeLogDetails(errors[0] ?? {})).includes(secret), false)
+})
+
+test('GET /api/saxo/portfolio-snapshot はデータ変換例外を mapping_failed として記録する', async () => {
+    const errors: Record<string, unknown>[] = []
+    const logger = {
+        info: (_obj: Record<string, unknown>) => undefined,
+        warn: (_obj: Record<string, unknown>) => undefined,
+        error: (obj: Record<string, unknown>) => errors.push(obj),
+        child: () => logger,
+    }
+    const auth = {
+        accessToken: 'snapshot-access-token',
+        refreshToken: 'snapshot-refresh-token',
+        accessTokenExpiresAt: Date.now() + 60 * 60 * 1000,
+        refreshTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        accounts: [{
+            accountKey: 'snapshot-account',
+            clientKey: 'snapshot-client',
+            legalAssetTypes: ['Stock'],
+            currency: 'JPY',
+            displayName: 'Snapshot account',
+        }],
+    }
+    const saxoClient = new SaxoClient({
+        authStore: {
+            getAuth: async () => auth,
+        } as unknown as SaxoAuthStore,
+        baseUrl: 'https://example.com',
+        fetchImpl: async (input) => {
+            const path = new URL(String(input)).pathname
+            if (path === '/port/v1/balances/me') {
+                return new Response(JSON.stringify({ CashBalance: 0, Currency: 'JPY' }), { status: 200 })
+            }
+            if (path === '/port/v1/netpositions/me') {
+                return new Response(JSON.stringify({
+                    Data: [{
+                        NetPositionId: 'Stock:123__snapshot-account',
+                        NetPositionBase: {
+                            Amount: 1e308,
+                            OpeningDirection: 'Buy',
+                            AssetType: 'Stock',
+                            Uic: 123,
+                        },
+                        NetPositionView: { CurrentPrice: 1e308, Currency: 'JPY' },
+                    }],
+                }), { status: 200 })
+            }
+            if (path === '/ref/v1/instruments/details/123/Stock') {
+                return new Response(JSON.stringify({ Uic: 123, AssetType: 'Stock', Symbol: 'TEST' }), { status: 200 })
+            }
+            return new Response('{}', { status: 404 })
+        },
+    })
+    const app = createAppForTests({
+        apiSecret: 'test-secret',
+        logger,
+        saxoPortfolioSnapshotClient: saxoClient,
+    })
+    const res = await app.request('/api/saxo/portfolio-snapshot', {
+        headers: {
+            Authorization: 'Bearer test-secret',
+            'x-request-id': 'snapshot-mapping-123',
+        },
+    })
+
+    assert.equal(res.status, 500)
+    assert.equal(res.headers.get('x-request-id'), 'snapshot-mapping-123')
+    assert.equal(errors[0]?.event, 'saxo_portfolio_snapshot:fetch_failed')
+    assert.equal(errors[0]?.stage, 'snapshot_mapping')
+    assert.equal(errors[0]?.reason, 'mapping_failed')
+    const serialized = JSON.stringify(serializeLogDetails(errors[0] ?? {}))
+    assert.equal(serialized.includes('Infinity'), false)
+    assert.equal(serialized.includes('Stock:123__snapshot-account'), false)
 })
 
 test('GET /api/v2/orders/stats includes pending orders in open_orders', async () => {
