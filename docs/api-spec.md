@@ -537,6 +537,10 @@ Content-Type: application/json
 - レバレッジ商品の notional exposure は `sourceMetadata.notionalValueJpy` に保持する。notional の FX rate が未対応の場合でも position は返し、`sourceMetadata.notionalValueStatus` に理由を保持する。
 - レバレッジ商品以外で market value / price が取得できない場合は `valueJpy=0` とし、`sourceMetadata.valuationStatus` に `missing_market_value` を保持する。
 - Saxo instrument details の取得に失敗した場合は snapshot 全体を失敗させず、`AssetType:Uic` を `symbol` の fallback として使う。
+- 認証済みリクエストは成功時・失敗時とも `x-request-id` response header を返す。500 は従来どおり `INTERNAL_ERROR` を返し、詳細は `saxo_portfolio_snapshot:fetch_failed` error log に記録する。
+- 最終ログには `stage`、`reason`、固定の `description` を含める。Saxo API の失敗では固定 `upstream_path` と取得できた `upstream_status`、応答形式不備では `field_path` と `expected_type` を含める。request body、response body、token、口座・建玉データは記録しない。
+- `stage` は `auth_read`、`auth_refresh`、`accounts`、`balance`、`net_positions`、`instrument_details`、`snapshot_mapping` のいずれか。主な `reason` は `auth_missing`、`refresh_token_expired`、`refresh_wait_timeout`、`refresh_failed`、`http_error`、`network_error`、`invalid_json`、`invalid_response`、`no_accounts`、`firestore_error`、`decrypt_failed`、`migration_failed`、`mapping_failed`。
+- 調査時は Cloud Logging で `jsonPayload.event="saxo_portfolio_snapshot:fetch_failed"` を検索し、レスポンスの `x-request-id` と `jsonPayload.request_id` を照合する。`stage` と `reason` で失敗段階・分類を絞り、Saxo API の HTTP failure は `upstream_path` / `upstream_status`、形式不備は `field_path` / `expected_type` を確認する。
 
 #### 成功レスポンス
 - `200 OK`

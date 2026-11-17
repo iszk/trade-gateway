@@ -51,6 +51,7 @@ import { computeStatsV2 } from './services/stats-v2.js'
 import type { StatsV2 } from './services/stats-v2.js'
 import { BitflyerClient } from './brokers/bitflyer.js'
 import { SaxoClient } from './brokers/saxo.js'
+import { toSaxoSnapshotDiagnosticError } from './brokers/saxo-diagnostics.js'
 import { PositionFetcher } from './services/position-fetcher.js'
 import { config } from './config.js'
 import { createDefaultSlotScheduler } from './services/slot-scheduler.js'
@@ -1979,11 +1980,26 @@ export const createApp = (options: CreateAppOptions = {}) => {
     })
 
     app.get('/api/saxo/portfolio-snapshot', requireApiSecret, async (c) => {
+        const requestId = getRequestId(c.req.raw.headers)
+        const traceContext = extractTraceContext(c.req.raw.headers)
+        c.header('x-request-id', requestId)
         try {
             const snapshot = await saxoPortfolioSnapshotClient.getPortfolioSnapshot()
             return c.json(snapshot)
         } catch (err) {
-            logger.warn({ event: 'saxo_portfolio_snapshot:fetch_failed', error: err }, 'failed to fetch Saxo portfolio snapshot')
+            const diagnostic = toSaxoSnapshotDiagnosticError(err, {
+                stage: 'snapshot_mapping',
+                reason: 'mapping_failed',
+                description: 'Failed to fetch Saxo portfolio snapshot',
+                operation: 'get_portfolio_snapshot',
+            })
+            logger.error({
+                event: 'saxo_portfolio_snapshot:fetch_failed',
+                request_id: requestId,
+                ...traceContext,
+                ...diagnostic.diagnostic,
+                error: diagnostic,
+            }, 'failed to fetch Saxo portfolio snapshot')
             return c.json(errorBody('INTERNAL_ERROR', 'failed to fetch Saxo portfolio snapshot'), 500)
         }
     })

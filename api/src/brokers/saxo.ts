@@ -46,6 +46,12 @@ import {
     type SaxoOrderActivitiesPageResult,
     type SaxoOrderActivityResolution,
 } from './saxo-order-activities.js'
+import {
+    createSaxoSnapshotDiagnosticError,
+    SaxoSnapshotDiagnosticError,
+    toSaxoSnapshotDiagnosticError,
+    type SaxoSnapshotStage,
+} from './saxo-diagnostics.js'
 
 type SaxoClientOptions = {
     appKey?: string
@@ -69,16 +75,6 @@ type SaxoTokenResponse = {
     expires_in: number // seconds
     refresh_token_expires_in: number // seconds
     token_type: string
-}
-
-type SaxoAccountMeResponse = {
-    Data: Array<{
-        AccountKey: string
-        ClientKey: string
-        LegalAssetTypes: string[]
-        Currency: string
-        DisplayName: string
-    }>
 }
 
 type SaxoNetPosition = {
@@ -158,6 +154,24 @@ const cancelResponseBody = async (response: Response): Promise<void> => {
     }
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const getActualType = (value: unknown): string => {
+    if (value === null) return 'null'
+    if (Array.isArray(value)) return 'array'
+    return typeof value
+}
+
+const isFiniteNumber = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isFinite(value)
+
+const isNullishOrFiniteNumber = (value: unknown): boolean =>
+    value === undefined || value === null || isFiniteNumber(value)
+
+const isNullishOrString = (value: unknown): boolean =>
+    value === undefined || value === null || typeof value === 'string'
+
 export type SaxoInstrument = {
     Identifier: number
     Symbol: string
@@ -183,12 +197,6 @@ type SaxoInstrumentDetails = {
         Currency?: string
     }
 }
-
-type SaxoInstrumentDetailsResponse =
-    | (SaxoInstrumentDetails & { Data?: never })
-    | {
-        Data: SaxoInstrumentDetails[]
-    }
 
 const CRON_METADATA_COLLECTION = 'cron_metadata'
 const SAXO_ORDER_ACTIVITIES_POLL_DOC = 'saxo_orderactivities_poll_state'
@@ -241,7 +249,7 @@ const toJpyDecimalString = (amount: number, currency: string): string | null => 
     return rate === null ? null : toDecimalString(amount * rate)
 }
 
-const normalizeCurrencyCode = (currency?: string): string | undefined => {
+const normalizeCurrencyCode = (currency?: string | null): string | undefined => {
     const trimmed = currency?.trim().toUpperCase()
     return trimmed && /^[A-Z]{3}$/.test(trimmed) ? trimmed : undefined
 }
@@ -264,9 +272,10 @@ const isEquityContributionAssetClass = (assetClass: PortfolioSnapshotV1AssetClas
 
 const extractInstrumentReference = (
     position: SaxoNetPosition,
-): { assetType?: string; uic?: number } => {
-    const assetType = position.NetPositionBase.AssetType ?? position.AssetType
-    const uic = position.NetPositionBase.Uic ?? position.Uic
+): { assetType?: unknown; uic?: unknown } => {
+    const base = isRecord(position.NetPositionBase) ? position.NetPositionBase : undefined
+    const assetType = base?.AssetType ?? position.AssetType
+    const uic = base?.Uic ?? position.Uic
     if (assetType && typeof uic === 'number' && Number.isFinite(uic)) {
         return { assetType, uic }
     }
@@ -281,15 +290,6 @@ const extractInstrumentReference = (
     }
 
     return { assetType, uic }
-}
-
-const extractInstrumentDetailsPayload = (
-    payload: SaxoInstrumentDetailsResponse,
-): SaxoInstrumentDetails | null => {
-    if (payload.Data) {
-        return payload.Data[0] ?? null
-    }
-    return payload
 }
 
 const getInstrumentDisplaySymbol = (
@@ -530,12 +530,106 @@ export class SaxoClient {
     }
 
     private getAuthStore(): SaxoAuthStore {
-        this.authStore ??= new SaxoAuthStore({
-            db: this.getFirestore(),
-            tokenEncryptionKey: this.tokenEncryptionKey,
-            logger: this.logger,
-        })
+        if (this.authStore) return this.authStore
+
+        let db: Firestore
+        try {
+            db = this.getFirestore()
+        } catch (error) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'firestore_error',
+                description: 'Failed to initialize Saxo auth storage',
+                operation: 'initialize_firestore',
+                cause: error,
+            })
+        }
+
+        try {
+            this.authStore = new SaxoAuthStore({
+                db,
+                tokenEncryptionKey: this.tokenEncryptionKey,
+                logger: this.logger,
+            })
+        } catch (error) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'decrypt_failed',
+                description: 'Saxo auth encryption configuration is unavailable or invalid',
+                operation: 'initialize_auth_store',
+                cause: error,
+            })
+        }
         return this.authStore
+    }
+
+    private async fetchJsonResponse(
+        url: string,
+        init: RequestInit,
+        diagnostic: {
+            stage: SaxoSnapshotStage
+            upstreamPath: string
+            operation: string
+            description: string
+            failureReason?: 'refresh_failed'
+            descriptionForStatus?: (status: number) => string
+        },
+    ): Promise<unknown> {
+        const failureReason = diagnostic.failureReason
+        let response: Response
+        try {
+            response = await this.fetchImpl(url, init)
+        } catch (error) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: diagnostic.stage,
+                reason: failureReason ?? 'network_error',
+                description: diagnostic.description,
+                operation: diagnostic.operation,
+                upstream_path: diagnostic.upstreamPath,
+                cause: error,
+            })
+        }
+
+        if (!response.ok) {
+            await cancelResponseBody(response)
+            throw createSaxoSnapshotDiagnosticError({
+                stage: diagnostic.stage,
+                reason: failureReason ?? 'http_error',
+                description: diagnostic.descriptionForStatus?.(response.status) ?? diagnostic.description,
+                operation: diagnostic.operation,
+                upstream_path: diagnostic.upstreamPath,
+                upstream_status: response.status,
+            })
+        }
+
+        let body: string
+        try {
+            body = await response.text()
+        } catch (error) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: diagnostic.stage,
+                reason: failureReason ?? 'network_error',
+                description: diagnostic.description,
+                operation: diagnostic.operation,
+                upstream_path: diagnostic.upstreamPath,
+                upstream_status: response.status,
+                cause: error,
+            })
+        }
+
+        try {
+            return JSON.parse(body) as unknown
+        } catch (error) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: diagnostic.stage,
+                reason: failureReason ?? 'invalid_json',
+                description: diagnostic.description,
+                operation: diagnostic.operation,
+                upstream_path: diagnostic.upstreamPath,
+                upstream_status: response.status,
+                cause: error,
+            })
+        }
     }
 
     private buildSaxoApiUrl(pathOrUrl: string): string {
@@ -1634,20 +1728,43 @@ export class SaxoClient {
     }
 
     async getAuth(): Promise<SaxoAuthData | null> {
-        return this.getAuthStore().getAuth()
+        try {
+            return await this.getAuthStore().getAuth()
+        } catch (error) {
+            throw toSaxoSnapshotDiagnosticError(error, {
+                stage: 'auth_read',
+                reason: 'firestore_error',
+                description: 'Failed to read Saxo auth document',
+                operation: 'read_auth_document',
+            })
+        }
     }
 
     async saveAuth(data: SaxoAuthData): Promise<void> {
-        await this.getAuthStore().saveAuth(data)
+        try {
+            await this.getAuthStore().saveAuth(data)
+        } catch (error) {
+            throw toSaxoSnapshotDiagnosticError(error, {
+                stage: 'auth_read',
+                reason: 'firestore_error',
+                description: 'Failed to save Saxo auth document',
+                operation: 'save_auth_document',
+            })
+        }
     }
 
     async refreshAccessToken(refreshToken: string): Promise<SaxoAuthData> {
         if (!this.appKey || !this.appSecret) {
-            throw new Error('Saxo app credentials missing')
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'auth_refresh',
+                reason: 'refresh_failed',
+                description: 'Saxo app credentials missing',
+                operation: 'refresh_token',
+            })
         }
 
         const basicAuth = Buffer.from(`${this.appKey}:${this.appSecret}`).toString('base64')
-        const response = await this.fetchImpl(`${this.authBaseUrl}/token`, {
+        const payload = await this.fetchJsonResponse(`${this.authBaseUrl}/token`, {
             method: 'POST',
             headers: {
                 'Authorization': `Basic ${basicAuth}`,
@@ -1657,21 +1774,48 @@ export class SaxoClient {
                 grant_type: 'refresh_token',
                 refresh_token: refreshToken,
             }),
+        }, {
+            stage: 'auth_refresh',
+            upstreamPath: '/token',
+            operation: 'refresh_token',
+            description: 'Failed to refresh Saxo token',
+            descriptionForStatus: (status) => `Failed to refresh Saxo token (HTTP ${status})`,
+            failureReason: 'refresh_failed',
         })
 
-        if (!response.ok) {
-            await cancelResponseBody(response)
-            throw new Error(`Failed to refresh Saxo token (HTTP ${response.status})`)
+        if (!isRecord(payload) ||
+            typeof payload.access_token !== 'string' || payload.access_token.length === 0 ||
+            typeof payload.refresh_token !== 'string' || payload.refresh_token.length === 0 ||
+            !isFiniteNumber(payload.expires_in) || payload.expires_in <= 0 ||
+            !isFiniteNumber(payload.refresh_token_expires_in) || payload.refresh_token_expires_in <= 0) {
+            const fieldPath = !isRecord(payload)
+                ? '$'
+                : typeof payload.access_token !== 'string' || payload.access_token.length === 0
+                    ? 'access_token'
+                    : typeof payload.refresh_token !== 'string' || payload.refresh_token.length === 0
+                        ? 'refresh_token'
+                        : !isFiniteNumber(payload.expires_in) || payload.expires_in <= 0
+                            ? 'expires_in'
+                            : 'refresh_token_expires_in'
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'auth_refresh',
+                reason: 'invalid_response',
+                description: 'Invalid Saxo token response',
+                operation: 'validate_token_response',
+                upstream_path: '/token',
+                field_path: fieldPath,
+                expected_type: fieldPath === '$' ? 'object' : 'non-empty string or positive number',
+            })
         }
 
-        const payload = (await response.json()) as SaxoTokenResponse
-        const accounts = await this.fetchAccounts(payload.access_token)
+        const tokenResponse = payload as unknown as SaxoTokenResponse
+        const accounts = await this.fetchAccounts(tokenResponse.access_token)
 
         const authData: SaxoAuthData = {
-            accessToken: payload.access_token,
-            refreshToken: payload.refresh_token,
-            accessTokenExpiresAt: Date.now() + payload.expires_in * 1000,
-            refreshTokenExpiresAt: Date.now() + payload.refresh_token_expires_in * 1000,
+            accessToken: tokenResponse.access_token,
+            refreshToken: tokenResponse.refresh_token,
+            accessTokenExpiresAt: Date.now() + tokenResponse.expires_in * 1000,
+            refreshTokenExpiresAt: Date.now() + tokenResponse.refresh_token_expires_in * 1000,
             accounts,
         }
 
@@ -1719,28 +1863,91 @@ export class SaxoClient {
     }
 
     private async fetchAccounts(accessToken: string): Promise<SaxoAccountInfo[]> {
-        const accountResp = await this.fetchImpl(`${this.baseUrl}/port/v1/accounts/me`, {
+        const accountData = await this.fetchJsonResponse(`${this.baseUrl}/port/v1/accounts/me`, {
             headers: { Authorization: `Bearer ${accessToken}` },
+        }, {
+            stage: 'accounts',
+            upstreamPath: '/port/v1/accounts/me',
+            operation: 'fetch_accounts',
+            description: 'Failed to fetch Saxo accounts',
+            descriptionForStatus: (status) => `Failed to fetch Saxo account key: ${status}`,
         })
-        if (!accountResp.ok) {
-            throw new Error(`Failed to fetch Saxo account key: ${accountResp.status}`)
+        if (!isRecord(accountData) || !Array.isArray(accountData.Data)) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'accounts',
+                reason: 'invalid_response',
+                description: 'Invalid Saxo accounts response',
+                operation: 'validate_accounts_response',
+                upstream_path: '/port/v1/accounts/me',
+                field_path: isRecord(accountData) ? 'Data' : '$',
+                expected_type: isRecord(accountData) ? 'array' : 'object',
+            })
         }
-        const accountData = (await accountResp.json()) as SaxoAccountMeResponse
         if (!accountData.Data || accountData.Data.length === 0) {
-            throw new Error('No Saxo accounts found')
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'accounts',
+                reason: 'no_accounts',
+                description: 'No Saxo accounts found',
+                operation: 'validate_accounts_response',
+                upstream_path: '/port/v1/accounts/me',
+                field_path: 'Data',
+                expected_type: 'non-empty array',
+            })
         }
-        return accountData.Data.map((acc) => ({
-            accountKey: acc.AccountKey,
-            clientKey: acc.ClientKey,
-            legalAssetTypes: acc.LegalAssetTypes,
-            currency: acc.Currency,
-            displayName: acc.DisplayName,
-        }))
+        return accountData.Data.map((account, index) => {
+            const basePath = `Data[${index}]`
+            const invalid = (field: string, expectedType: string): never => {
+                throw createSaxoSnapshotDiagnosticError({
+                    stage: 'accounts',
+                    reason: 'invalid_response',
+                    description: 'Invalid Saxo accounts response',
+                    operation: 'validate_accounts_response',
+                    upstream_path: '/port/v1/accounts/me',
+                    field_path: field.startsWith('Data[') ? field : `${basePath}.${field}`,
+                    expected_type: expectedType,
+                })
+            }
+            if (!isRecord(account)) invalid(basePath, 'object')
+            if (typeof account.AccountKey !== 'string') invalid('AccountKey', 'string')
+            if (typeof account.ClientKey !== 'string') invalid('ClientKey', 'string')
+            if (!Array.isArray(account.LegalAssetTypes) ||
+                !account.LegalAssetTypes.every((assetType: unknown) => typeof assetType === 'string')) {
+                invalid('LegalAssetTypes', 'string[]')
+            }
+            if (account.Currency !== undefined && account.Currency !== null && typeof account.Currency !== 'string') {
+                invalid('Currency', 'string when non-null')
+            }
+            if (typeof account.DisplayName !== 'string') invalid('DisplayName', 'string')
+            return {
+                accountKey: account.AccountKey,
+                clientKey: account.ClientKey,
+                legalAssetTypes: account.LegalAssetTypes as string[],
+                // Store a string for auth-document validation; the empty value keeps the
+                // existing normalizeCurrencyCode(... ) fallback behavior.
+                currency: typeof account.Currency === 'string' ? account.Currency : '',
+                displayName: account.DisplayName,
+            }
+        })
     }
 
-    async getValidAccessToken(): Promise<string | null> {
+    private tokenUnavailable(
+        diagnostic: SaxoSnapshotDiagnosticError,
+        strict: boolean,
+    ): null {
+        if (strict) throw diagnostic
+        return null
+    }
+
+    private async resolveValidAccessToken(strict: boolean): Promise<string | null> {
         let auth = await this.getAuth()
-        if (!auth) return null
+        if (!auth) {
+            return this.tokenUnavailable(createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'auth_missing',
+                description: 'Saxo auth document is missing',
+                operation: 'read_auth_document',
+            }), strict)
+        }
 
         // Refresh if expiring in less than 1 minute
         if (auth.accessTokenExpiresAt >= Date.now() + 60 * 1000) {
@@ -1748,12 +1955,24 @@ export class SaxoClient {
         }
 
         if (auth.refreshTokenExpiresAt < Date.now() + 60 * 1000) {
-            return null // Refresh token also expired
+            return this.tokenUnavailable(createSaxoSnapshotDiagnosticError({
+                stage: 'auth_refresh',
+                reason: 'refresh_token_expired',
+                description: 'Saxo refresh token is expired',
+                operation: 'refresh_token',
+            }), strict)
         }
 
         const authStore = this.getAuthStore()
         const lease = await authStore.acquireRefreshLease()
-        if (lease.status === 'missing') return null
+        if (lease.status === 'missing') {
+            return this.tokenUnavailable(createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'auth_missing',
+                description: 'Saxo auth document is missing',
+                operation: 'acquire_refresh_lease',
+            }), strict)
+        }
         if (lease.status === 'already-fresh') return lease.auth.accessToken
         if (lease.status === 'already-refreshing') {
             // Wait for the other process to finish refreshing
@@ -1764,14 +1983,32 @@ export class SaxoClient {
                     return auth.accessToken
                 }
             }
-            this.logger.warn({ event: 'saxo:token_refresh_timeout' }, 'Timed out waiting for Saxo token refresh lock')
-            return null
+            const diagnostic = createSaxoSnapshotDiagnosticError({
+                stage: 'auth_refresh',
+                reason: 'refresh_wait_timeout',
+                description: 'Timed out waiting for Saxo token refresh lock',
+                operation: 'wait_for_refresh',
+            })
+            if (!strict) {
+                this.logger.warn({
+                    event: 'saxo:token_refresh_timeout',
+                    stage: diagnostic.diagnostic.stage,
+                    reason: diagnostic.diagnostic.reason,
+                    operation: diagnostic.diagnostic.operation,
+                }, 'Timed out waiting for Saxo token refresh lock')
+            }
+            return this.tokenUnavailable(diagnostic, strict)
         }
 
         auth = lease.auth
         if (auth.refreshTokenExpiresAt < Date.now() + 60 * 1000) {
             await authStore.releaseRefreshLease()
-            return null
+            return this.tokenUnavailable(createSaxoSnapshotDiagnosticError({
+                stage: 'auth_refresh',
+                reason: 'refresh_token_expired',
+                description: 'Saxo refresh token is expired',
+                operation: 'refresh_token',
+            }), strict)
         }
 
         try {
@@ -1779,11 +2016,52 @@ export class SaxoClient {
             // refreshAccessToken calls saveAuth (using .set) which overwrites the whole document, effectively clearing the lock.
             return newAuth.accessToken
         } catch (error) {
-            this.logger.warn({ event: 'saxo:token_refresh_failed', error }, 'Failed to auto-refresh Saxo token')
+            const refreshFailure = toSaxoSnapshotDiagnosticError(error, {
+                stage: 'auth_refresh',
+                reason: 'refresh_failed',
+                description: 'Failed to refresh Saxo token',
+                operation: 'refresh_token',
+            })
+            if (!strict) {
+                this.logger.warn({
+                    event: 'saxo:token_refresh_failed',
+                    ...refreshFailure.diagnostic,
+                    error: refreshFailure,
+                }, 'Failed to auto-refresh Saxo token')
+            }
             // Release lock on failure
-            await authStore.releaseRefreshLease()
+            try {
+                await authStore.releaseRefreshLease()
+            } catch (releaseError) {
+                throw createSaxoSnapshotDiagnosticError({
+                    stage: 'auth_refresh',
+                    reason: 'firestore_error',
+                    description: 'Failed to release Saxo refresh lease after token refresh failure',
+                    operation: 'release_refresh_lease',
+                    cause: refreshFailure,
+                    secondaryCause: releaseError,
+                })
+            }
+            if (strict) throw refreshFailure
             return null
         }
+    }
+
+    async getValidAccessToken(): Promise<string | null> {
+        return this.resolveValidAccessToken(false)
+    }
+
+    private async getValidAccessTokenForPortfolioSnapshot(): Promise<string> {
+        const accessToken = await this.resolveValidAccessToken(true)
+        if (!accessToken) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'auth_read',
+                reason: 'auth_missing',
+                description: 'Saxo auth document is missing',
+                operation: 'read_auth_document',
+            })
+        }
+        return accessToken
     }
 
     async sendMarketOrder(order: OrderRequest): Promise<OrderDispatchResult> {
@@ -1985,34 +2263,99 @@ export class SaxoClient {
     }
 
     private async fetchPortfolioBalance(accessToken: string): Promise<SaxoBalanceResponse> {
-        const response = await this.fetchImpl(`${this.baseUrl}/port/v1/balances/me`, {
+        const data = await this.fetchJsonResponse(`${this.baseUrl}/port/v1/balances/me`, {
             headers: {
                 Authorization: `Bearer ${accessToken}`,
             },
+        }, {
+            stage: 'balance',
+            upstreamPath: '/port/v1/balances/me',
+            operation: 'fetch_balance',
+            description: 'Failed to fetch Saxo balance',
         })
 
-        if (!response.ok) {
-            const body = await response.text()
-            throw new Error(`Failed to fetch Saxo balances: ${response.status} ${body}`)
+        if (!isRecord(data)) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'balance',
+                reason: 'invalid_response',
+                description: 'Invalid Saxo balance response',
+                operation: 'validate_balance_response',
+                upstream_path: '/port/v1/balances/me',
+                field_path: '$',
+                expected_type: 'object',
+            })
         }
 
-        return (await response.json()) as SaxoBalanceResponse
+        for (const field of ['CashBalance', 'CashAvailableForTrading', 'TotalValue', 'NetEquity']) {
+            if (!isNullishOrFiniteNumber(data[field])) {
+                throw createSaxoSnapshotDiagnosticError({
+                    stage: 'balance',
+                    reason: 'invalid_response',
+                    description: 'Invalid Saxo balance response',
+                    operation: 'validate_balance_response',
+                    upstream_path: '/port/v1/balances/me',
+                    field_path: field,
+                    expected_type: 'finite number when non-null',
+                })
+            }
+        }
+        if (!isNullishOrString(data.Currency)) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'balance',
+                reason: 'invalid_response',
+                description: 'Invalid Saxo balance response',
+                operation: 'validate_balance_response',
+                upstream_path: '/port/v1/balances/me',
+                field_path: 'Currency',
+                expected_type: 'string when non-null',
+            })
+        }
+        return data as SaxoBalanceResponse
     }
 
     private async fetchNetPositions(accessToken: string): Promise<SaxoNetPosition[]> {
-        const response = await this.fetchImpl(`${this.baseUrl}/port/v1/netpositions/me`, {
+        const data = await this.fetchJsonResponse(`${this.baseUrl}/port/v1/netpositions/me`, {
             headers: {
                 Authorization: `Bearer ${accessToken}`,
             },
+        }, {
+            stage: 'net_positions',
+            upstreamPath: '/port/v1/netpositions/me',
+            operation: 'fetch_net_positions',
+            description: 'Failed to fetch Saxo net positions',
         })
 
-        if (!response.ok) {
-            const body = await response.text()
-            throw new Error(`Failed to fetch Saxo positions: ${response.status} ${body}`)
+        if (!isRecord(data) || !Array.isArray(data.Data)) {
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'net_positions',
+                reason: 'invalid_response',
+                description: 'Invalid Saxo net positions response',
+                operation: 'validate_net_positions_response',
+                upstream_path: '/port/v1/netpositions/me',
+                field_path: isRecord(data) ? 'Data' : '$',
+                expected_type: isRecord(data) ? 'array' : 'object',
+            })
         }
 
-        const data = (await response.json()) as SaxoNetPositionsResponse
-        return data.Data
+        return data.Data.map((position, index) => {
+            const basePath = `Data[${index}]`
+            const invalid = (field: string, expectedType: string): never => {
+                throw createSaxoSnapshotDiagnosticError({
+                    stage: 'net_positions',
+                    reason: 'invalid_response',
+                    description: 'Invalid Saxo net positions response',
+                    operation: 'validate_net_positions_response',
+                    upstream_path: '/port/v1/netpositions/me',
+                    field_path: field.startsWith('Data[') ? field : `${basePath}.${field}`,
+                    expected_type: expectedType,
+                })
+            }
+            if (!isRecord(position)) invalid(basePath, 'object')
+            if (typeof position.NetPositionId !== 'string' || position.NetPositionId.length === 0) {
+                invalid('NetPositionId', 'non-empty string')
+            }
+            return position as unknown as SaxoNetPosition
+        })
     }
 
     private purgeExpiredInstrumentDetailsCache(nowMs = Date.now()): void {
@@ -2039,59 +2382,106 @@ export class SaxoClient {
         }
 
         const url = `${this.baseUrl}/ref/v1/instruments/details/${uic}/${encodeURIComponent(assetType)}`
-        let response: Response
+        let payload: unknown
         try {
-            response = await this.fetchImpl(url, {
+            payload = await this.fetchJsonResponse(url, {
                 headers: {
                     Authorization: `Bearer ${accessToken}`,
                 },
+            }, {
+                stage: 'instrument_details',
+                upstreamPath: '/ref/v1/instruments/details/{uic}/{assetType}',
+                operation: 'fetch_instrument_details',
+                description: 'Failed to fetch Saxo instrument details',
             })
         } catch (error) {
+            const diagnostic = toSaxoSnapshotDiagnosticError(error, {
+                stage: 'instrument_details',
+                reason: 'unexpected_error',
+                description: 'Failed to fetch Saxo instrument details',
+                operation: 'fetch_instrument_details',
+                upstream_path: '/ref/v1/instruments/details/{uic}/{assetType}',
+            })
             this.logger.warn(
                 {
-                    event: 'saxo:instrument_details_failed',
-                    error,
-                    assetType,
-                    uic,
+                    event: diagnostic.diagnostic.reason === 'invalid_json' ||
+                        diagnostic.diagnostic.reason === 'invalid_response'
+                        ? 'saxo:instrument_details_parse_failed'
+                        : 'saxo:instrument_details_failed',
+                    ...diagnostic.diagnostic,
                 },
                 'failed to fetch Saxo instrument details',
             )
             return null
         }
 
-        if (!response.ok) {
-            const body = await response.text()
-            this.logger.warn(
-                {
-                    event: 'saxo:instrument_details_failed',
-                    status: response.status,
-                    response: body,
-                    assetType,
-                    uic,
-                },
-                'failed to fetch Saxo instrument details',
-            )
-            return null
-        }
-
-        let payload: SaxoInstrumentDetailsResponse
-        try {
-            payload = (await response.json()) as SaxoInstrumentDetailsResponse
-        } catch (error) {
+        const invalidDetails = (fieldPath: string, expectedType: string): null => {
+            const diagnostic = createSaxoSnapshotDiagnosticError({
+                stage: 'instrument_details',
+                reason: 'invalid_response',
+                description: 'Invalid Saxo instrument details response',
+                operation: 'validate_instrument_details_response',
+                upstream_path: '/ref/v1/instruments/details/{uic}/{assetType}',
+                field_path: fieldPath,
+                expected_type: expectedType,
+            })
             this.logger.warn(
                 {
                     event: 'saxo:instrument_details_parse_failed',
-                    error,
-                    assetType,
-                    uic,
+                    ...diagnostic.diagnostic,
                 },
                 'failed to parse Saxo instrument details',
             )
             return null
         }
-        const details = extractInstrumentDetailsPayload(payload)
-        if (!details) {
-            return null
+
+        if (!isRecord(payload)) return invalidDetails('$', 'object')
+
+        let rawDetails: unknown = payload
+        if (payload.Data) {
+            if (!Array.isArray(payload.Data)) return invalidDetails('Data', 'array')
+            if (payload.Data.length === 0) return invalidDetails('Data', 'non-empty array')
+            rawDetails = payload.Data[0]
+        }
+        if (!isRecord(rawDetails)) return invalidDetails('Data[0]', 'object')
+
+        let displayAndFormat: Record<string, unknown> | undefined
+        if (rawDetails.DisplayAndFormat !== undefined && rawDetails.DisplayAndFormat !== null) {
+            if (isRecord(rawDetails.DisplayAndFormat)) {
+                displayAndFormat = rawDetails.DisplayAndFormat
+            } else {
+                // The existing snapshot mapping treats a non-object optional display block as absent.
+                // Keep any valid top-level symbol/name/currency fallback available.
+                invalidDetails('DisplayAndFormat', 'object when non-null')
+            }
+        }
+        const selectedStringFields = [
+            {
+                fieldPath: displayAndFormat?.Symbol !== undefined && displayAndFormat.Symbol !== null
+                    ? 'DisplayAndFormat.Symbol'
+                    : 'Symbol',
+                value: displayAndFormat?.Symbol ?? rawDetails.Symbol,
+            },
+            {
+                fieldPath: displayAndFormat?.Description !== undefined && displayAndFormat.Description !== null
+                    ? 'DisplayAndFormat.Description'
+                    : 'Description',
+                value: displayAndFormat?.Description ?? rawDetails.Description,
+            },
+            {
+                fieldPath: displayAndFormat?.Currency !== undefined && displayAndFormat.Currency !== null
+                    ? 'DisplayAndFormat.Currency'
+                    : 'CurrencyCode',
+                value: displayAndFormat?.Currency ?? rawDetails.CurrencyCode,
+            },
+        ]
+        for (const { fieldPath, value } of selectedStringFields) {
+            if (!isNullishOrString(value)) return invalidDetails(fieldPath, 'string when non-null')
+        }
+
+        const details = rawDetails as SaxoInstrumentDetails
+        if (Object.keys(details).length === 0) {
+            return invalidDetails('Data[0]', 'instrument detail object')
         }
 
         this.instrumentDetailsCache.set(cacheKey, {
@@ -2111,27 +2501,45 @@ export class SaxoClient {
         }
 
         this.purgeExpiredInstrumentDetailsCache()
-        const entries = await mapWithConcurrency(
-            [...uniqueReferences.entries()],
-            SAXO_INSTRUMENT_DETAILS_FETCH_CONCURRENCY,
-            async ([key, reference]) => [
-                key,
-                await this.getInstrumentDetails(accessToken, reference.assetType, reference.uic),
-            ] as const,
-        )
+        let entries: Array<readonly [string, SaxoInstrumentDetails | null]>
+        try {
+            entries = await mapWithConcurrency(
+                [...uniqueReferences.entries()],
+                SAXO_INSTRUMENT_DETAILS_FETCH_CONCURRENCY,
+                async ([key, reference]) => [
+                    key,
+                    await this.getInstrumentDetails(accessToken, reference.assetType, reference.uic),
+                ] as const,
+            )
+        } catch (error) {
+            const diagnostic = toSaxoSnapshotDiagnosticError(error, {
+                stage: 'instrument_details',
+                reason: 'unexpected_error',
+                description: 'Failed to fetch Saxo instrument details',
+                operation: 'fetch_instrument_details',
+                upstream_path: '/ref/v1/instruments/details/{uic}/{assetType}',
+            })
+            this.logger.warn({
+                event: 'saxo:instrument_details_failed',
+                ...diagnostic.diagnostic,
+            }, 'failed to fetch Saxo instrument details')
+            return new Map([...uniqueReferences.keys()].map((key) => [key, null]))
+        }
         return new Map(entries)
     }
 
     async getPortfolioSnapshot(): Promise<PortfolioSnapshotV1> {
-        const accessToken = await this.getValidAccessToken()
-        if (!accessToken) {
-            throw new Error('Saxo auth is missing or expired')
-        }
+        const accessToken = await this.getValidAccessTokenForPortfolioSnapshot()
 
         const accounts = await this.getPortfolioAccounts(accessToken)
         const primaryAccount = accounts[0]
         if (!primaryAccount) {
-            throw new Error('No Saxo accounts found')
+            throw createSaxoSnapshotDiagnosticError({
+                stage: 'accounts',
+                reason: 'no_accounts',
+                description: 'No Saxo accounts found',
+                operation: 'select_primary_account',
+            })
         }
 
         const [balance, rawPositions] = await Promise.all([
@@ -2154,15 +2562,37 @@ export class SaxoClient {
         const instrumentReferences: Array<{ assetType: string; uic: number }> = []
         for (const rawPosition of rawPositions) {
             const { assetType, uic } = extractInstrumentReference(rawPosition)
-            if (assetType && typeof uic === 'number' && Number.isFinite(uic) && mapSaxoAssetClass(assetType) !== null) {
+            if (typeof assetType === 'string' && assetType &&
+                typeof uic === 'number' && Number.isFinite(uic) && mapSaxoAssetClass(assetType) !== null) {
                 instrumentReferences.push({ assetType, uic })
             }
         }
         const instrumentDetailsByKey = await this.fetchInstrumentDetailsByKey(accessToken, instrumentReferences)
 
-        for (const rawPosition of rawPositions) {
+        for (const [positionIndex, rawPosition] of rawPositions.entries()) {
+            const basePath = `Data[${positionIndex}]`
+            const invalid = (field: string, expectedType: string): never => {
+                throw createSaxoSnapshotDiagnosticError({
+                    stage: 'net_positions',
+                    reason: 'invalid_response',
+                    description: 'Invalid Saxo net positions response',
+                    operation: 'validate_net_positions_response',
+                    upstream_path: '/port/v1/netpositions/me',
+                    field_path: field.startsWith('Data[') ? field : `${basePath}.${field}`,
+                    expected_type: expectedType,
+                })
+            }
             const { assetType, uic } = extractInstrumentReference(rawPosition)
-            if (!assetType || typeof uic !== 'number' || !Number.isFinite(uic)) {
+            const base = isRecord(rawPosition.NetPositionBase) ? rawPosition.NetPositionBase : undefined
+            if (assetType !== undefined && assetType !== null && typeof assetType !== 'string') {
+                invalid(
+                    base?.AssetType !== undefined && base.AssetType !== null
+                        ? 'NetPositionBase.AssetType'
+                        : 'AssetType',
+                    'string when non-null',
+                )
+            }
+            if (typeof assetType !== 'string' || !assetType || typeof uic !== 'number' || !Number.isFinite(uic)) {
                 skippedPositions.push({
                     sourcePositionId: rawPosition.NetPositionId,
                     reason: 'missing_instrument_reference',
@@ -2181,6 +2611,73 @@ export class SaxoClient {
                 continue
             }
 
+            const requiredBase = base ?? invalid('NetPositionBase', 'object')
+            if (!isFiniteNumber(requiredBase.Amount)) invalid('NetPositionBase.Amount', 'finite number')
+            if (requiredBase.Amount !== 0 && requiredBase.OpeningDirection !== 'Buy' && requiredBase.OpeningDirection !== 'Sell') {
+                invalid('NetPositionBase.OpeningDirection', 'Buy or Sell for non-flat position')
+            }
+            const view = isRecord(rawPosition.NetPositionView)
+                ? rawPosition.NetPositionView
+                : invalid('NetPositionView', 'object')
+
+            const accountKey = requiredBase.AccountKey ?? rawPosition.AccountKey
+            if (!isNullishOrString(accountKey)) {
+                invalid(
+                    requiredBase.AccountKey !== undefined && requiredBase.AccountKey !== null
+                        ? 'NetPositionBase.AccountKey'
+                        : 'AccountKey',
+                    'string when non-null',
+                )
+            }
+            if (!isNullishOrString(view.Currency)) invalid('NetPositionView.Currency', 'string when non-null')
+
+            const selectedPrice = view.CurrentPrice ?? view.Price ?? view.AverageOpenPrice
+            const selectedPriceField = view.CurrentPrice !== undefined && view.CurrentPrice !== null
+                ? 'CurrentPrice'
+                : view.Price !== undefined && view.Price !== null
+                    ? 'Price'
+                    : 'AverageOpenPrice'
+            if (selectedPrice !== undefined && !isFiniteNumber(selectedPrice)) {
+                invalid(`NetPositionView.${selectedPriceField}`, 'finite number when selected')
+            }
+
+            const validatedAccountCurrencyPnl = view.ProfitLossOnTradeInBaseCurrency
+            const validatedTradeCurrencyPnl = view.ProfitLossOnTrade
+            const selectedPnl = validatedAccountCurrencyPnl ?? validatedTradeCurrencyPnl
+            const selectedPnlField = validatedAccountCurrencyPnl !== undefined && validatedAccountCurrencyPnl !== null
+                ? 'ProfitLossOnTradeInBaseCurrency'
+                : 'ProfitLossOnTrade'
+            if (selectedPnl !== undefined && selectedPnl !== null && !isFiniteNumber(selectedPnl)) {
+                invalid(`NetPositionView.${selectedPnlField}`, 'finite number when non-null')
+            }
+
+            if (isEquityContributionAssetClass(assetClass)) {
+                const selectedExposure = view.ExposureInBaseCurrency !== undefined
+                    ? view.ExposureInBaseCurrency
+                    : view.Exposure
+                const selectedExposureField = view.ExposureInBaseCurrency !== undefined
+                    ? 'ExposureInBaseCurrency'
+                    : 'Exposure'
+                if (selectedExposure !== undefined && !isFiniteNumber(selectedExposure)) {
+                    invalid(`NetPositionView.${selectedExposureField}`, 'finite number when present')
+                }
+            } else if (view.MarketValueInBaseCurrency !== undefined) {
+                if (!isFiniteNumber(view.MarketValueInBaseCurrency)) {
+                    invalid('NetPositionView.MarketValueInBaseCurrency', 'finite number when present')
+                }
+            } else {
+                const selectedMarketValue = view.MarketValue ?? view.PositionValue
+                if (selectedMarketValue !== undefined && selectedMarketValue !== null &&
+                    !isFiniteNumber(selectedMarketValue)) {
+                    invalid(
+                        view.MarketValue !== undefined && view.MarketValue !== null
+                            ? 'NetPositionView.MarketValue'
+                            : 'NetPositionView.PositionValue',
+                        'finite number when non-null',
+                    )
+                }
+            }
+
             const sourceInstrumentId = buildSaxoInstrumentKey(assetType, uic)
             const details = instrumentDetailsByKey.get(sourceInstrumentId) ?? null
             const sourceAccountId = rawPosition.NetPositionBase.AccountKey ?? rawPosition.AccountKey ?? primaryAccount.accountKey
@@ -2197,7 +2694,9 @@ export class SaxoClient {
             const accountCurrencyPnl = rawPosition.NetPositionView.ProfitLossOnTradeInBaseCurrency
             const tradeCurrencyPnl = rawPosition.NetPositionView.ProfitLossOnTrade
             const pnl = accountCurrencyPnl ?? tradeCurrencyPnl
-            const pnlCurrency = accountCurrencyPnl !== undefined ? positionAccountCurrency : priceCurrency
+            const pnlCurrency = accountCurrencyPnl !== undefined && accountCurrencyPnl !== null
+                ? positionAccountCurrency
+                : priceCurrency
             const unrealizedPnlJpy = pnl !== undefined ? toJpyDecimalString(pnl, pnlCurrency) : undefined
             const metadata: PortfolioSnapshotV1SourceMetadata = {
                 netPositionId: rawPosition.NetPositionId,
